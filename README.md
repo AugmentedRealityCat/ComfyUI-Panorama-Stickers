@@ -58,6 +58,19 @@ https://github.com/user-attachments/assets/bf74e953-8ceb-4c7f-afa2-1c805f12c7af
 - Add video workflow support.
 - Add integration with Hugin.
 
+## Acknowledgements
+
+This project was partly influenced by work from [ProGamerGov](https://github.com/ProGamerGov), especially:
+
+- [ProGamerGov/ComfyUI_pytorch360convert](https://github.com/ProGamerGov/ComfyUI_pytorch360convert)
+- [ProGamerGov/html-360-viewer](https://github.com/ProGamerGov/html-360-viewer)
+
+## Useful Tools
+
+If you want a quick way to preview an ERP image as a panorama in the browser, this viewer is handy:
+
+- [html-360-viewer demo](https://progamergov.github.io/html-360-viewer/)
+
 ## License
 
 MIT
