@@ -10029,6 +10029,7 @@ function showEditor(node, type, options = {}) {
 }
 
 function installEditorButton(nodeType, nodeData, matchType, buttonText) {
+  if (!nodeType?.prototype) return;
   const cleanupPreviewBindings = (node) => {
     try { node.__panoDomRestore?.(); } catch { }
     try { node.__panoLegacyRestore?.(); } catch { }
@@ -10126,9 +10127,24 @@ function installEditorButton(nodeType, nodeData, matchType, buttonText) {
 }
 
 function installStandalonePreviewNode(nodeType) {
-  if (!Array.isArray(nodeType?.prototype?.size) || nodeType.prototype.size[0] < 100 || nodeType.prototype.size[1] < 100) {
-    nodeType.prototype.size = [360, 260];
-  }
+  if (!nodeType?.prototype) return;
+  const ensurePreviewSize = function () {
+    if (!Array.isArray(this.size) || this.size[0] < 100 || this.size[1] < 100) {
+      this.size = [360, 260];
+    }
+  };
+  const prev = nodeType.prototype.onNodeCreated;
+  nodeType.prototype.onNodeCreated = function () {
+    const r = prev ? prev.apply(this, arguments) : undefined;
+    ensurePreviewSize.call(this);
+    return r;
+  };
+  const prevConfigure = nodeType.prototype.onConfigure;
+  nodeType.prototype.onConfigure = function () {
+    const r = prevConfigure ? prevConfigure.apply(this, arguments) : undefined;
+    ensurePreviewSize.call(this);
+    return r;
+  };
 }
 
 function installStandalonePreviewInstance(node) {
