@@ -10029,6 +10029,7 @@ function showEditor(node, type, options = {}) {
 }
 
 function installEditorButton(nodeType, nodeData, matchType, buttonText) {
+  if (!nodeType?.prototype) return;
   const cleanupPreviewBindings = (node) => {
     try { node.__panoDomRestore?.(); } catch { }
     try { node.__panoLegacyRestore?.(); } catch { }
