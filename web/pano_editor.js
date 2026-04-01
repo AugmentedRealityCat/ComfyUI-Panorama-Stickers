@@ -10126,9 +10126,15 @@ function installEditorButton(nodeType, nodeData, matchType, buttonText) {
 }
 
 function installStandalonePreviewNode(nodeType) {
-  if (!Array.isArray(nodeType?.prototype?.size) || nodeType.prototype.size[0] < 100 || nodeType.prototype.size[1] < 100) {
-    nodeType.prototype.size = [360, 260];
-  }
+  if (!nodeType?.prototype) return;
+  const prev = nodeType.prototype.onNodeCreated;
+  nodeType.prototype.onNodeCreated = function () {
+    const r = prev ? prev.apply(this, arguments) : undefined;
+    if (!Array.isArray(this.size) || this.size[0] < 100 || this.size[1] < 100) {
+      this.size = [360, 260];
+    }
+    return r;
+  };
 }
 
 function installStandalonePreviewInstance(node) {
