@@ -10128,12 +10128,21 @@ function installEditorButton(nodeType, nodeData, matchType, buttonText) {
 
 function installStandalonePreviewNode(nodeType) {
   if (!nodeType?.prototype) return;
-  const prev = nodeType.prototype.onNodeCreated;
-  nodeType.prototype.onNodeCreated = function () {
-    const r = prev ? prev.apply(this, arguments) : undefined;
+  const ensurePreviewSize = function () {
     if (!Array.isArray(this.size) || this.size[0] < 100 || this.size[1] < 100) {
       this.size = [360, 260];
     }
+  };
+  const prev = nodeType.prototype.onNodeCreated;
+  nodeType.prototype.onNodeCreated = function () {
+    const r = prev ? prev.apply(this, arguments) : undefined;
+    ensurePreviewSize.call(this);
+    return r;
+  };
+  const prevConfigure = nodeType.prototype.onConfigure;
+  nodeType.prototype.onConfigure = function () {
+    const r = prevConfigure ? prevConfigure.apply(this, arguments) : undefined;
+    ensurePreviewSize.call(this);
     return r;
   };
 }
