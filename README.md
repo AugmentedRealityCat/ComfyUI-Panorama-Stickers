@@ -42,10 +42,6 @@ https://github.com/user-attachments/assets/bf74e953-8ceb-4c7f-afa2-1c805f12c7af
 
 ## Changelog
 
-### 1.2.3
-
-- Completed Phase 1 frontend bundling cleanup and single-entry delivery.
-
 ### 1.2.0
 
 - Added Paint / Mask tools to the modal panorama editor.
