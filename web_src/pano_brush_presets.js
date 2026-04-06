@@ -7,7 +7,7 @@
 // Schema fields:
 //   id              — unique key, matches the object key in BRUSH_PRESETS
 //   label           — display name
-//   stampKind       — "round" | "chisel"
+//   stampKind       — "round" | "chisel" | "crayon"
 //   hardness        — edge sharpness 0..1  (0 = very soft, 1 = hard)
 //   spacing         — stamp interval as fraction of diameter (e.g. 0.14 = dense)
 //   flow            — per-stamp opacity contribution 0..1 (baked into stamp texture)

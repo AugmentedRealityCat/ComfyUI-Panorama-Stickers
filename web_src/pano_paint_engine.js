@@ -929,8 +929,7 @@ export function createPaintEngineManager(options = {}) {
   function ensureTarget(_descriptor) {
     if (activeLayerKind === "mask") return maskTarget;
     if (!activeGroupId) return paintScratchTarget;
-    if (activeGroupId) return ensureGroupTarget(activeGroupId);
-    return ensureGroupTarget("__default__");
+    return ensureGroupTarget(activeGroupId);
   }
 
   // ─── Composition ────────────────────────────────────────────────────────────
@@ -1252,10 +1251,6 @@ export function createPaintEngineManager(options = {}) {
     _groupPreviewTmp = resizeSurface(_groupPreviewTmp, ERP_W, ERP_H);
     clearSurface(_groupPreviewTmp);
     _groupPreviewTmp.ctx.drawImage(group.committedPaint.canvas, 0, 0);
-    if (as.isEraser) {
-      applyEraserToSurface(_groupPreviewTmp.ctx, sharedCurrentStroke.canvas);
-      return _groupPreviewTmp.canvas;
-    }
     const opacity = group.lassoPreviewActive
       ? 0.5
       : Math.max(0, Math.min(1, as.strokeOpacity ?? 1));

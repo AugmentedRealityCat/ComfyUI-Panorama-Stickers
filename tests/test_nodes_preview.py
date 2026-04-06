@@ -5,6 +5,14 @@ from pathlib import Path
 from types import ModuleType, SimpleNamespace
 
 class TestNodesPreview(unittest.TestCase):
+    def _web_source_path(self, *parts):
+        repo_root = Path(__file__).resolve().parent.parent
+        return repo_root / "web_src" / Path(*parts)
+
+    def _web_runtime_path(self, *parts):
+        repo_root = Path(__file__).resolve().parent.parent
+        return repo_root / "web" / Path(*parts)
+
     def setUp(self):
         class _NodeOutput:
             def __init__(self, *result, ui=None):
@@ -225,47 +233,41 @@ class TestNodesPreview(unittest.TestCase):
         assert input_types["required"]["erp_image"] == ("IMAGE",)
 
     def test_preview_frontend_route_is_isolated(self):
-        repo_root = Path(__file__).resolve().parent.parent
-        preview_wire = (repo_root / "web" / "pano_node_preview.js").read_text(encoding="utf-8")
+        preview_wire = self._web_source_path("pano_node_preview.js").read_text(encoding="utf-8")
         assert "attachPreviewNodeRuntime" in preview_wire
         assert 'mode: "stickers"' not in preview_wire.split("export function attachPreviewNode", 1)[1].split("export function attachStickersNodePreview", 1)[0]
         assert "runtimeAttachPanoramaPreview(target" not in preview_wire
 
     def test_preview_editor_attach_is_node_created_only(self):
-        repo_root = Path(__file__).resolve().parent.parent
-        editor_js = (repo_root / "web" / "pano_editor.js").read_text(encoding="utf-8")
+        editor_js = self._web_source_path("pano_editor.js").read_text(encoding="utf-8")
         install_block = editor_js.split("function installStandalonePreviewNode", 1)[1].split("function installStandalonePreviewInstance", 1)[0]
         assert "attachPreviewNode(nodeType" not in install_block
         assert "attachPreviewNode(node, {" in editor_js
 
     def test_editor_buttons_use_widget_route(self):
-        repo_root = Path(__file__).resolve().parent.parent
-        editor_js = (repo_root / "web" / "pano_editor.js").read_text(encoding="utf-8")
+        editor_js = self._web_source_path("pano_editor.js").read_text(encoding="utf-8")
         assert 'ensureActionButtonWidget(node, buttonText, () => showEditor(node, "stickers"))' in editor_js
         assert 'ensureActionButtonWidget(node, buttonText, () => showEditor(node, "cutout"))' in editor_js
         assert 'ensureActionButtonWidget(node, "Open Preview", () => showEditor(node, "stickers", { readOnly: true, hideSidebar: false }))' in editor_js
 
     def test_preview_runtime_has_no_embedded_button(self):
-        repo_root = Path(__file__).resolve().parent.parent
-        preview_js = (repo_root / "web" / "pano_preview_previewnode.js").read_text(encoding="utf-8")
+        preview_js = self._web_source_path("pano_preview_previewnode.js").read_text(encoding="utf-8")
         assert 'document.createElement("button")' not in preview_js
         assert "getLegacyButtonRect" not in preview_js
 
     def test_webgl_preview_renderer_is_present(self):
-        repo_root = Path(__file__).resolve().parent.parent
-        gl_renderer_js = (repo_root / "web" / "pano_gl_renderer.js").read_text(encoding="utf-8")
-        gl_viewport_js = (repo_root / "web" / "pano_gl_viewport.js").read_text(encoding="utf-8")
-        gl_scene_js = (repo_root / "web" / "pano_gl_scene.js").read_text(encoding="utf-8")
+        gl_renderer_js = self._web_source_path("pano_gl_renderer.js").read_text(encoding="utf-8")
+        gl_viewport_js = self._web_source_path("pano_gl_viewport.js").read_text(encoding="utf-8")
+        gl_scene_js = self._web_source_path("pano_gl_scene.js").read_text(encoding="utf-8")
         assert "export function createPanoGlRenderer()" in gl_renderer_js
         assert "export function renderErpViewToContext2D" in gl_viewport_js
         assert "export function renderSceneToContext2D" in gl_viewport_js
         assert "export function buildStickerSceneFromState" in gl_scene_js
 
     def test_modal_runtime_and_preview_use_shared_scene_builder(self):
-        repo_root = Path(__file__).resolve().parent.parent
-        editor_js = (repo_root / "web" / "pano_editor.js").read_text(encoding="utf-8")
-        runtime_js = (repo_root / "web" / "pano_preview_runtime.js").read_text(encoding="utf-8")
-        preview_node_js = (repo_root / "web" / "pano_preview_previewnode.js").read_text(encoding="utf-8")
+        editor_js = self._web_source_path("pano_editor.js").read_text(encoding="utf-8")
+        runtime_js = self._web_source_path("pano_preview_runtime.js").read_text(encoding="utf-8")
+        preview_node_js = self._web_source_path("pano_preview_previewnode.js").read_text(encoding="utf-8")
         assert 'from "./pano_gl_scene.js"' in editor_js
         assert 'from "./pano_gl_scene.js"' in runtime_js
         assert 'from "./pano_gl_scene.js"' in preview_node_js
@@ -276,10 +278,9 @@ class TestNodesPreview(unittest.TestCase):
         assert "buildCutoutViewParamsFromShot" in runtime_js
 
     def test_modal_runtime_and_preview_use_shared_gl_scene_helper(self):
-        repo_root = Path(__file__).resolve().parent.parent
-        editor_js = (repo_root / "web" / "pano_editor.js").read_text(encoding="utf-8")
-        runtime_js = (repo_root / "web" / "pano_preview_runtime.js").read_text(encoding="utf-8")
-        preview_node_js = (repo_root / "web" / "pano_preview_previewnode.js").read_text(encoding="utf-8")
+        editor_js = self._web_source_path("pano_editor.js").read_text(encoding="utf-8")
+        runtime_js = self._web_source_path("pano_preview_runtime.js").read_text(encoding="utf-8")
+        preview_node_js = self._web_source_path("pano_preview_previewnode.js").read_text(encoding="utf-8")
         assert 'from "./pano_gl_viewport.js"' in editor_js
         assert 'from "./pano_gl_viewport.js"' in runtime_js
         assert 'from "./pano_gl_viewport.js"' in preview_node_js
@@ -294,9 +295,8 @@ class TestNodesPreview(unittest.TestCase):
         assert "renderCutoutViewToContext2D({" in runtime_js
 
     def test_old_cpu_sticker_functions_are_not_normal_gl_path(self):
-        repo_root = Path(__file__).resolve().parent.parent
-        editor_js = (repo_root / "web" / "pano_editor.js").read_text(encoding="utf-8")
-        runtime_js = (repo_root / "web" / "pano_preview_runtime.js").read_text(encoding="utf-8")
+        editor_js = self._web_source_path("pano_editor.js").read_text(encoding="utf-8")
+        runtime_js = self._web_source_path("pano_preview_runtime.js").read_text(encoding="utf-8")
         assert "function drawStickerPreviewPano" in editor_js
         assert "function drawSticker(" in runtime_js
         assert "function drawStickerMeshMapped" in editor_js
@@ -309,25 +309,21 @@ class TestNodesPreview(unittest.TestCase):
         assert "!glDrawn && !!drawCutoutProjectionPreview" in runtime_js
 
     def test_cutout_unavailable_hint_is_not_gated_on_gl_success(self):
-        repo_root = Path(__file__).resolve().parent.parent
-        runtime_js = (repo_root / "web" / "pano_preview_runtime.js").read_text(encoding="utf-8")
+        runtime_js = self._web_source_path("pano_preview_runtime.js").read_text(encoding="utf-8")
         assert "const liveDrawnValidated = !!glDrawn || (!!fallbackDrawn && hasValidCutoutStats(node));" in runtime_js
 
     def test_preview_node_grid_is_fallback_only(self):
-        repo_root = Path(__file__).resolve().parent.parent
-        preview_js = (repo_root / "web" / "pano_preview_previewnode.js").read_text(encoding="utf-8")
+        preview_js = self._web_source_path("pano_preview_previewnode.js").read_text(encoding="utf-8")
         assert "if (!img || !img.complete || !(img.naturalWidth || img.width) || width <= 1 || height <= 1) {" in preview_js
         assert "if (!drawn) {" in preview_js
         assert preview_js.count("drawGrid(ctx, width, height);") == 2
 
     def test_editor_debug_probe_is_removed_from_normal_path(self):
-        repo_root = Path(__file__).resolve().parent.parent
-        editor_js = (repo_root / "web" / "pano_editor.js").read_text(encoding="utf-8")
+        editor_js = self._web_source_path("pano_editor.js").read_text(encoding="utf-8")
         assert "function panoEditorDebug(" not in editor_js
 
     def test_preview_runtime_wheel_and_scheduler_guards(self):
-        repo_root = Path(__file__).resolve().parent.parent
-        preview_js = (repo_root / "web" / "pano_preview_previewnode.js").read_text(encoding="utf-8")
+        preview_js = self._web_source_path("pano_preview_previewnode.js").read_text(encoding="utf-8")
         assert 'root.addEventListener("wheel"' in preview_js
         assert 'canvas.addEventListener("wheel"' not in preview_js
         assert "mousewheel" not in preview_js
@@ -344,20 +340,18 @@ class TestNodesPreview(unittest.TestCase):
         assert "this.queuedDuringTick = false;" in preview_js
 
     def test_shared_runtime_has_no_embedded_editor_button_for_cutout(self):
-        repo_root = Path(__file__).resolve().parent.parent
-        runtime_js = (repo_root / "web" / "pano_preview_runtime.js").read_text(encoding="utf-8")
+        runtime_js = self._web_source_path("pano_preview_runtime.js").read_text(encoding="utf-8")
         legacy_block = runtime_js.split("function attachLegacyStickersPreview", 1)[1].split("function drawCanvas", 1)[0]
         assert "drawNodeEditorButton(this, ctx);" not in legacy_block
         assert "if (pointInRect(p.x, p.y, btn))" not in legacy_block
 
     def test_stickers_without_preview_do_not_force_large_node_size(self):
-        repo_root = Path(__file__).resolve().parent.parent
-        editor_js = (repo_root / "web" / "pano_editor.js").read_text(encoding="utf-8")
+        editor_js = self._web_source_path("pano_editor.js").read_text(encoding="utf-8")
         assert "Without node preview, let LiteGraph size the node from widgets only." in editor_js
 
     def test_external_input_preview_contract_strings(self):
         repo_root = Path(__file__).resolve().parent.parent
-        editor_js = (repo_root / "web" / "pano_editor.js").read_text(encoding="utf-8")
+        editor_js = self._web_source_path("pano_editor.js").read_text(encoding="utf-8")
         nodes_py = (repo_root / "comfyui_pano_suite" / "nodes.py").read_text(encoding="utf-8")
         assert 'pano_sticker_input_images' in editor_js
         assert 'getLinkedInputImage(node, ["sticker_image"])' not in editor_js
@@ -366,9 +360,8 @@ class TestNodesPreview(unittest.TestCase):
         assert 'sticker_state_json' in nodes_py
 
     def test_paint_rebuild_ui_scaffold_strings(self):
-        repo_root = Path(__file__).resolve().parent.parent
-        editor_js = (repo_root / "web" / "pano_editor.js").read_text(encoding="utf-8")
-        css = (repo_root / "web" / "pano_editor.css").read_text(encoding="utf-8")
+        editor_js = self._web_source_path("pano_editor.js").read_text(encoding="utf-8")
+        css = self._web_runtime_path("pano_editor.css").read_text(encoding="utf-8")
         assert 'data-tool-rail' in editor_js
         assert 'data-tool-mode="paint"' in editor_js
         assert 'data-tool-mode="mask"' in editor_js
@@ -381,13 +374,18 @@ class TestNodesPreview(unittest.TestCase):
         assert 'Clear All Paint Data' in editor_js
 
     def test_no_new_active_preview_dependency_on_editor_core(self):
-        repo_root = Path(__file__).resolve().parent.parent
-        editor_js = (repo_root / "web" / "pano_editor.js").read_text(encoding="utf-8")
-        runtime_js = (repo_root / "web" / "pano_preview_runtime.js").read_text(encoding="utf-8")
-        preview_node_js = (repo_root / "web" / "pano_preview_previewnode.js").read_text(encoding="utf-8")
+        editor_js = self._web_source_path("pano_editor.js").read_text(encoding="utf-8")
+        runtime_js = self._web_source_path("pano_preview_runtime.js").read_text(encoding="utf-8")
+        preview_node_js = self._web_source_path("pano_preview_previewnode.js").read_text(encoding="utf-8")
         assert 'from "./pano_editor_core.js"' not in editor_js
         assert 'from "./pano_editor_core.js"' not in runtime_js
         assert 'from "./pano_editor_core.js"' not in preview_node_js
+
+    def test_runtime_bundle_is_single_entry(self):
+        bundle_js = self._web_runtime_path("panorama_suite.js").read_text(encoding="utf-8")
+        assert 'import * as __pano_app from "../../scripts/app.js";' in bundle_js
+        assert 'import * as __pano_api from "../../scripts/api.js";' in bundle_js
+        assert "__pano_require(" in bundle_js
 
 if __name__ == '__main__':
     unittest.main()

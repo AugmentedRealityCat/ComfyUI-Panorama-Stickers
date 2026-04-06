@@ -9,11 +9,15 @@ function isNodeType(value) {
   return !!value?.prototype;
 }
 
+function wrapOnOpen(node, onOpen) {
+  return typeof onOpen === "function" ? (...args) => onOpen(node, ...args) : onOpen;
+}
+
 export function attachPreviewNode(target, options = {}) {
   if (isNodeType(target)) return;
   attachPreviewNodeRuntime(target, {
     ...options,
-    onOpen: typeof options.onOpen === "function" ? () => options.onOpen(target) : options.onOpen,
+    onOpen: wrapOnOpen(target, options.onOpen),
   });
 }
 
@@ -25,26 +29,32 @@ export function attachStickersNodePreview(nodeType, options = {}) {
     noPreview: !enabled,
   };
   if (!isNodeType(nodeType)) {
-    runtimeAttachPanoramaPreview(nodeType, runtimeOptions);
+    runtimeAttachPanoramaPreview(nodeType, {
+      ...runtimeOptions,
+      onOpen: wrapOnOpen(nodeType, options.onOpen),
+    });
     return;
   }
   patchNodeLifecycle(nodeType, "stickers_node_preview", (node) => {
     runtimeAttachPanoramaPreview(node, {
       ...runtimeOptions,
-      onOpen: typeof options.onOpen === "function" ? () => options.onOpen(node) : options.onOpen,
+      onOpen: wrapOnOpen(node, options.onOpen),
     });
   });
 }
 
 export function attachCutoutPreview(nodeType, options = {}) {
   if (!isNodeType(nodeType)) {
-    runtimeAttachCutoutPreview(nodeType, options);
+    runtimeAttachCutoutPreview(nodeType, {
+      ...options,
+      onOpen: wrapOnOpen(nodeType, options.onOpen),
+    });
     return;
   }
   patchNodeLifecycle(nodeType, "cutout_preview", (node) => {
     runtimeAttachCutoutPreview(node, {
       ...options,
-      onOpen: typeof options.onOpen === "function" ? () => options.onOpen(node) : options.onOpen,
+      onOpen: wrapOnOpen(node, options.onOpen),
     });
   });
 }

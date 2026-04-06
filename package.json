@@ -1,0 +1,12 @@
+{
+  "name": "comfyui-panorama-stickers-frontend",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build:web": "node tools/build_panorama_bundle.mjs",
+    "build:web:vite": "vite build"
+  },
+  "devDependencies": {
+    "vite": "^6.3.5"
+  }
+}

@@ -61,7 +61,9 @@ export function createHistoryController(limit = 80, initialState = null, seriali
       return index;
     },
     serialize() {
-      const start = Math.max(0, entries.length - maxSerializedEntries);
+      const windowEnd = entries.length;
+      const windowStart = Math.max(0, windowEnd - maxSerializedEntries);
+      const start = index >= 0 ? Math.min(windowStart, index) : windowStart;
       const serializedEntries = entries.slice(start);
       const serializedIndex = index < 0 ? -1 : Math.max(-1, Math.min(serializedEntries.length - 1, index - start));
       return {

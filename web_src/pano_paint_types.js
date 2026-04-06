@@ -179,9 +179,10 @@ function normalizeRasterBbox(bbox) {
   const u1 = finiteNumber(bbox.u1, null);
   const v1 = finiteNumber(bbox.v1, null);
   if (u0 == null || v0 == null || u1 == null || v1 == null) return null;
-  if (u1 <= u0 || v1 <= v0) return null;
   const c = (v) => Math.max(0, Math.min(1, v));
-  return { u0: c(u0), v0: c(v0), u1: c(u1), v1: c(v1) };
+  const clamped = { u0: c(u0), v0: c(v0), u1: c(u1), v1: c(v1) };
+  if (clamped.u1 <= clamped.u0 || clamped.v1 <= clamped.v0) return null;
+  return clamped;
 }
 
 function normalizeRasterTransform(raw) {

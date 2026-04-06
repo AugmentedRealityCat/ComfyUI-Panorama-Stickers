@@ -76,7 +76,7 @@ export function parseState(text, bg = "#00ff00") {
   if (!trimmed) return base;
   try {
     const p = JSON.parse(trimmed);
-    if (!p || typeof p !== "object") return base;
+    if (!p || typeof p !== "object" || Array.isArray(p)) return base;
     return {
       ...base,
       ...p,
