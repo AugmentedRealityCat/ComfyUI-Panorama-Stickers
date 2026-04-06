@@ -781,6 +781,9 @@ export function createPanoGlRenderer() {
       };
     }
     const angles = getViewAngles(params, width, height);
+    if (!angles) {
+      return { x: width * 0.5, y: height * 0.5, visible: false };
+    }
     const basis = cameraBasis(angles.yawDeg, angles.pitchDeg, angles.rollDeg);
     const dir = lonLatToDir(u, v);
     const cx = dot(dir, basis.right);

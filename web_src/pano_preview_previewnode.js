@@ -400,9 +400,7 @@ class PreviewNodeRuntime {
     canvas.addEventListener("pointerup", end);
     canvas.addEventListener("pointercancel", end);
     root.addEventListener("wheel", (ev) => {
-      const before = Number(this.view?.fov || 100);
-      const changed = this.controller.applyWheelEvent(ev);
-      const after = Number(this.view?.fov || 100);
+      this.controller.applyWheelEvent(ev);
       ev.preventDefault();
       ev.stopPropagation();
       ev.stopImmediatePropagation?.();

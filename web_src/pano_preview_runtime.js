@@ -551,7 +551,7 @@ function parseState(value, bg = "#00ff00") {
   }
   try {
     const p = parsed;
-    if (!p || typeof p !== "object") return base;
+    if (!p || typeof p !== "object" || Array.isArray(p)) return base;
     return {
       ...base,
       ...p,

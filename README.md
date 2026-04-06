@@ -24,13 +24,6 @@ Usage details are documented here:
 
 - Install via ComfyUI Manager.
 
-## Frontend Build
-
-- Frontend source modules live in `web_src/`.
-- ComfyUI runtime assets stay in `web/`, with `web/panorama_suite.js` as the single imported script and `web/pano_editor.css` kept separate.
-- `npm run build:web` regenerates `web/panorama_suite.js` using the local repository bundler.
-- `npm run build:web:vite` uses the Vite config once `vite` is installed in the local environment.
-
 ## Demo
 
 https://github.com/user-attachments/assets/bf74e953-8ceb-4c7f-afa2-1c805f12c7af

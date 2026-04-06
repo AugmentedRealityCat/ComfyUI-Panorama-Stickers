@@ -517,7 +517,7 @@ function parseState(text, preset = 2048, bg = "#00ff00") {
       p = JSON.parse(textTrimmed);
       parseStateJsonCache = { text: textTrimmed, parsed: p };
     }
-    if (!p || typeof p !== "object") return base;
+    if (!p || typeof p !== "object" || Array.isArray(p)) return base;
     const merged = {
       ...base,
       ...p,

@@ -802,6 +802,9 @@ __pano_modules["./pano_gl_renderer.js"] = (__exports, __pano_require) => {
         };
       }
       const angles = getViewAngles(params, width, height);
+      if (!angles) {
+        return { x: width * 0.5, y: height * 0.5, visible: false };
+      }
       const basis = cameraBasis(angles.yawDeg, angles.pitchDeg, angles.rollDeg);
       const dir = lonLatToDir(u, v);
       const cx = dot(dir, basis.right);
@@ -1957,8 +1960,7 @@ __pano_modules["./pano_paint_engine.js"] = (__exports, __pano_require) => {
     function ensureTarget(_descriptor) {
       if (activeLayerKind === "mask") return maskTarget;
       if (!activeGroupId) return paintScratchTarget;
-      if (activeGroupId) return ensureGroupTarget(activeGroupId);
-      return ensureGroupTarget("__default__");
+      return ensureGroupTarget(activeGroupId);
     }
   
     // ─── Composition ────────────────────────────────────────────────────────────
@@ -2280,10 +2282,6 @@ __pano_modules["./pano_paint_engine.js"] = (__exports, __pano_require) => {
       _groupPreviewTmp = resizeSurface(_groupPreviewTmp, ERP_W, ERP_H);
       clearSurface(_groupPreviewTmp);
       _groupPreviewTmp.ctx.drawImage(group.committedPaint.canvas, 0, 0);
-      if (as.isEraser) {
-        applyEraserToSurface(_groupPreviewTmp.ctx, sharedCurrentStroke.canvas);
-        return _groupPreviewTmp.canvas;
-      }
       const opacity = group.lassoPreviewActive
         ? 0.5
         : Math.max(0, Math.min(1, as.strokeOpacity ?? 1));
@@ -3511,7 +3509,7 @@ __pano_modules["./pano_preview_runtime.js"] = (__exports, __pano_require) => {
     }
     try {
       const p = parsed;
-      if (!p || typeof p !== "object") return base;
+      if (!p || typeof p !== "object" || Array.isArray(p)) return base;
       return {
         ...base,
         ...p,
@@ -7335,7 +7333,7 @@ __pano_modules["./pano_preview_render.js"] = (__exports, __pano_require) => {
     if (!trimmed) return base;
     try {
       const p = JSON.parse(trimmed);
-      if (!p || typeof p !== "object") return base;
+      if (!p || typeof p !== "object" || Array.isArray(p)) return base;
       return {
         ...base,
         ...p,
@@ -7772,9 +7770,7 @@ __pano_modules["./pano_preview_previewnode.js"] = (__exports, __pano_require) =>
       canvas.addEventListener("pointerup", end);
       canvas.addEventListener("pointercancel", end);
       root.addEventListener("wheel", (ev) => {
-        const before = Number(this.view?.fov || 100);
-        const changed = this.controller.applyWheelEvent(ev);
-        const after = Number(this.view?.fov || 100);
+        this.controller.applyWheelEvent(ev);
         ev.preventDefault();
         ev.stopPropagation();
         ev.stopImmediatePropagation?.();
@@ -8053,11 +8049,15 @@ __pano_modules["./pano_node_preview.js"] = (__exports, __pano_require) => {
     return !!value?.prototype;
   }
   
+  function wrapOnOpen(node, onOpen) {
+    return typeof onOpen === "function" ? (...args) => onOpen(node, ...args) : onOpen;
+  }
+  
   function attachPreviewNode(target, options = {}) {
     if (isNodeType(target)) return;
     attachPreviewNodeRuntime(target, {
       ...options,
-      onOpen: typeof options.onOpen === "function" ? () => options.onOpen(target) : options.onOpen,
+      onOpen: wrapOnOpen(target, options.onOpen),
     });
   }
   
@@ -8069,26 +8069,32 @@ __pano_modules["./pano_node_preview.js"] = (__exports, __pano_require) => {
       noPreview: !enabled,
     };
     if (!isNodeType(nodeType)) {
-      runtimeAttachPanoramaPreview(nodeType, runtimeOptions);
+      runtimeAttachPanoramaPreview(nodeType, {
+        ...runtimeOptions,
+        onOpen: wrapOnOpen(nodeType, options.onOpen),
+      });
       return;
     }
     patchNodeLifecycle(nodeType, "stickers_node_preview", (node) => {
       runtimeAttachPanoramaPreview(node, {
         ...runtimeOptions,
-        onOpen: typeof options.onOpen === "function" ? () => options.onOpen(node) : options.onOpen,
+        onOpen: wrapOnOpen(node, options.onOpen),
       });
     });
   }
   
   function attachCutoutPreview(nodeType, options = {}) {
     if (!isNodeType(nodeType)) {
-      runtimeAttachCutoutPreview(nodeType, options);
+      runtimeAttachCutoutPreview(nodeType, {
+        ...options,
+        onOpen: wrapOnOpen(nodeType, options.onOpen),
+      });
       return;
     }
     patchNodeLifecycle(nodeType, "cutout_preview", (node) => {
       runtimeAttachCutoutPreview(node, {
         ...options,
-        onOpen: typeof options.onOpen === "function" ? () => options.onOpen(node) : options.onOpen,
+        onOpen: wrapOnOpen(node, options.onOpen),
       });
     });
   }
@@ -8148,7 +8154,7 @@ __pano_modules["./pano_brush_presets.js"] = (__exports, __pano_require) => {
   // Schema fields:
   //   id              — unique key, matches the object key in BRUSH_PRESETS
   //   label           — display name
-  //   stampKind       — "round" | "chisel"
+  //   stampKind       — "round" | "chisel" | "crayon"
   //   hardness        — edge sharpness 0..1  (0 = very soft, 1 = hard)
   //   spacing         — stamp interval as fraction of diameter (e.g. 0.14 = dense)
   //   flow            — per-stamp opacity contribution 0..1 (baked into stamp texture)
@@ -8340,7 +8346,9 @@ __pano_modules["./pano_paint_history.js"] = (__exports, __pano_require) => {
         return index;
       },
       serialize() {
-        const start = Math.max(0, entries.length - maxSerializedEntries);
+        const windowEnd = entries.length;
+        const windowStart = Math.max(0, windowEnd - maxSerializedEntries);
+        const start = index >= 0 ? Math.min(windowStart, index) : windowStart;
         const serializedEntries = entries.slice(start);
         const serializedIndex = index < 0 ? -1 : Math.max(-1, Math.min(serializedEntries.length - 1, index - start));
         return {
@@ -8538,9 +8546,10 @@ __pano_modules["./pano_paint_types.js"] = (__exports, __pano_require) => {
     const u1 = finiteNumber(bbox.u1, null);
     const v1 = finiteNumber(bbox.v1, null);
     if (u0 == null || v0 == null || u1 == null || v1 == null) return null;
-    if (u1 <= u0 || v1 <= v0) return null;
     const c = (v) => Math.max(0, Math.min(1, v));
-    return { u0: c(u0), v0: c(v0), u1: c(u1), v1: c(v1) };
+    const clamped = { u0: c(u0), v0: c(v0), u1: c(u1), v1: c(v1) };
+    if (clamped.u1 <= clamped.u0 || clamped.v1 <= clamped.v0) return null;
+    return clamped;
   }
   
   function normalizeRasterTransform(raw) {
@@ -9128,7 +9137,7 @@ __pano_modules["./pano_editor.js"] = (__exports, __pano_require) => {
         p = JSON.parse(textTrimmed);
         parseStateJsonCache = { text: textTrimmed, parsed: p };
       }
-      if (!p || typeof p !== "object") return base;
+      if (!p || typeof p !== "object" || Array.isArray(p)) return base;
       const merged = {
         ...base,
         ...p,
