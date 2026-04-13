@@ -1535,18 +1535,22 @@ function showEditor(node, type, options = {}) {
     })),
     onClose: () => closeEditor(),
   });
-  vueApp.mount(mountHost);
+  try {
+    vueApp.mount(mountHost);
+  } catch (error) {
+    mountHost.remove();
+    throw error;
+  }
 
   const overlay = mountHost.querySelector(".pano-modal-overlay");
   const root = mountHost.querySelector(".pano-modal");
-  if (!overlay || !root) {
+  const canvas = root?.querySelector("canvas");
+  const stageWrap = root?.querySelector(".pano-stage-wrap");
+  if (!overlay || !root || !canvas || !stageWrap) {
     vueApp.unmount();
     mountHost.remove();
     throw new Error("Failed to mount Panorama Vue modal shell");
   }
-
-  const canvas = root.querySelector("canvas");
-  const stageWrap = root.querySelector(".pano-stage-wrap");
   const paintCursorEl = document.createElement("div");
   paintCursorEl.setAttribute("aria-hidden", "true");
   paintCursorEl.style.position = "absolute";
