@@ -6,8 +6,18 @@ const props = defineProps({
   nodeTitle: { type: String, default: "Panorama Stickers" },
 });
 
+function escapeHtml(value) {
+  return String(value || "").replace(/[&<>"']/g, (char) => ({
+    "&": "&amp;",
+    "<": "&lt;",
+    ">": "&gt;",
+    "\"": "&quot;",
+    "'": "&#39;",
+  }[char]));
+}
+
 const sideTitleHtml = computed(() => (
-  `<span class="pano-side-title-icon" aria-hidden="true">${ICON.globe}</span><span>${String(props.nodeTitle || "")}</span>`
+  `<span class="pano-side-title-icon" aria-hidden="true">${ICON.globe}</span><span>${escapeHtml(props.nodeTitle)}</span>`
 ));
 </script>
 
