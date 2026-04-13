@@ -11,7 +11,12 @@ defineProps({
   <aside class="pano-side">
     <div class="pano-side-head">
       <div class="pano-side-title">
-        <span class="pano-side-title-icon">::</span>
+        <span class="pano-side-title-icon" aria-hidden="true">
+          <svg viewBox="0 0 24 24">
+            <path d="M5 12h14" />
+            <path d="M12 5v14" />
+          </svg>
+        </span>
         Vue Modal Base
       </div>
     </div>

@@ -100,6 +100,12 @@ watch(() => props.open, (nextOpen) => {
       <div class="pano-vue-modal-stage">
         <div class="pano-floating-top">
           <button type="button" class="pano-btn pano-btn-texticon">
+            <span class="pano-side-title-icon" aria-hidden="true">
+              <svg viewBox="0 0 24 24">
+                <path d="M4 18h16" />
+                <path d="M6 15l3-6 3 6 3-9 3 9" />
+              </svg>
+            </span>
             <span class="label">{{ title }}</span>
           </button>
           <div
@@ -119,7 +125,10 @@ watch(() => props.open, (nextOpen) => {
             </button>
           </div>
           <button type="button" class="pano-btn pano-btn-icon" @click="emit('close')">
-            <span class="pano-vue-tool-glyph">X</span>
+            <svg viewBox="0 0 24 24" aria-hidden="true">
+              <path d="M6 6l12 12" />
+              <path d="M18 6L6 18" />
+            </svg>
           </button>
         </div>
 
