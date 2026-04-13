@@ -1,6 +1,7 @@
 <script setup>
 import { computed } from "vue";
 import { ICON } from "../icons.js";
+import PanoIconButton from "./PanoIconButton.vue";
 
 const props = defineProps({
   type: { type: String, default: "stickers" },
@@ -119,20 +120,18 @@ const toolButtons = computed(() => {
 
 <template>
   <div class="pano-floating-left" data-tool-rail>
-    <button
+    <PanoIconButton
       v-for="button in toolButtons"
       :key="button.key"
-      class="pano-btn pano-btn-icon"
-      :class="{
+      :extra-class="{
         active: button.active,
         'pano-btn-icon-accent': button.accent,
       }"
-      type="button"
-      :[button.attr]="button.value"
-      :aria-label="button.label"
-      :aria-pressed="button.pressed"
-      :data-tip="button.tip"
-      v-html="button.icon"
+      :icon="button.icon"
+      :label="button.label"
+      :tip="button.tip"
+      :pressed="button.pressed"
+      :attrs="{ [button.attr]: button.value }"
     />
   </div>
 </template>

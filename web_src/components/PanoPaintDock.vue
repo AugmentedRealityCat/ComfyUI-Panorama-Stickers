@@ -1,6 +1,7 @@
 <script setup>
 import { computed } from "vue";
 import { ICON } from "../icons.js";
+import PanoIconButton from "./PanoIconButton.vue";
 
 defineProps({
   paintSwatches: { type: Array, default: () => [] },
@@ -91,15 +92,13 @@ const paneDefs = computed(() => [
       </div>
       <div class="pano-paint-footer" :data-paint-footer="pane.footer">
         <div class="pano-paint-footer-group" :data-paint-group="pane.group">
-          <button
+          <PanoIconButton
             v-for="tool in pane.tools"
             :key="`${pane.key}-${tool.key}`"
-            class="pano-btn pano-btn-icon"
-            type="button"
-            :[tool.attr]="tool.key"
-            :aria-label="tool.label"
-            :data-tip="tool.tip"
-            v-html="tool.icon"
+            :icon="tool.icon"
+            :label="tool.label"
+            :tip="tool.tip"
+            :attrs="{ [tool.attr]: tool.key }"
           />
         </div>
         <div class="pano-paint-size-row" data-paint-size-row hidden>
@@ -107,14 +106,12 @@ const paneDefs = computed(() => [
           <span class="pano-paint-size-value" data-paint-size-value>10</span>
         </div>
         <div class="pano-paint-clear-row" data-paint-clear-row :hidden="pane.clearHidden">
-          <button
-            class="pano-btn pano-btn-icon pano-paint-layer-clear"
-            type="button"
-            data-paint-layer-clear-current
-            :data-paint-layer-clear-current="pane.clearTarget"
-            :aria-label="pane.clearLabel"
-            :data-tip="pane.clearTip"
-            v-html="ICON.clear"
+          <PanoIconButton
+            :icon="ICON.clear"
+            :label="pane.clearLabel"
+            :tip="pane.clearTip"
+            extra-class="pano-paint-layer-clear"
+            :attrs="{ 'data-paint-layer-clear-current': pane.clearTarget }"
           />
         </div>
       </div>
