@@ -1,145 +1,136 @@
 <script setup>
 import { computed, onMounted, ref } from "vue";
+import { ICON } from "../icons.js";
 import PanoModal from "../components/PanoModal.vue";
-import { useComfyBridge } from "../composables/useComfyBridge.js";
-import { usePaint } from "../composables/usePaint.js";
 
-const bridge = useComfyBridge({
-  stateJson: JSON.stringify({
-    stickers: [],
-    active: {
-      selected_sticker_id: null,
-    },
-  }, null, 2),
-});
-const paint = usePaint();
-const isOpen = ref(true);
-const backgroundSource = ref(null);
-const viewState = ref({ yaw: 0, pitch: 0, fov: 100 });
+// --- ビュー状態 ---
+const isOpen       = ref(true);
 const activeViewMode = ref("panorama");
-const activeToolId = computed(() => paint.activeTool.value);
+const activeTool   = ref("cursor");
+const fov          = ref(100);
+const gridVisible  = ref(true);
 
-const tools = [
-  { id: "select", label: "Select", glyph: "S" },
-  { id: "brush", label: "Brush", glyph: "B" },
-  { id: "erase", label: "Erase", glyph: "E" },
-  { id: "view", label: "View", glyph: "V" },
-];
-
+// --- ビューモード ---
 const viewModes = [
-  { id: "panorama", label: "Pano" },
-  { id: "unwrap", label: "Unwrap" },
+  { id: "panorama", label: "Panorama", icon: ICON.pano },
+  { id: "unwrap",   label: "Unwrap",   icon: ICON.unwrap },
 ];
 
-const panels = computed(() => [
-  {
-    id: "session",
-    title: "Session",
-    meta: "Standalone",
-    fields: [
-      { id: "dof", label: "DOF", value: "3DOF shell", wide: true },
-      { id: "tool", label: "Tool", value: tools.find((tool) => tool.id === activeToolId.value)?.label || "Select", wide: true },
-      { id: "mode", label: "Mode", value: viewModes.find((mode) => mode.id === activeViewMode.value)?.label || "Pano", wide: true },
-      { id: "history", label: "Undo", value: String(paint.history.value.entries.length), wide: true },
-    ],
-    note: "ComfyUI bridge is stubbed in this PR. registerExtension integration stays for the next branch.",
-  },
-  {
-    id: "view",
-    title: "View",
-    meta: "Read-only",
-    fields: [
-      { id: "yaw", label: "Yaw", kind: "range", min: -180, max: 180, step: 1, value: Math.round(viewState.value.yaw) },
-      { id: "pitch", label: "Pitch", kind: "range", min: -90, max: 90, step: 1, value: Math.round(viewState.value.pitch) },
-      { id: "fov", label: "FOV", kind: "range", min: 35, max: 140, step: 1, value: Math.round(viewState.value.fov), wide: false },
-      { id: "json", label: "State", kind: "textarea", value: bridge.stateJson.value, wide: true },
-    ],
-  },
-]);
+// --- ツール (Stickersノード用) ---
+const tools = [
+  { id: "cursor", label: "Cursor",     icon: "cursor" },
+  { id: "paint",  label: "Paint",      icon: "paint" },
+  { id: "mask",   label: "Mask",       icon: "mask" },
+  { id: "add",    label: "Add Image",  icon: "add", accent: true },
+  { id: "clear",  label: "Clear All",  icon: "clear" },
+  { id: "undo",   label: "Undo",       icon: "undo" },
+  { id: "redo",   label: "Redo",       icon: "redo" },
+];
 
-const scene = computed(() => ({
-  stickers: bridge.parsedState.value.stickers || [],
-  selectedId: bridge.parsedState.value.active?.selected_sticker_id || null,
-  hoveredId: null,
-}));
+// --- インスペクタパネル (Stickersノード用) ---
+const selectedSticker = ref(null);
 
-function setTool(toolId) {
-  paint.setActiveTool(toolId);
-}
+const panels = computed(() => {
+  const base = [
+    {
+      id: "output",
+      title: "Output",
+      fields: [
+        { id: "preset",  label: "Preset",  kind: "picker", value: "2048 × 1024", wide: true },
+        { id: "bgcolor", label: "BG Color",kind: "picker", value: "Green (#00ff00)", wide: true },
+      ],
+    },
+    {
+      id: "paint",
+      title: "Paint",
+      fields: [
+        { id: "opacity",  label: "Opacity",  kind: "range", min: 0, max: 100, step: 1, value: 100 },
+        { id: "hardness", label: "Hardness", kind: "range", min: 0, max: 100, step: 1, value: 80 },
+        { id: "flow",     label: "Flow",     kind: "range", min: 1, max: 100, step: 1, value: 100 },
+      ],
+    },
+  ];
 
-function syncView(nextView) {
-  viewState.value = {
-    yaw: Number(nextView?.yaw ?? 0),
-    pitch: Number(nextView?.pitch ?? 0),
-    fov: Number(nextView?.fov ?? 100),
-  };
-}
+  if (selectedSticker.value) {
+    base.unshift({
+      id: "sticker",
+      title: "Sticker",
+      meta: selectedSticker.value.id,
+      fields: [
+        { id: "yaw",   label: "Yaw",   kind: "range", min: -180, max: 180, step: 0.1, value: Math.round(selectedSticker.value.yaw) },
+        { id: "pitch", label: "Pitch", kind: "range", min: -90,  max: 90,  step: 0.1, value: Math.round(selectedSticker.value.pitch) },
+        { id: "scale", label: "Scale", kind: "range", min: 0.1,  max: 4,   step: 0.01, value: selectedSticker.value.scale ?? 1 },
+      ],
+    });
+  }
 
-function setViewMode(nextMode) {
-  activeViewMode.value = String(nextMode || "panorama");
-}
+  return base;
+});
+
+// --- デモ用背景 ---
+const backgroundSource = ref(null);
 
 function createDemoBackground() {
-  const tokenSource = document.querySelector(".pano-modal") || document.documentElement;
-  const style = window.getComputedStyle(tokenSource);
-  const surface0 = style.getPropertyValue("--pano-surface-0").trim();
-  const surface2 = style.getPropertyValue("--pano-surface-2").trim();
-  const surface3 = style.getPropertyValue("--pano-surface-3").trim();
-  const accent = style.getPropertyValue("--pano-accent").trim();
-  if (!surface0 || !surface2 || !surface3 || !accent) return;
-
   const canvas = document.createElement("canvas");
-  canvas.width = 2048;
+  canvas.width  = 2048;
   canvas.height = 1024;
   const ctx = canvas.getContext("2d");
-  const gradient = ctx.createLinearGradient(0, 0, canvas.width, canvas.height);
-  gradient.addColorStop(0, surface0);
-  gradient.addColorStop(0.55, surface2);
-  gradient.addColorStop(1, accent);
-  ctx.fillStyle = gradient;
+  // 単色ベース
+  ctx.fillStyle = "#0a0a0a";
   ctx.fillRect(0, 0, canvas.width, canvas.height);
-  ctx.fillStyle = surface3;
-  for (let i = 0; i < 32; i += 1) {
-    const x = (canvas.width / 32) * i;
-    ctx.fillRect(x, 0, 2, canvas.height);
+  // グリッド線
+  ctx.strokeStyle = "rgba(255,255,255,0.04)";
+  ctx.lineWidth = 1;
+  for (let x = 0; x < canvas.width; x += 64) {
+    ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, canvas.height); ctx.stroke();
   }
-  ctx.globalAlpha = 0.45;
-  ctx.fillStyle = accent;
-  for (let i = 0; i < 12; i += 1) {
-    const y = (canvas.height / 12) * i;
-    ctx.fillRect(0, y, canvas.width, 2);
+  for (let y = 0; y < canvas.height; y += 64) {
+    ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(canvas.width, y); ctx.stroke();
   }
-  ctx.globalAlpha = 1;
+  // 地平線ヒント
+  ctx.strokeStyle = "rgba(0,112,243,0.18)";
+  ctx.lineWidth = 2;
+  ctx.beginPath();
+  ctx.moveTo(0, canvas.height / 2);
+  ctx.lineTo(canvas.width, canvas.height / 2);
+  ctx.stroke();
   backgroundSource.value = canvas;
 }
 
-onMounted(() => {
-  createDemoBackground();
-});
+onMounted(() => { createDemoBackground(); });
+
+// --- イベントハンドラ ---
+function onInteraction(view) {
+  if (view?.fov != null) fov.value = view.fov;
+}
 </script>
 
 <template>
   <div class="pano-vue-app">
     <PanoModal
       :open="isOpen"
-      title="Panorama Stickers"
       dof="3"
       :tools="tools"
       :view-modes="viewModes"
       :active-view-mode="activeViewMode"
+      :active-tool-id="activeTool"
       :panels="panels"
-      :active-tool-id="activeToolId"
+      :fov="fov"
+      :grid-visible="gridVisible"
       :background-source="backgroundSource"
-      :scene="scene"
       @close="isOpen = false"
-      @interaction="syncView"
-      @tool-select="setTool"
-      @view-select="setViewMode"
-    />
+      @tool-select="activeTool = $event"
+      @view-select="activeViewMode = $event"
+      @interaction="onInteraction"
+      @reset-view="fov = 100"
+      @toggle-grid="gridVisible = !gridVisible"
+    >
+      <template #inspector-title>Stickers</template>
+    </PanoModal>
 
-    <div v-if="!isOpen" class="pano-vue-launch">
+    <div v-if="!isOpen" style="position:fixed;right:12px;bottom:12px;">
       <button type="button" class="pano-btn pano-btn-primary pano-btn-texticon" @click="isOpen = true">
-        <span class="label">Reopen Vue modal</span>
+        <span class="label">Open Modal</span>
       </button>
     </div>
   </div>
