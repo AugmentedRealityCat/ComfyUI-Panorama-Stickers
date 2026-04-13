@@ -3,7 +3,7 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "build:web": "vite build",
+    "build:web": "vite build --config vite.lib.config.js",
     "dev:web": "vite",
     "build:web:legacy": "node tools/build_panorama_bundle.mjs"
   },

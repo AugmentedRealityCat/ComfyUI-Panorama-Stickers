@@ -1,39 +1,39 @@
 <script setup>
 defineProps({
-  panels: {
-    type: Array,
-    default: () => [],
-  },
+  panels: { type: Array, default: () => [] },
 });
+
+defineEmits(["close"]);
 </script>
 
 <template>
   <aside class="pano-side">
+
     <div class="pano-side-head">
       <div class="pano-side-title">
-        <span class="pano-side-title-icon" aria-hidden="true">
-          <svg viewBox="0 0 24 24">
-            <path d="M5 12h14" />
-            <path d="M12 5v14" />
-          </svg>
-        </span>
-        Vue Modal Base
+        <slot name="title">Inspector</slot>
+      </div>
+      <div class="pano-side-actions">
+        <slot name="head-actions" />
       </div>
     </div>
+
     <span class="pano-divider" />
+
     <div class="pano-inspector">
       <section
         v-for="panel in panels"
-        :key="panel.id || panel.title"
+        :key="panel.id ?? panel.title"
         class="pano-params"
       >
         <div class="pano-section-title">
           <span>{{ panel.title }}</span>
           <span v-if="panel.meta" class="meta">{{ panel.meta }}</span>
         </div>
+
         <div
-          v-for="field in panel.fields || []"
-          :key="field.id || field.label"
+          v-for="field in panel.fields ?? []"
+          :key="field.id ?? field.label"
           :class="field.wide ? 'pano-field-wide' : 'pano-field'"
         >
           <label>{{ field.label }}</label>
@@ -44,19 +44,34 @@ defineProps({
               :max="field.max ?? 100"
               :step="field.step ?? 1"
               :value="field.value ?? 0"
-              disabled
-            >
-            <input type="number" :value="field.value ?? 0" disabled>
+            />
+            <input type="number" :value="field.value ?? 0" />
           </template>
-          <template v-else-if="field.kind === 'textarea'">
-            <div class="pano-vue-wide-card pano-vue-wide-card-text">{{ field.value }}</div>
+          <template v-else-if="field.kind === 'picker'">
+            <div class="pano-picker">
+              <button type="button" class="pano-picker-trigger">
+                <span class="pano-picker-label">{{ field.value }}</span>
+                <span class="pano-picker-caret">▾</span>
+              </button>
+            </div>
           </template>
           <template v-else>
-            <div class="pano-vue-field-value">{{ field.value }}</div>
+            <div class="pano-picker-trigger" style="pointer-events:none">
+              <span class="pano-picker-label">{{ field.value }}</span>
+            </div>
           </template>
         </div>
+
         <p v-if="panel.note" class="pano-param-note">{{ panel.note }}</p>
       </section>
     </div>
+
+    <div class="pano-side-footer">
+      <slot name="footer">
+        <button type="button" class="pano-btn" @click="$emit('close')">Cancel</button>
+        <button type="button" class="pano-btn pano-btn-primary">Save</button>
+      </slot>
+    </div>
+
   </aside>
 </template>
