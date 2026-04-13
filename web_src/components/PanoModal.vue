@@ -25,6 +25,14 @@ const props = defineProps({
     type: Array,
     default: () => [],
   },
+  viewModes: {
+    type: Array,
+    default: () => [],
+  },
+  activeViewMode: {
+    type: String,
+    default: "panorama",
+  },
   activeToolId: {
     type: String,
     default: "",
@@ -43,7 +51,7 @@ const props = defineProps({
   },
 });
 
-const emit = defineEmits(["close", "ready", "tool-select", "interaction"]);
+const emit = defineEmits(["close", "ready", "tool-select", "view-select", "interaction"]);
 const modalEl = ref(null);
 let previousOverflow = "";
 
@@ -94,6 +102,22 @@ watch(() => props.open, (nextOpen) => {
           <button type="button" class="pano-btn pano-btn-texticon">
             <span class="label">{{ title }}</span>
           </button>
+          <div
+            v-if="viewModes.length"
+            class="pano-view-toggle pano-vue-view-toggle"
+            :data-view-count="String(viewModes.length)"
+            :data-selected="activeViewMode"
+          >
+            <button
+              v-for="viewMode in viewModes"
+              :key="viewMode.id"
+              type="button"
+              class="pano-view-btn"
+              @click="emit('view-select', viewMode.id)"
+            >
+              <span>{{ viewMode.label }}</span>
+            </button>
+          </div>
           <button type="button" class="pano-btn pano-btn-icon" @click="emit('close')">
             <span class="pano-vue-tool-glyph">X</span>
           </button>
@@ -107,6 +131,7 @@ watch(() => props.open, (nextOpen) => {
 
         <PanoCanvas
           :dof="dof"
+          :mode="activeViewMode"
           :background-source="backgroundSource"
           :scene="scene"
           :textures="textures"

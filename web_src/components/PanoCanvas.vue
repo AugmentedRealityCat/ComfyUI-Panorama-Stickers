@@ -23,6 +23,10 @@ const props = defineProps({
     type: String,
     default: "panorama",
   },
+  mode: {
+    type: String,
+    default: "",
+  },
 });
 
 const emit = defineEmits(["ready", "interaction"]);
@@ -97,6 +101,10 @@ onBeforeUnmount(() => {
 watch(() => props.backgroundSource, (nextValue) => webgl.setBackgroundSource(nextValue));
 watch(() => props.scene, (nextValue) => webgl.setScene(nextValue), { deep: true });
 watch(() => props.textures, (nextValue) => webgl.setTextures(nextValue), { deep: true });
+watch(() => props.mode, (nextValue) => {
+  if (!nextValue) return;
+  webgl.setMode(nextValue);
+});
 
 defineExpose({
   requestRender: webgl.requestRender,

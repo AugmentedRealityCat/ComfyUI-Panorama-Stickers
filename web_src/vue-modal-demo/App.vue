@@ -16,6 +16,7 @@ const paint = usePaint();
 const isOpen = ref(true);
 const backgroundSource = ref(null);
 const viewState = ref({ yaw: 0, pitch: 0, fov: 100 });
+const activeViewMode = ref("panorama");
 const activeToolId = computed(() => paint.activeTool.value);
 
 const tools = [
@@ -23,6 +24,11 @@ const tools = [
   { id: "brush", label: "Brush", glyph: "B" },
   { id: "erase", label: "Erase", glyph: "E" },
   { id: "view", label: "View", glyph: "V" },
+];
+
+const viewModes = [
+  { id: "panorama", label: "Pano" },
+  { id: "unwrap", label: "Unwrap" },
 ];
 
 const panels = computed(() => [
@@ -33,6 +39,7 @@ const panels = computed(() => [
     fields: [
       { id: "dof", label: "DOF", value: "3DOF shell", wide: true },
       { id: "tool", label: "Tool", value: tools.find((tool) => tool.id === activeToolId.value)?.label || "Select", wide: true },
+      { id: "mode", label: "Mode", value: viewModes.find((mode) => mode.id === activeViewMode.value)?.label || "Pano", wide: true },
       { id: "history", label: "Undo", value: String(paint.history.value.entries.length), wide: true },
     ],
     note: "ComfyUI bridge is stubbed in this PR. registerExtension integration stays for the next branch.",
@@ -66,6 +73,10 @@ function syncView(nextView) {
     pitch: Number(nextView?.pitch ?? 0),
     fov: Number(nextView?.fov ?? 100),
   };
+}
+
+function setViewMode(nextMode) {
+  activeViewMode.value = String(nextMode || "panorama");
 }
 
 function createDemoBackground() {
@@ -114,6 +125,8 @@ onMounted(() => {
       title="Panorama Stickers"
       dof="3"
       :tools="tools"
+      :view-modes="viewModes"
+      :active-view-mode="activeViewMode"
       :panels="panels"
       :active-tool-id="activeToolId"
       :background-source="backgroundSource"
@@ -121,6 +134,7 @@ onMounted(() => {
       @close="isOpen = false"
       @interaction="syncView"
       @tool-select="setTool"
+      @view-select="setViewMode"
     />
 
     <div v-if="!isOpen" class="pano-vue-launch">
