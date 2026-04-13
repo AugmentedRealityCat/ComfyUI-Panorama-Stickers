@@ -90,7 +90,7 @@ Vue コンポーネントではハードコードを禁止し、必ずトーク�
 ## 3. Typography Rules
 
 **フォントファミリー:**
-```
+```css
 "Plus Jakarta Sans", "Geist", system-ui, -apple-system, "Segoe UI", Roboto, Helvetica, sans-serif
 ```
 > `design_system.md` はInterを想定していたが、実装はPlus Jakarta Sansを優先。Vue移行後もこれを維持する。
@@ -151,7 +151,7 @@ Vue コンポーネントではハードコードを禁止し、必ずトーク�
 
 ### Modal Shell
 
-```
+```css
 max-width: min(1200px, 94vw)
 max-height: min(760px, 92vh)
 border-radius: var(--pano-radius-xl)   /* 12px */
@@ -185,7 +185,7 @@ grid: minmax(0,1fr) 300px              /* side width: 300px */
 | 無効 | opacity 0.46 | — |
 | フォーカス | box-shadow: 0 0 0 1px `--pano-accent` | — |
 
-```
+```css
 height: 40px  (メインツールバー)
        35px  (セレクションフロート)
        30px  (インスペクタ単独コントロール)
@@ -196,7 +196,7 @@ transition: 120ms cubic-bezier(0.2,0,0,1)
 ```
 
 **プライマリボタン（`.pano-btn-primary`）:**
-```
+```css
 background: --pano-emphasis-bg
 hover: --pano-emphasis-bg-hover
 active: --pano-emphasis-bg-active
@@ -215,7 +215,7 @@ disabled: opacity 0.5
 
 ### Floating Panels（HUD共通）
 
-```
+```css
 background: var(--pano-float-bg)       /* rgba(10,10,10,0.74) */
 backdrop-filter: blur(12px)
 border-radius: var(--pano-float-radius) /* 10px */
@@ -228,7 +228,7 @@ gap: var(--pano-float-gap)              /* 6px */
 
 ### Inspector Sidebar（`.pano-side`）
 
-```
+```css
 background: var(--pano-surface-0)
 border-radius: 10px
 padding: 0 var(--pano-space-lg)
@@ -245,7 +245,7 @@ overflow-y: auto
 
 ### Parameter Row（`.pano-field`）
 
-```
+```css
 grid: 58px 1fr 60px
 height: 28px
 gap: var(--pano-space-md)   /* 8px */
@@ -255,7 +255,7 @@ gap: var(--pano-space-md)   /* 8px */
 
 ### Picker（`.pano-picker`）
 
-```
+```css
 trigger: height 30px / bg surface-2 / border-radius 8px
 popover: bg surface-1 / border-radius 12px / box-shadow 0 18px 54px rgba(0,0,0,0.5)
          padding 6px / max-height 240px
@@ -263,7 +263,7 @@ popover: bg surface-1 / border-radius 12px / box-shadow 0 18px 54px rgba(0,0,0,0
 
 ### Tooltip（`.pano-tooltip`）
 
-```
+```css
 background: color-mix(in srgb, surface-1 92%, black)
 font-size: 11px
 padding: 6px 8px / border-radius: 8px
@@ -273,7 +273,7 @@ transition: opacity 100ms ease
 
 ### Confirm Dialog（`.pano-canvas-confirm-card`）
 
-```
+```css
 background: #111                       /* ← 要トークン化: surface-1 */
 border-radius: 10px
 padding: 14px
@@ -347,7 +347,7 @@ width: min(340px, calc(100% - 32px))
 
 Vueコンポーネントを書く際の参照まとめ：
 
-```
+```text
 背景: --pano-surface-0 (panel) / --pano-surface-2 (control)
 テキスト: --pano-text (primary) / --pano-muted (secondary) / --pano-text-tertiary (tertiary)
 アクセント: --pano-accent (#0070f3)

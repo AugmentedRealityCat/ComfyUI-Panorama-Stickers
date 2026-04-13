@@ -1538,6 +1538,11 @@ function showEditor(node, type, options = {}) {
   try {
     vueApp.mount(mountHost);
   } catch (error) {
+    try {
+      vueApp.unmount();
+    } catch {
+      // Ignore secondary teardown failures from partially mounted trees.
+    }
     mountHost.remove();
     throw error;
   }
@@ -9862,10 +9867,12 @@ function showEditor(node, type, options = {}) {
   const onEscClose = (ev) => {
     if (ev.key !== "Escape") return;
     if (editor.fullscreen && document.fullscreenElement === overlay) {
+      ev.preventDefault();
       document.exitFullscreen?.().catch(() => { });
       return;
     }
     if (editor.fullscreen) {
+      ev.preventDefault();
       setFullscreenState(false);
       return;
     }

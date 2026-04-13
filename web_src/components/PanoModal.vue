@@ -1,5 +1,5 @@
 <script setup>
-import { computed, onBeforeUnmount, onMounted, watch } from "vue";
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import { ICON } from "../icons.js";
 import PanoFloatingRight from "./PanoFloatingRight.vue";
 import PanoPaintDock from "./PanoPaintDock.vue";
@@ -20,6 +20,8 @@ const props = defineProps({
 
 const emit = defineEmits(["close"]);
 let previousOverflow = "";
+let previousFocusedElement = null;
+const modalRef = ref(null);
 
 const previewMode = computed(() => props.readOnly === true);
 const shellPreset = computed(() => props.shellPreset || buildModalShellPreset(props.type));
@@ -37,7 +39,53 @@ const floatingButtons = computed(() => {
   return base;
 });
 
+function getFocusableElements() {
+  const modalEl = modalRef.value;
+  if (!modalEl) return [];
+  return Array.from(modalEl.querySelectorAll(
+    "button:not([disabled]), [href], input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex='-1'])",
+  )).filter((el) => {
+    if (!(el instanceof HTMLElement)) return false;
+    return !el.hidden && el.tabIndex >= 0 && el.offsetParent !== null;
+  });
+}
+
+function focusModal() {
+  const focusables = getFocusableElements();
+  const target = focusables[0] || modalRef.value;
+  target?.focus?.();
+}
+
+function restorePreviousFocus() {
+  if (previousFocusedElement?.isConnected) previousFocusedElement.focus?.();
+  previousFocusedElement = null;
+}
+
 function onKeydown(event) {
+  if (event.defaultPrevented) return;
+  if (event.key === "Tab") {
+    const focusables = getFocusableElements();
+    if (!focusables.length) {
+      event.preventDefault();
+      modalRef.value?.focus?.();
+      return;
+    }
+    const first = focusables[0];
+    const last = focusables[focusables.length - 1];
+    const active = document.activeElement;
+    if (event.shiftKey) {
+      if (active === first || active === modalRef.value || !modalRef.value?.contains(active)) {
+        event.preventDefault();
+        last.focus();
+      }
+      return;
+    }
+    if (active === last || !modalRef.value?.contains(active)) {
+      event.preventDefault();
+      first.focus();
+    }
+    return;
+  }
   if (event.key === "Escape") emit("close");
 }
 
@@ -53,10 +101,15 @@ function unlockBody() {
 function setOpenSideEffects(isOpen) {
   document.removeEventListener("keydown", onKeydown);
   if (isOpen) {
+    if (!previousFocusedElement) previousFocusedElement = document.activeElement;
     lockBody();
     document.addEventListener("keydown", onKeydown);
+    nextTick(() => {
+      focusModal();
+    });
   } else {
     unlockBody();
+    restorePreviousFocus();
   }
 }
 
@@ -67,6 +120,7 @@ onMounted(() => {
 onBeforeUnmount(() => {
   unlockBody();
   document.removeEventListener("keydown", onKeydown);
+  restorePreviousFocus();
 });
 
 watch(() => props.open, (nextOpen) => {
@@ -76,7 +130,7 @@ watch(() => props.open, (nextOpen) => {
 
 <template>
   <div v-if="open" class="pano-modal-overlay" @click.self="emit('close')">
-    <section class="pano-modal" role="dialog" aria-modal="true" :aria-label="nodeTitle">
+    <section ref="modalRef" class="pano-modal" role="dialog" aria-modal="true" :aria-label="nodeTitle" tabindex="-1">
       <div class="pano-stage-wrap">
         <canvas class="pano-stage" width="1600" height="800" />
       <div class="pano-stage-drop-hint" aria-hidden="true">
