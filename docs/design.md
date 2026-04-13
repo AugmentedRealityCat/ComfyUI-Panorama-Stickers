@@ -172,7 +172,8 @@ grid: minmax(0,1fr) 300px              /* side width: 300px */
 |---|---|---|
 | メインツールバー | **40px** | `.pano-floating-left` / `.pano-floating-bottom` / `.pano-floating-top` のボタン |
 | セレクションフロート | **35px** | `.pano-selection-menu .pano-btn-icon`（画像選択時に出るフロートUI） |
-| インスペクタコントロール | **28〜30px** | `.pano-picker-trigger` / `.pano-field-wide` / `.pano-field` |
+| インスペクタ — 単独コントロール | **30px** | `.pano-picker-trigger` / `.pano-field-wide` / テキスト入力 |
+| インスペクタ — 複合行内コントロール | **28px** | `.pano-field`（label+slider+number）/ リストアイテム |
 
 ### Button（`.pano-btn`）
 
@@ -185,7 +186,10 @@ grid: minmax(0,1fr) 300px              /* side width: 300px */
 | フォーカス | box-shadow: 0 0 0 1px `--pano-accent` | — |
 
 ```
-height: 40px  (メインツールバー) / 35px (セレクション) / 28-30px (インスペクタ)
+height: 40px  (メインツールバー)
+       35px  (セレクションフロート)
+       30px  (インスペクタ単独コントロール)
+       28px  (インスペクタ複合行内)
 border-radius: var(--pano-radius-md)   /* 8px */
 font-size: 12px / weight 500
 transition: 120ms cubic-bezier(0.2,0,0,1)
@@ -321,7 +325,7 @@ width: min(340px, calc(100% - 32px))
 
 | 箇所 | 現状 | 修正方針 |
 |---|---|---|
-| ボタン高さ | 40px / 35px / 28-30px の3段階 | **意図的な階層。混在ではない。** メインツールバー=40px、セレクション=35px、インスペクタ=30px |
+| ボタン高さ | 40px / 35px / 30px / 28px の4段階 | **意図的な階層。** メインツールバー=40px、セレクション=35px、インスペクタ単独=30px、インスペクタ複合行内=28px |
 | `.pano-canvas-confirm-card` background | `#111` ハードコード | `var(--pano-surface-1)` に置換 |
 | `.pano-section-title` color | `#d0d0d0` ハードコード | `var(--pano-muted-strong)` に置換 |
 | HUDとカラーポップのbg | 前者 `rgba(10,10,10,0.74)` / 後者 `rgba(20,20,23,0.98)` で別物 | 意図的な差異として維持（HUD=半透明、ピッカー=ほぼ不透明）|
