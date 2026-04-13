@@ -1,9 +1,5 @@
 # Panorama Suite — Design System
 
-> **目的：** Vue移行時にデザインを整合させるための参照文書。  
-> `pano_editor.css` の実態をベースに、`design_system.md` の設計意図との差分を明示する。  
-> Vue コンポーネントはこのドキュメントのトークンに従い、CSS内の不整合を吸収する。
-
 ---
 
 ## 1. Visual Theme & Atmosphere
@@ -168,6 +164,16 @@ grid: minmax(0,1fr) 300px              /* side width: 300px */
 
 **フルスクリーンモード:** `border-radius: 0 / padding: 0 / gap: 0 / grid: 1fr`。サイドパネル・HUD要素を `display:none` で非表示。
 
+### Button サイズ階層
+
+ボタン高さは用途によって3段階に分かれており、これは**意図的な設計**。
+
+| 用途 | 高さ | 対象 |
+|---|---|---|
+| メインツールバー | **40px** | `.pano-floating-left` / `.pano-floating-bottom` / `.pano-floating-top` のボタン |
+| セレクションフロート | **35px** | `.pano-selection-menu .pano-btn-icon`（画像選択時に出るフロートUI） |
+| インスペクタコントロール | **28〜30px** | `.pano-picker-trigger` / `.pano-field-wide` / `.pano-field` |
+
 ### Button（`.pano-btn`）
 
 | 状態 | 背景 | テキスト |
@@ -179,14 +185,11 @@ grid: minmax(0,1fr) 300px              /* side width: 300px */
 | フォーカス | box-shadow: 0 0 0 1px `--pano-accent` | — |
 
 ```
-height: 40px                           /* ← 現行。将来30pxに統一予定 */
+height: 40px  (メインツールバー) / 35px (セレクション) / 28-30px (インスペクタ)
 border-radius: var(--pano-radius-md)   /* 8px */
 font-size: 12px / weight 500
 transition: 120ms cubic-bezier(0.2,0,0,1)
 ```
-
-> **不整合:** `design_system.md` はコントロール高さ30pxを定義しているが、実CSSは40px。  
-> Vue移行時に新規コンポーネントから30pxで統一し、既存ボタンは段階的に移行する。
 
 **プライマリボタン（`.pano-btn-primary`）:**
 ```
@@ -318,7 +321,7 @@ width: min(340px, calc(100% - 32px))
 
 | 箇所 | 現状 | 修正方針 |
 |---|---|---|
-| ボタン高さ | 40px（多数）と30px（一部）が混在 | 新規Vueコンポーネントから30pxで統一 |
+| ボタン高さ | 40px / 35px / 28-30px の3段階 | **意図的な階層。混在ではない。** メインツールバー=40px、セレクション=35px、インスペクタ=30px |
 | `.pano-canvas-confirm-card` background | `#111` ハードコード | `var(--pano-surface-1)` に置換 |
 | `.pano-section-title` color | `#d0d0d0` ハードコード | `var(--pano-muted-strong)` に置換 |
 | HUDとカラーポップのbg | 前者 `rgba(10,10,10,0.74)` / 後者 `rgba(20,20,23,0.98)` で別物 | 意図的な差異として維持（HUD=半透明、ピッカー=ほぼ不透明）|
