@@ -1,60 +1,27 @@
 <script setup>
-import { computed } from "vue";
 import { ICON } from "../icons.js";
 import PanoIconButton from "./PanoIconButton.vue";
 
 defineProps({
   paintSwatches: { type: Array, default: () => [] },
+  panes: { type: Array, default: () => [] },
 });
 
 function swatchStyle(swatch) {
   return { "--swatch": String(swatch?.cssColor || "") };
 }
 
-const paneDefs = computed(() => [
-  {
-    key: "paint",
-    footer: "paint",
-    group: "paint",
-    clearTarget: "paint",
-    clearLabel: "Clear paint",
-    clearTip: "Clear paint",
-    clearHidden: true,
-    tools: [
-      { key: "pen", attr: "data-paint-tool", label: "Pen", tip: "Pen", icon: ICON.pencil_tool },
-      { key: "brush", attr: "data-paint-tool", label: "Soft Brush", tip: "Soft Brush", icon: ICON.spray_can_tool },
-      { key: "marker", attr: "data-paint-tool", label: "Marker", tip: "Marker", icon: ICON.highlighter_tool },
-      { key: "crayon", attr: "data-paint-tool", label: "Pastel", tip: "Pastel", icon: ICON.paintbrush_vertical_tool },
-      { key: "eraser", attr: "data-paint-tool", label: "Eraser", tip: "Eraser", icon: ICON.eraser_tool },
-      { key: "lasso_fill", attr: "data-paint-tool", label: "Lasso", tip: "Lasso", icon: ICON.lasso_tool },
-    ],
-  },
-  {
-    key: "mask",
-    footer: "mask",
-    group: "mask",
-    clearTarget: "mask",
-    clearLabel: "Clear mask",
-    clearTip: "Clear mask",
-    clearHidden: false,
-    tools: [
-      { key: "pen", attr: "data-mask-tool", label: "Mask Pen", tip: "Mask pen", icon: ICON.pencil_tool },
-      { key: "eraser", attr: "data-mask-tool", label: "Mask Eraser", tip: "Mask eraser", icon: ICON.eraser_tool },
-      { key: "lasso_fill", attr: "data-mask-tool", label: "Mask Lasso", tip: "Mask lasso", icon: ICON.lasso_tool },
-    ],
-  },
-]);
 </script>
 
 <template>
   <div class="pano-paint-dock is-hidden" data-paint-dock>
     <div
-      v-for="pane in paneDefs"
+      v-for="pane in panes"
       :key="pane.key"
       class="pano-paint-pane"
       :data-paint-pane="pane.key"
     >
-      <div v-if="pane.key === 'paint'" class="pano-paint-color-float" data-paint-color-row hidden>
+      <div v-if="pane.showColorFloat" class="pano-paint-color-float" data-paint-color-row hidden>
         <button
           v-for="swatch in paintSwatches"
           :key="swatch.id"

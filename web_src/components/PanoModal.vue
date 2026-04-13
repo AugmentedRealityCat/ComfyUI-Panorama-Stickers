@@ -6,6 +6,7 @@ import PanoPaintDock from "./PanoPaintDock.vue";
 import PanoSidePanel from "./PanoSidePanel.vue";
 import PanoToolRail from "./PanoToolRail.vue";
 import PanoViewToggle from "./PanoViewToggle.vue";
+import { buildModalShellPreset } from "../modal_shell_presets.js";
 
 const props = defineProps({
   open: { type: Boolean, default: true },
@@ -14,12 +15,27 @@ const props = defineProps({
   hideSidebar: { type: Boolean, default: false },
   nodeTitle: { type: String, default: "Panorama Stickers" },
   paintSwatches: { type: Array, default: () => [] },
+  shellPreset: { type: Object, default: null },
 });
 
 const emit = defineEmits(["close"]);
 let previousOverflow = "";
 
 const previewMode = computed(() => props.readOnly === true);
+const shellPreset = computed(() => props.shellPreset || buildModalShellPreset(props.type));
+const floatingButtons = computed(() => {
+  const base = Array.isArray(shellPreset.value?.floatingButtons) ? shellPreset.value.floatingButtons.slice() : [];
+  if (previewMode.value) {
+    base.push({
+      action: "toggle-fullscreen",
+      label: "Fullscreen",
+      tip: "Fullscreen",
+      pressed: null,
+      icon: ICON.fullscreen,
+    });
+  }
+  return base;
+});
 
 function onKeydown(event) {
   if (event.key === "Escape") emit("close");
@@ -57,13 +73,13 @@ watch(() => props.open, (nextOpen) => (nextOpen ? lockBody() : unlockBody()));
       </div>
 
         <template v-if="!previewMode">
-          <PanoToolRail :type="type" />
-          <PanoPaintDock :paint-swatches="paintSwatches" />
+          <PanoToolRail :buttons="shellPreset.toolButtons || []" />
+          <PanoPaintDock :paint-swatches="paintSwatches" :panes="shellPreset.paintPanes || []" />
         </template>
 
-        <PanoViewToggle :type="type" />
+        <PanoViewToggle :buttons="shellPreset.viewButtons || []" />
 
-        <PanoFloatingRight :preview-mode="previewMode" />
+        <PanoFloatingRight :buttons="floatingButtons" />
 
         <div class="pano-selection-menu" data-selection-menu />
         <button class="pano-btn pano-btn-icon pano-output-preview-toggle" data-action="toggle-output-preview-size" aria-label="Expand Preview" data-tip="Expand preview" style="display:none" v-html="ICON.fullscreen" />

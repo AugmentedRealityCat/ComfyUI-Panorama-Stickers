@@ -23,6 +23,7 @@ import {
   buildStickerTexturesFromState,
 } from "./pano_gl_scene.js";
 import PanoModal from "./components/PanoModal.vue";
+import { buildModalShellPreset } from "./modal_shell_presets.js";
 
 const STATE_WIDGET = "state_json";
 const EXTERNAL_STICKER_ID = "sticker_image_1";
@@ -1526,6 +1527,7 @@ function showEditor(node, type, options = {}) {
     readOnly,
     hideSidebar,
     nodeTitle,
+    shellPreset: buildModalShellPreset(type),
     paintSwatches: PAINT_COLOR_SWATCHES.map((swatch) => ({
       id: swatch.id,
       label: swatch.label,

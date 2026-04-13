@@ -1,39 +1,8 @@
 <script setup>
-import { computed } from "vue";
-import { ICON } from "../icons.js";
 import PanoIconButton from "./PanoIconButton.vue";
 
-const props = defineProps({
-  previewMode: { type: Boolean, default: false },
-});
-
-const buttons = computed(() => {
-  const items = [
-    {
-      action: "reset-view",
-      label: "Reset View",
-      tip: "Reset view",
-      pressed: null,
-      icon: ICON.reset,
-    },
-    {
-      action: "toggle-grid",
-      label: "Hide Grid",
-      tip: "Hide grid",
-      pressed: "true",
-      icon: ICON.eye,
-    },
-  ];
-  if (props.previewMode) {
-    items.push({
-      action: "toggle-fullscreen",
-      label: "Fullscreen",
-      tip: "Fullscreen",
-      pressed: null,
-      icon: ICON.fullscreen,
-    });
-  }
-  return items;
+defineProps({
+  buttons: { type: Array, default: () => [] },
 });
 </script>
 
