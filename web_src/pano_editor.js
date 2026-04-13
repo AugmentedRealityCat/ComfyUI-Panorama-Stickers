@@ -1,5 +1,6 @@
 import { app } from "../../scripts/app.js";
 import { api } from "../../scripts/api.js";
+import { createApp } from "vue";
 import {
   attachCutoutPreview,
   attachPreviewNode,
@@ -21,6 +22,7 @@ import {
   buildStickerSceneFromState,
   buildStickerTexturesFromState,
 } from "./pano_gl_scene.js";
+import PanoModal from "./components/PanoModal.vue";
 
 const STATE_WIDGET = "state_json";
 const EXTERNAL_STICKER_ID = "sticker_image_1";
@@ -1494,7 +1496,6 @@ function showEditor(node, type, options = {}) {
   const hideSidebar = options?.hideSidebar ?? readOnly;
   const previewMode = readOnly;
   const nodeTitle = getEditorNodeTitle(node, type);
-  const sideTitleHtml = `<span class="pano-side-title-icon" aria-hidden="true">${ICON.globe}</span><span>${escapeHtml(nodeTitle)}</span>`;
   installCss();
   const presetWidget = getWidget(node, "output_preset");
   const bgWidget = getWidget(node, "bg_color");
@@ -1517,127 +1518,30 @@ function showEditor(node, type, options = {}) {
       state.active.selected_shot_id = null;
     }
   }
-  const overlay = document.createElement("div");
-  overlay.className = "pano-modal-overlay";
-  const root = document.createElement("div");
-  root.className = "pano-modal";
-  const fullscreenBtnHtml = previewMode
-    ? `<button class="pano-btn pano-btn-icon" data-action="toggle-fullscreen" aria-label="Fullscreen" data-tip="Fullscreen">${ICON.fullscreen}</button>`
-    : "";
-  root.innerHTML = `
-    <div class="pano-stage-wrap">
-      <canvas class="pano-stage" width="1600" height="800"></canvas>
-      <div class="pano-stage-drop-hint" aria-hidden="true">
-        <div class="pano-stage-drop-hint-text">Drag and drop image here</div>
-      </div>
-      ${previewMode ? "" : `
-      <div class="pano-floating-left" data-tool-rail>
-        <button class="pano-btn pano-btn-icon${"cursor" === "cursor" ? " active" : ""}" type="button" data-tool-mode="cursor" aria-label="Cursor" aria-pressed="true" data-tip="Cursor">${ICON.cursor_tool}</button>
-        <button class="pano-btn pano-btn-icon" type="button" data-tool-mode="paint" aria-label="Paint" aria-pressed="false" data-tip="Paint">${ICON.palette_tool}</button>
-        <button class="pano-btn pano-btn-icon" type="button" data-tool-mode="mask" aria-label="Mask" aria-pressed="false" data-tip="Mask">${ICON.circle_dashed_tool}</button>
-        ${type === "cutout"
-          ? `<button class="pano-btn pano-btn-icon" type="button" data-tool-ui-action="add-image" aria-label="Add Image" data-tip="Add image">${ICON.image}</button>
-             <button class="pano-btn pano-btn-icon pano-btn-icon-accent" type="button" data-tool-ui-action="add-or-look" aria-label="Add Frame" data-tip="Add frame">${ICON.plus_circle}</button>`
-          : `<button class="pano-btn pano-btn-icon pano-btn-icon-accent" type="button" data-tool-ui-action="add" aria-label="Add Image" data-tip="Add image">${ICON.image}</button>`
-        }
-        <button class="pano-btn pano-btn-icon" type="button" data-tool-ui-action="clear" aria-label="Clear All" data-tip="Clear all">${ICON.clear}</button>
-        <button class="pano-btn pano-btn-icon" type="button" data-tool-ui-action="undo" aria-label="Undo" data-tip="Undo">${ICON.undo}</button>
-        <button class="pano-btn pano-btn-icon" type="button" data-tool-ui-action="redo" aria-label="Redo" data-tip="Redo">${ICON.redo}</button>
-      </div>
-      <div class="pano-paint-dock is-hidden" data-paint-dock>
-        <div class="pano-paint-pane" data-paint-pane="paint">
-          <div class="pano-paint-color-float" data-paint-color-row hidden>
-              ${PAINT_COLOR_SWATCHES.map((swatch) => `<button class="pano-paint-color-dot" type="button" data-paint-color-swatch="${swatch.id}" aria-label="${swatch.label}" style="--swatch:${colorToCss(swatch.color, 1)}"></button>`).join("")}
-              <button class="pano-paint-color-dot pano-paint-color-dot-rainbow" type="button" data-paint-color-custom aria-label="Custom color"></button>
-            <div class="pano-paint-color-pop" data-paint-color-pop hidden>
-              <div class="pano-paint-color-pop-head">
-                <span class="pano-paint-color-preview" data-paint-color-preview></span>
-                <span class="pano-paint-color-pop-label">Custom Color</span>
-              </div>
-              <div class="pano-paint-color-field">
-                <div class="pano-paint-sv-panel" data-paint-color-sv>
-                  <div class="pano-paint-sv-cursor" data-paint-color-sv-cursor></div>
-                </div>
-                <div class="pano-paint-hue-strip" data-paint-hue-strip>
-                  <div class="pano-paint-hue-handle" data-paint-hue-handle></div>
-                </div>
-              </div>
-              <label class="pano-paint-color-field">
-                <span>Opacity</span>
-                <div class="pano-paint-alpha-wrap">
-                  <input type="range" min="0" max="100" step="1" value="100" data-paint-alpha-slider>
-                  <span data-paint-alpha-value>100%</span>
-                </div>
-              </label>
-              <div class="pano-paint-color-history" data-paint-color-history-wrap>
-                <div class="pano-paint-color-history-list" data-paint-color-history></div>
-              </div>
-            </div>
-          </div>
-          <div class="pano-paint-footer" data-paint-footer="paint">
-            <div class="pano-paint-footer-group" data-paint-group="paint">
-              <button class="pano-btn pano-btn-icon" type="button" data-paint-tool="pen" aria-label="Pen" data-tip="Pen">${ICON.pencil_tool}</button>
-              <button class="pano-btn pano-btn-icon" type="button" data-paint-tool="brush" aria-label="Soft Brush" data-tip="Soft Brush">${ICON.spray_can_tool}</button>
-              <button class="pano-btn pano-btn-icon" type="button" data-paint-tool="marker" aria-label="Marker" data-tip="Marker">${ICON.highlighter_tool}</button>
-              <button class="pano-btn pano-btn-icon" type="button" data-paint-tool="crayon" aria-label="Pastel" data-tip="Pastel">${ICON.paintbrush_vertical_tool}</button>
-              <button class="pano-btn pano-btn-icon" type="button" data-paint-tool="eraser" aria-label="Eraser" data-tip="Eraser">${ICON.eraser_tool}</button>
-              <button class="pano-btn pano-btn-icon" type="button" data-paint-tool="lasso_fill" aria-label="Lasso" data-tip="Lasso">${ICON.lasso_tool}</button>
-            </div>
-            <div class="pano-paint-size-row" data-paint-size-row hidden>
-              <input class="pano-paint-size-slider" data-paint-size-slider type="range" min="1" max="120" step="1" value="10">
-              <span class="pano-paint-size-value" data-paint-size-value>10</span>
-            </div>
-            <div class="pano-paint-clear-row" data-paint-clear-row hidden>
-              <button class="pano-btn pano-btn-icon pano-paint-layer-clear" type="button" data-paint-layer-clear-current="paint" aria-label="Clear paint" data-tip="Clear paint">${ICON.clear}</button>
-            </div>
-          </div>
-        </div>
-        <div class="pano-paint-pane" data-paint-pane="mask">
-          <div class="pano-paint-footer" data-paint-footer="mask">
-            <div class="pano-paint-footer-group" data-paint-group="mask">
-              <button class="pano-btn pano-btn-icon" type="button" data-mask-tool="pen" aria-label="Mask Pen" data-tip="Mask pen">${ICON.pencil_tool}</button>
-              <button class="pano-btn pano-btn-icon" type="button" data-mask-tool="eraser" aria-label="Mask Eraser" data-tip="Mask eraser">${ICON.eraser_tool}</button>
-              <button class="pano-btn pano-btn-icon" type="button" data-mask-tool="lasso_fill" aria-label="Mask Lasso" data-tip="Mask lasso">${ICON.lasso_tool}</button>
-            </div>
-            <div class="pano-paint-size-row" data-paint-size-row hidden>
-              <input class="pano-paint-size-slider" data-paint-size-slider type="range" min="1" max="120" step="1" value="10">
-              <span class="pano-paint-size-value" data-paint-size-value>10</span>
-            </div>
-            <div class="pano-paint-clear-row" data-paint-clear-row>
-              <button class="pano-btn pano-btn-icon pano-paint-layer-clear" type="button" data-paint-layer-clear-current="mask" aria-label="Clear mask" data-tip="Clear mask">${ICON.clear}</button>
-            </div>
-          </div>
-        </div>
-      </div>`}
-      <div class="pano-floating-top">
-        <div class="pano-view-toggle" data-selected="pano" data-view-count="${type === "cutout" ? "3" : "2"}">
-          <button class="pano-view-btn" data-view="pano" aria-pressed="true" aria-label="Panorama">${ICON.pano}<span class="label">Panorama</span></button>
-          <button class="pano-view-btn" data-view="unwrap" aria-pressed="false" aria-label="Unwrap">${ICON.unwrap}<span class="label">Unwrap</span></button>
-          ${type === "cutout" ? `<button class="pano-view-btn pano-view-btn-icon" data-view="frame" aria-pressed="false" aria-label="Frame">${ICON.camera}<span>Frame</span></button>` : ""}
-        </div>
-      </div>
-      <div class="pano-floating-right">
-        <span class="pano-fov-value" data-fov-value aria-label="Field of view">100°</span>
-        <button class="pano-btn pano-btn-icon" data-action="reset-view" aria-label="Reset View" data-tip="Reset view">${ICON.reset}</button>
-        <button class="pano-btn pano-btn-icon" data-action="toggle-grid" aria-label="Hide Grid" data-tip="Hide grid" aria-pressed="true">${ICON.eye}</button>
-        ${fullscreenBtnHtml}
-      </div>
-      <div class="pano-selection-menu" data-selection-menu>
-      </div>
-      <button class="pano-btn pano-btn-icon pano-output-preview-toggle" data-action="toggle-output-preview-size" aria-label="Expand Preview" data-tip="Expand preview" style="display:none">${ICON.fullscreen}</button>
-      <div class="pano-tooltip" data-tooltip></div>
-    </div>
-    <div class="pano-side" data-side>
-      <div class="pano-side-head">
-        <div class="pano-side-title">${sideTitleHtml}</div>
-        <div class="pano-side-actions"></div>
-      </div>
-      <div class="pano-divider"></div>
-    </div>
-  `;
+  const mountHost = document.createElement("div");
+  document.body.appendChild(mountHost);
+  const vueApp = createApp(PanoModal, {
+    open: true,
+    type,
+    readOnly,
+    hideSidebar,
+    nodeTitle,
+    paintSwatches: PAINT_COLOR_SWATCHES.map((swatch) => ({
+      id: swatch.id,
+      label: swatch.label,
+      cssColor: colorToCss(swatch.color, 1),
+    })),
+    onClose: () => closeEditor(),
+  });
+  vueApp.mount(mountHost);
 
-  overlay.appendChild(root);
-  document.body.appendChild(overlay);
+  const overlay = mountHost.querySelector(".pano-modal-overlay");
+  const root = mountHost.querySelector(".pano-modal");
+  if (!overlay || !root) {
+    vueApp.unmount();
+    mountHost.remove();
+    throw new Error("Failed to mount Panorama Vue modal shell");
+  }
 
   const canvas = root.querySelector("canvas");
   const stageWrap = root.querySelector(".pano-stage-wrap");
@@ -9946,7 +9850,8 @@ function showEditor(node, type, options = {}) {
       if (node.onConnectionsChange === modalOnConnectionsChange) node.onConnectionsChange = modalPrevOnConnectionsChange;
       if (node.__panoExternalStickerSync === modalExternalStickerSync) node.__panoExternalStickerSync = null;
     }
-    overlay.remove();
+    vueApp.unmount();
+    mountHost.remove();
   };
   const onEscClose = (ev) => {
     if (ev.key !== "Escape") return;
