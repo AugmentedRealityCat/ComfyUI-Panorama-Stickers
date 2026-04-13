@@ -1,22 +1,9 @@
 <script setup>
-import { ICON } from "../icons.js";
-
-const props = defineProps({
-  tools: { type: Array, default: () => [] },
+defineProps({
+  tools:        { type: Array,  default: () => [] },
   activeToolId: { type: String, default: "" },
 });
-
-const emit = defineEmits(["select"]);
-
-const TOOL_ICONS = {
-  cursor:  ICON.cursor_tool,
-  paint:   ICON.palette_tool,
-  mask:    ICON.circle_dashed_tool,
-  add:     ICON.image,
-  clear:   ICON.clear,
-  undo:    ICON.undo,
-  redo:    ICON.redo,
-};
+defineEmits(["select"]);
 </script>
 
 <template>
@@ -26,16 +13,13 @@ const TOOL_ICONS = {
       :key="tool.id"
       type="button"
       class="pano-btn pano-btn-icon"
-      :class="{
-        active: tool.id === activeToolId,
-        'pano-btn-icon-accent': tool.accent,
-      }"
+      :class="{ active: tool.id === activeToolId, 'pano-btn-icon-accent': tool.accent }"
       :aria-label="tool.label"
       :aria-pressed="tool.id === activeToolId"
-      :disabled="tool.disabled"
+      :disabled="tool.disabled ?? false"
       :data-tip="tool.label"
-      @click="emit('select', tool.id)"
-      v-html="TOOL_ICONS[tool.icon ?? tool.id] ?? TOOL_ICONS.cursor"
+      v-html="tool.icon"
+      @click="$emit('select', tool.id)"
     />
   </div>
 </template>
