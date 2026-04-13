@@ -7,14 +7,33 @@ const props = defineProps({
 });
 
 const isCutout = computed(() => props.type === "cutout");
+const viewButtons = computed(() => {
+  const items = [
+    { key: "pano", label: "Panorama", icon: ICON.pano, pressed: "true" },
+    { key: "unwrap", label: "Unwrap", icon: ICON.unwrap, pressed: "false" },
+  ];
+  if (isCutout.value) {
+    items.push({ key: "frame", label: "Frame", icon: ICON.camera, pressed: "false" });
+  }
+  return items;
+});
 </script>
 
 <template>
   <div class="pano-floating-top">
     <div class="pano-view-toggle" data-selected="pano" :data-view-count="isCutout ? '3' : '2'">
-      <button class="pano-view-btn" data-view="pano" aria-pressed="true" aria-label="Panorama"><span v-html="ICON.pano" /><span class="label">Panorama</span></button>
-      <button class="pano-view-btn" data-view="unwrap" aria-pressed="false" aria-label="Unwrap"><span v-html="ICON.unwrap" /><span class="label">Unwrap</span></button>
-      <button v-if="isCutout" class="pano-view-btn pano-view-btn-icon" data-view="frame" aria-pressed="false" aria-label="Frame"><span v-html="ICON.camera" /><span>Frame</span></button>
+      <button
+        v-for="button in viewButtons"
+        :key="button.key"
+        class="pano-view-btn"
+        :class="{ 'pano-view-btn-icon': button.key === 'frame' }"
+        :data-view="button.key"
+        :aria-pressed="button.pressed"
+        :aria-label="button.label"
+      >
+        <span v-html="button.icon" />
+        <span class="label">{{ button.label }}</span>
+      </button>
     </div>
   </div>
 </template>

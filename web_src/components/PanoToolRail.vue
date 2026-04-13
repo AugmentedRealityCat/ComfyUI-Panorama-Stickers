@@ -7,22 +7,132 @@ const props = defineProps({
 });
 
 const isCutout = computed(() => props.type === "cutout");
+const toolButtons = computed(() => {
+  const base = [
+    {
+      key: "cursor",
+      actionType: "mode",
+      attr: "data-tool-mode",
+      value: "cursor",
+      label: "Cursor",
+      tip: "Cursor",
+      active: true,
+      accent: false,
+      icon: ICON.cursor_tool,
+      pressed: "true",
+    },
+    {
+      key: "paint",
+      actionType: "mode",
+      attr: "data-tool-mode",
+      value: "paint",
+      label: "Paint",
+      tip: "Paint",
+      active: false,
+      accent: false,
+      icon: ICON.palette_tool,
+      pressed: "false",
+    },
+    {
+      key: "mask",
+      actionType: "mode",
+      attr: "data-tool-mode",
+      value: "mask",
+      label: "Mask",
+      tip: "Mask",
+      active: false,
+      accent: false,
+      icon: ICON.circle_dashed_tool,
+      pressed: "false",
+    },
+  ];
+  const insert = isCutout.value
+    ? [
+        {
+          key: "add-image",
+          actionType: "ui",
+          attr: "data-tool-ui-action",
+          value: "add-image",
+          label: "Add Image",
+          tip: "Add image",
+          accent: false,
+          icon: ICON.image,
+        },
+        {
+          key: "add-or-look",
+          actionType: "ui",
+          attr: "data-tool-ui-action",
+          value: "add-or-look",
+          label: "Add Frame",
+          tip: "Add frame",
+          accent: true,
+          icon: ICON.plus_circle,
+        },
+      ]
+    : [
+        {
+          key: "add",
+          actionType: "ui",
+          attr: "data-tool-ui-action",
+          value: "add",
+          label: "Add Image",
+          tip: "Add image",
+          accent: true,
+          icon: ICON.image,
+        },
+      ];
+  const tail = [
+    {
+      key: "clear",
+      actionType: "ui",
+      attr: "data-tool-ui-action",
+      value: "clear",
+      label: "Clear All",
+      tip: "Clear all",
+      accent: false,
+      icon: ICON.clear,
+    },
+    {
+      key: "undo",
+      actionType: "ui",
+      attr: "data-tool-ui-action",
+      value: "undo",
+      label: "Undo",
+      tip: "Undo",
+      accent: false,
+      icon: ICON.undo,
+    },
+    {
+      key: "redo",
+      actionType: "ui",
+      attr: "data-tool-ui-action",
+      value: "redo",
+      label: "Redo",
+      tip: "Redo",
+      accent: false,
+      icon: ICON.redo,
+    },
+  ];
+  return [...base, ...insert, ...tail];
+});
 </script>
 
 <template>
   <div class="pano-floating-left" data-tool-rail>
-    <button class="pano-btn pano-btn-icon active" type="button" data-tool-mode="cursor" aria-label="Cursor" aria-pressed="true" data-tip="Cursor" v-html="ICON.cursor_tool" />
-    <button class="pano-btn pano-btn-icon" type="button" data-tool-mode="paint" aria-label="Paint" aria-pressed="false" data-tip="Paint" v-html="ICON.palette_tool" />
-    <button class="pano-btn pano-btn-icon" type="button" data-tool-mode="mask" aria-label="Mask" aria-pressed="false" data-tip="Mask" v-html="ICON.circle_dashed_tool" />
-    <template v-if="isCutout">
-      <button class="pano-btn pano-btn-icon" type="button" data-tool-ui-action="add-image" aria-label="Add Image" data-tip="Add image" v-html="ICON.image" />
-      <button class="pano-btn pano-btn-icon pano-btn-icon-accent" type="button" data-tool-ui-action="add-or-look" aria-label="Add Frame" data-tip="Add frame" v-html="ICON.plus_circle" />
-    </template>
-    <template v-else>
-      <button class="pano-btn pano-btn-icon pano-btn-icon-accent" type="button" data-tool-ui-action="add" aria-label="Add Image" data-tip="Add image" v-html="ICON.image" />
-    </template>
-    <button class="pano-btn pano-btn-icon" type="button" data-tool-ui-action="clear" aria-label="Clear All" data-tip="Clear all" v-html="ICON.clear" />
-    <button class="pano-btn pano-btn-icon" type="button" data-tool-ui-action="undo" aria-label="Undo" data-tip="Undo" v-html="ICON.undo" />
-    <button class="pano-btn pano-btn-icon" type="button" data-tool-ui-action="redo" aria-label="Redo" data-tip="Redo" v-html="ICON.redo" />
+    <button
+      v-for="button in toolButtons"
+      :key="button.key"
+      class="pano-btn pano-btn-icon"
+      :class="{
+        active: button.active,
+        'pano-btn-icon-accent': button.accent,
+      }"
+      type="button"
+      :[button.attr]="button.value"
+      :aria-label="button.label"
+      :aria-pressed="button.pressed"
+      :data-tip="button.tip"
+      v-html="button.icon"
+    />
   </div>
 </template>

@@ -1,6 +1,7 @@
 <script setup>
 import { computed, onBeforeUnmount, onMounted, watch } from "vue";
 import { ICON } from "../icons.js";
+import PanoFloatingRight from "./PanoFloatingRight.vue";
 import PanoPaintDock from "./PanoPaintDock.vue";
 import PanoSidePanel from "./PanoSidePanel.vue";
 import PanoToolRail from "./PanoToolRail.vue";
@@ -62,12 +63,7 @@ watch(() => props.open, (nextOpen) => (nextOpen ? lockBody() : unlockBody()));
 
         <PanoViewToggle :type="type" />
 
-        <div class="pano-floating-right">
-          <span class="pano-fov-value" data-fov-value aria-label="Field of view">100°</span>
-          <button class="pano-btn pano-btn-icon" data-action="reset-view" aria-label="Reset View" data-tip="Reset view" v-html="ICON.reset" />
-          <button class="pano-btn pano-btn-icon" data-action="toggle-grid" aria-label="Hide Grid" data-tip="Hide grid" aria-pressed="true" v-html="ICON.eye" />
-          <button v-if="previewMode" class="pano-btn pano-btn-icon" data-action="toggle-fullscreen" aria-label="Fullscreen" data-tip="Fullscreen" v-html="ICON.fullscreen" />
-        </div>
+        <PanoFloatingRight :preview-mode="previewMode" />
 
         <div class="pano-selection-menu" data-selection-menu />
         <button class="pano-btn pano-btn-icon pano-output-preview-toggle" data-action="toggle-output-preview-size" aria-label="Expand Preview" data-tip="Expand preview" style="display:none" v-html="ICON.fullscreen" />
