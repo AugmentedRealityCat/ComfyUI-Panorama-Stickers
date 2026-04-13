@@ -61,7 +61,7 @@ Vue コンポーネントではハードコードを禁止し、必ずトーク�
 | トークン | 値 | 用途 |
 |---|---|---|
 | `--pano-accent` | `var(--pano-theme-accent, #0070f3)` | フォーカスリング・スライダー・アクセント |
-| `--pano-accent-dimmed` | `color-mix(in srgb, accent 34%, transparent)` | 薄いアクセント塗り |
+| `--pano-accent-dimmed` | `color-mix(in srgb, var(--pano-accent) 34%, transparent)` | 薄いアクセント塗り |
 | `--pano-accent-dark` | `var(--pano-theme-accent-dark, #0366d6)` | アクセントホバー |
 | `--pano-accent-extra-dark` | `var(--pano-theme-accent-extra-dark, #0059bc)` | アクセントアクティブ |
 
