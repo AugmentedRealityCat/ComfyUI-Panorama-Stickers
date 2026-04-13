@@ -4,6 +4,7 @@
   "type": "module",
   "scripts": {
     "build:web": "vite build",
+    "dev:web": "vite",
     "build:web:legacy": "node tools/build_panorama_bundle.mjs"
   },
   "devDependencies": {
