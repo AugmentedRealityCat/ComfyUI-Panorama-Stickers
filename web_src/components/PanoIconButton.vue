@@ -7,7 +7,7 @@ const props = defineProps({
   icon: { type: String, default: "" },
   label: { type: String, default: "" },
   tip: { type: String, default: "" },
-  pressed: { type: [String, Boolean, null], default: null },
+  pressed: { type: [String, Boolean], default: null },
   extraClass: { type: [String, Array, Object], default: "" },
   attrs: { type: Object, default: () => ({}) },
 });

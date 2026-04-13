@@ -50,9 +50,18 @@ function unlockBody() {
   document.body.style.overflow = previousOverflow;
 }
 
+function setOpenSideEffects(isOpen) {
+  document.removeEventListener("keydown", onKeydown);
+  if (isOpen) {
+    lockBody();
+    document.addEventListener("keydown", onKeydown);
+  } else {
+    unlockBody();
+  }
+}
+
 onMounted(() => {
-  if (props.open) lockBody();
-  document.addEventListener("keydown", onKeydown);
+  setOpenSideEffects(props.open);
 });
 
 onBeforeUnmount(() => {
@@ -60,7 +69,9 @@ onBeforeUnmount(() => {
   document.removeEventListener("keydown", onKeydown);
 });
 
-watch(() => props.open, (nextOpen) => (nextOpen ? lockBody() : unlockBody()));
+watch(() => props.open, (nextOpen) => {
+  setOpenSideEffects(nextOpen);
+});
 </script>
 
 <template>
