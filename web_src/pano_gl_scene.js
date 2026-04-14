@@ -71,6 +71,7 @@ export function buildStickerTexturesFromState(state, assetLoader, options = {}) 
     if (!textureId || seen.has(textureId)) return;
     const asset = assetId ? assets[assetId] : null;
     const source = assetLoader(textureId, asset, item);
+    if (source instanceof HTMLImageElement && !source.complete) return;
     const width = Number(source?.naturalWidth || source?.videoWidth || source?.width || 0);
     const height = Number(source?.naturalHeight || source?.videoHeight || source?.height || 0);
     if (!source || width <= 0 || height <= 0) return;

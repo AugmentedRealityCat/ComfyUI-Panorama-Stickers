@@ -48,6 +48,7 @@ const LASSO_CURSOR_HOTSPOT_Y = 4;
 // beforeQueuePrompt waits for all pending promises before sending the graph.
 const _paintLayerUploadRegistry = new Map();
 const _paintLayerSyncRegistry = new Map();
+const _stickerAssetUploadRegistry = new Map();
 const ICON = {
   // Source: @geist-ui/icons globe.js (v1.0.2)
   globe: "<svg viewBox='0 0 24 24' aria-hidden='true' fill='none' stroke='currentColor' stroke-linecap='round' stroke-linejoin='round' stroke-width='1.5' shape-rendering='geometricPrecision'><circle cx='12' cy='12' r='10'/><path d='M2 12h20M12 2a15.3 15.3 0 014 10 15.3 15.3 0 01-4 10 15.3 15.3 0 01-4-10 15.3 15.3 0 014-10z'/></svg>",
@@ -322,13 +323,36 @@ function expandTri(d0, d1, d2, px = 1.1) {
   return [grow(d0), grow(d1), grow(d2)];
 }
 
+let panoSuiteCssReadyPromise = null;
+
 function installCss() {
-  if (document.getElementById("pano-suite-style-link")) return;
-  const link = document.createElement("link");
-  link.id = "pano-suite-style-link";
-  link.rel = "stylesheet";
-  link.href = new URL("./pano_editor.css", import.meta.url).toString();
-  document.head.appendChild(link);
+  if (panoSuiteCssReadyPromise) return panoSuiteCssReadyPromise;
+  panoSuiteCssReadyPromise = new Promise((resolve) => {
+    const existing = document.getElementById("pano-suite-style-link");
+    if (existing) {
+      if (existing.dataset.loaded === "true") {
+        resolve();
+        return;
+      }
+      existing.addEventListener("load", () => {
+        existing.dataset.loaded = "true";
+        resolve();
+      }, { once: true });
+      existing.addEventListener("error", () => resolve(), { once: true });
+      return;
+    }
+    const link = document.createElement("link");
+    link.id = "pano-suite-style-link";
+    link.rel = "stylesheet";
+    link.href = new URL("./pano_editor.css", import.meta.url).toString();
+    link.addEventListener("load", () => {
+      link.dataset.loaded = "true";
+      resolve();
+    }, { once: true });
+    link.addEventListener("error", () => resolve(), { once: true });
+    document.head.appendChild(link);
+  });
+  return panoSuiteCssReadyPromise;
 }
 
 const SHARED_UI_SETTINGS_KEY = "pano_suite.ui_settings.v1";
@@ -1493,12 +1517,12 @@ function getPreferredExactLinkedInputImage(node, inputNames = [], onLoad = null,
   return loadLinkedInputImageFromSource(node, key, srcRaw, onLoad);
 }
 
-function showEditor(node, type, options = {}) {
+async function showEditor(node, type, options = {}) {
   const readOnly = options?.readOnly === true;
   const hideSidebar = options?.hideSidebar ?? readOnly;
   const previewMode = readOnly;
   const nodeTitle = getEditorNodeTitle(node, type);
-  installCss();
+  await installCss();
   const presetWidget = getWidget(node, "output_preset");
   const bgWidget = getWidget(node, "bg_color");
   const stateWidget = getWidget(node, STATE_WIDGET);
@@ -1509,10 +1533,6 @@ function showEditor(node, type, options = {}) {
     String(bgWidget?.value || "#00ff00"),
   );
   node.__panoLiveStateOverride = JSON.stringify(state);
-  node.__panoDomPreview?.requestDraw?.();
-  node.setDirtyCanvas?.(true, true);
-  node.graph?.setDirtyCanvas?.(true, true);
-  app?.canvas?.setDirty?.(true, true);
 
   if (type === "cutout") {
     state.shots = Array.isArray(state.shots) ? state.shots.slice(0, 1) : [];
@@ -1609,7 +1629,10 @@ function showEditor(node, type, options = {}) {
   let paintSizePreviewTimer = 0;
   let paintPaneFadeTimer = 0;
   let visiblePaintPaneMode = "";
-  if (type === "cutout") canvas.style.opacity = "0";
+  stageWrap?.removeAttribute("data-stage-ready");
+  stageWrap?.setAttribute("data-stage-loading-kind", "boot");
+  canvas.style.opacity = "1";
+  backgroundCanvas.style.opacity = "0";
   if (hideSidebar) {
     side?.remove();
     root.classList.add("pano-modal-readonly");
@@ -1740,7 +1763,7 @@ function showEditor(node, type, options = {}) {
     lastTickTs: 0,
     lastSizeCheckTs: 0,
     pendingStableLayoutFrames: type === "cutout" ? 2 : 0,
-    hasPresentedFrame: type !== "cutout",
+    hasPresentedFrame: false,
     backgroundDirty: true,
     backgroundWasVisible: false,
   };
@@ -3485,30 +3508,37 @@ function showEditor(node, type, options = {}) {
     if (!ctx || !rect || !view) return false;
     let drewAnything = false;
     const liveEraserPreview = getActivePaintEraserPreviewInfo();
+    const useModalBackgroundLayer = shouldUseModalBackgroundLayer(rect, view);
+    let modalLayerDrawn = false;
     const bgReady = !!bgImg
       && !!bgImg.complete
       && Number(bgImg.naturalWidth || bgImg.width || 0) > 1
       && Number(bgImg.naturalHeight || bgImg.height || 0) > 1;
-    if (bgReady && editor.showPanorama) {
+    if (useModalBackgroundLayer) {
+      modalLayerDrawn = renderModalBackgroundLayer(
+        rect,
+        view,
+        bgReady && editor.showPanorama ? bgImg : null,
+        `${cachePrefix}_bg_gl`,
+      );
+      drewAnything = drewAnything || !!modalLayerDrawn;
+    } else if (bgReady && editor.showPanorama) {
       const bgDrawn = (
-        shouldUseModalBackgroundLayer(rect, view)
-          ? renderModalBackgroundLayer(rect, view, bgImg, `${cachePrefix}_bg_gl`)
-          : renderCutoutViewToContext2D({
-            owner: node,
-            cacheKey: `${cachePrefix}_bg_only`,
-            ctx,
-            rect,
-            img: bgImg,
-            view,
-          })
+        renderCutoutViewToContext2D({
+          owner: node,
+          cacheKey: `${cachePrefix}_bg_only`,
+          ctx,
+          rect,
+          img: bgImg,
+          view,
+        })
       );
       drewAnything = drewAnything || !!bgDrawn;
-    } else if (shouldUseModalBackgroundLayer(rect, view)) {
-      clearModalBackgroundLayer();
     }
     if (editor.showObjects) {
       for (const entry of getOrderedDisplayListObjects(true)) {
         if (entry.type === "sticker" && entry.item) {
+          if (useModalBackgroundLayer && modalLayerDrawn) continue;
           const scene = buildSingleStickerScene(entry.item);
           const textures = buildSingleStickerTextures(entry.item, scene);
           const stickerDrawn = renderSceneToContext2D({
@@ -3742,6 +3772,42 @@ function showEditor(node, type, options = {}) {
     }
     const img = getPreferredExactLinkedInputImage(node, preferred, () => requestDraw(), `background:${preferred.join("|")}`);
     return img;
+  }
+
+  function isDecodedImageReady(img) {
+    if (!img) return false;
+    if (img instanceof HTMLImageElement) {
+      return !!img.complete
+        && Number(img.naturalWidth || img.width || 0) > 0
+        && Number(img.naturalHeight || img.height || 0) > 0;
+    }
+    return Number(img.width || img.naturalWidth || 0) > 0
+      && Number(img.height || img.naturalHeight || 0) > 0;
+  }
+
+  function getStageLoadingKind() {
+    if (!runtime.hasPresentedFrame) return "boot";
+    let backgroundPending = false;
+    let stickersPending = false;
+    if (editor.showPanorama) {
+      const bgImg = getConnectedErpImage();
+      backgroundPending = !!bgImg && !isDecodedImageReady(bgImg);
+    }
+    if (editor.showObjects) {
+      const stickers = Array.isArray(state.stickers) ? state.stickers : [];
+      for (const item of stickers) {
+        if (item?.visible === false) continue;
+        const img = getStickerImage(item);
+        if (img && !isDecodedImageReady(img)) {
+          stickersPending = true;
+          break;
+        }
+      }
+    }
+    if (backgroundPending && stickersPending) return "mixed";
+    if (backgroundPending) return "background";
+    if (stickersPending) return "stickers";
+    return "";
   }
 
   function getWrappedErpCanvas(img) {
@@ -4080,11 +4146,24 @@ function showEditor(node, type, options = {}) {
 
   function shouldUseModalBackgroundLayer(rect, view) {
     if (!modalBackgroundLayerAvailable()) return false;
+    if (type !== "stickers") return false;
     if (String(view?.mode || "") !== "panorama") return false;
     return Number(rect?.x || 0) === 0
       && Number(rect?.y || 0) === 0
       && Math.round(Number(rect?.w || 0)) === Math.round(Number(canvas?.width || 0))
       && Math.round(Number(rect?.h || 0)) === Math.round(Number(canvas?.height || 0));
+  }
+
+  function buildModalBackgroundStickerScene() {
+    if (!editor.showObjects) {
+      return { stickers: [], selectedId: null, hoveredId: null };
+    }
+    return buildEditorStickerScene();
+  }
+
+  function buildModalBackgroundStickerTextures(scene) {
+    if (!editor.showObjects || !Array.isArray(scene?.stickers) || scene.stickers.length === 0) return [];
+    return buildEditorStickerTextures(scene);
   }
 
   function clearModalBackgroundLayer() {
@@ -4107,21 +4186,33 @@ function showEditor(node, type, options = {}) {
   }
 
   function renderModalBackgroundLayer(rect, view, bgImg, cachePrefix = "modal_bg_gl") {
-    if (!shouldUseModalBackgroundLayer(rect, view) || !bgImg) return false;
+    if (!shouldUseModalBackgroundLayer(rect, view)) return false;
     if (!runtime.backgroundDirty && runtime.backgroundWasVisible) return true;
-    const bgRevision = [
-      String(bgImg.currentSrc || bgImg.src || ""),
-      Number(bgImg.naturalWidth || bgImg.width || 0),
-      Number(bgImg.naturalHeight || bgImg.height || 0),
-    ].join("|");
+    const scene = buildModalBackgroundStickerScene();
+    const textures = buildModalBackgroundStickerTextures(scene);
+    const bgReady = !!bgImg
+      && !!bgImg.complete
+      && Number(bgImg.naturalWidth || bgImg.width || 0) > 1
+      && Number(bgImg.naturalHeight || bgImg.height || 0) > 1;
+    if (!bgReady && textures.length === 0) {
+      clearModalBackgroundLayer();
+      return false;
+    }
+    const bgRevision = bgReady
+      ? [
+        String(bgImg.currentSrc || bgImg.src || ""),
+        Number(bgImg.naturalWidth || bgImg.width || 0),
+        Number(bgImg.naturalHeight || bgImg.height || 0),
+      ].join("|")
+      : "none";
     const surface = modalBackgroundRenderer.renderScene({
       width: rect.w,
       height: rect.h,
       dpr: window.devicePixelRatio || 1,
-      backgroundSource: bgImg,
-      backgroundRevision: `${cachePrefix}:${bgRevision}`,
-      textures: [],
-      scene: { stickers: [], selectedId: null, hoveredId: null },
+      backgroundSource: bgReady ? bgImg : null,
+      backgroundRevision: bgReady ? `${cachePrefix}:${bgRevision}` : "",
+      textures,
+      scene,
       view,
       backgroundOpacity: 1,
     });
@@ -5939,7 +6030,15 @@ function showEditor(node, type, options = {}) {
     updateSelectionMenu();
     if (!runtime.hasPresentedFrame) {
       runtime.hasPresentedFrame = true;
-      canvas.style.opacity = "1";
+      backgroundCanvas.style.opacity = "1";
+    }
+    const stageLoadingKind = getStageLoadingKind();
+    if (stageLoadingKind) {
+      stageWrap?.removeAttribute("data-stage-ready");
+      stageWrap?.setAttribute("data-stage-loading-kind", stageLoadingKind);
+    } else {
+      stageWrap?.setAttribute("data-stage-ready", "");
+      stageWrap?.removeAttribute("data-stage-loading-kind");
     }
   }
 
@@ -5947,6 +6046,18 @@ function showEditor(node, type, options = {}) {
     if (type !== "cutout") return false;
     const kind = String(editor.interaction?.kind || "");
     return kind === "move" || kind === "scale" || kind === "scale_x" || kind === "scale_y" || kind === "rotate";
+  }
+
+  function isModalBackgroundObjectInteraction(interaction = editor.interaction) {
+    if (type !== "stickers" || editor.mode !== "pano") return false;
+    const kind = String(interaction?.kind || "");
+    if (kind === "move" || kind === "scale" || kind === "scale_x" || kind === "scale_y" || kind === "rotate") {
+      return true;
+    }
+    if (kind === "move_multi") {
+      return Array.isArray(interaction?.stickerSnapshots) && interaction.stickerSnapshots.length > 0;
+    }
+    return false;
   }
 
   function syncNodeLivePreviewSources(options = {}) {
@@ -5984,6 +6095,7 @@ function showEditor(node, type, options = {}) {
     const backgroundShouldRedraw = !localOnly
       || interactionKind === "view"
       || interactionKind === "pan_frame"
+      || isModalBackgroundObjectInteraction()
       || !!editor.viewTween?.active
       || cause === "mode"
       || cause === "frame_view"
@@ -6884,8 +6996,6 @@ function showEditor(node, type, options = {}) {
         i.src = tempUrl;
       });
       imageCache.set(aid, img);
-      const uploaded = await uploadStickerAssetFile(file, String(file.name || aid));
-      state.assets[aid] = uploaded;
       const id = uid("st");
       state.stickers.push({
         id,
@@ -6900,14 +7010,36 @@ function showEditor(node, type, options = {}) {
       setSelectedItem(state.stickers[state.stickers.length - 1]);
       forceCursorTool();
       pushHistory();
-      commitAndRefreshNode();
       updateSidePanel();
       updateSelectionMenu();
       requestDraw();
+      const uploadPromise = (async () => {
+        const uploaded = await uploadStickerAssetFile(file, String(file.name || aid));
+        state.assets[aid] = uploaded;
+        commitAndRefreshNode();
+        requestDraw();
+      })();
+      _stickerAssetUploadRegistry.set(aid, uploadPromise);
+      try {
+        await uploadPromise;
+      } finally {
+        _stickerAssetUploadRegistry.delete(aid);
+      }
     } catch (err) {
       console.error("[PanoramaSuite] failed to add sticker asset", err);
       delete state.assets[aid];
       imageCache.delete(aid);
+      const idx = state.stickers.findIndex((item) => String(item?.asset_id || "") === aid);
+      if (idx >= 0) {
+        const removed = state.stickers[idx];
+        state.stickers.splice(idx, 1);
+        if (editor.selection?.id && String(editor.selection.id) === String(removed?.id || "")) {
+          setSelectedItem(null);
+        }
+        updateSidePanel();
+        updateSelectionMenu();
+        requestDraw();
+      }
     } finally {
       URL.revokeObjectURL(tempUrl);
     }
@@ -6939,6 +7071,11 @@ function showEditor(node, type, options = {}) {
     const selected = getSelected();
     if (!selected || !isStickerItem(selected) || isExternalSticker(selected)) return;
     if (!isImageFile(file)) return;
+    const previousAssetId = String(selected.asset_id || "");
+    const previousVfov = Number(selected.vFOV_deg || 0);
+    const previousCrop = selected.crop && typeof selected.crop === "object"
+      ? { ...selected.crop }
+      : null;
     const nextAssetId = uid("asset");
     const tempUrl = URL.createObjectURL(file);
     try {
@@ -6949,8 +7086,6 @@ function showEditor(node, type, options = {}) {
         i.src = tempUrl;
       });
       imageCache.set(nextAssetId, img);
-      const uploaded = await uploadStickerAssetFile(file, String(file.name || nextAssetId));
-      state.assets[nextAssetId] = uploaded;
       selected.asset_id = nextAssetId;
       selected.vFOV_deg = computeStickerVFov(
         Number(selected.hFOV_deg || 30),
@@ -6961,14 +7096,32 @@ function showEditor(node, type, options = {}) {
       pruneUnusedAssets();
       markObjectVisualsDirty();
       pushHistory();
-      commitAndRefreshNode();
       updateSidePanel();
       updateSelectionMenu();
       requestDraw();
+      const uploadPromise = (async () => {
+        const uploaded = await uploadStickerAssetFile(file, String(file.name || nextAssetId));
+        state.assets[nextAssetId] = uploaded;
+        commitAndRefreshNode();
+        requestDraw();
+      })();
+      _stickerAssetUploadRegistry.set(nextAssetId, uploadPromise);
+      try {
+        await uploadPromise;
+      } finally {
+        _stickerAssetUploadRegistry.delete(nextAssetId);
+      }
     } catch (err) {
       console.error("[PanoramaSuite] failed to replace sticker asset", err);
       delete state.assets[nextAssetId];
       imageCache.delete(nextAssetId);
+      selected.asset_id = previousAssetId;
+      selected.vFOV_deg = previousVfov;
+      selected.crop = previousCrop ? { ...previousCrop } : null;
+      markObjectVisualsDirty();
+      updateSidePanel();
+      updateSelectionMenu();
+      requestDraw();
     } finally {
       URL.revokeObjectURL(tempUrl);
     }
@@ -10211,6 +10364,10 @@ app.registerExtension({
     const pending = [..._paintLayerUploadRegistry.values()];
     if (pending.length > 0) {
       await Promise.allSettled(pending);
+    }
+    const pendingStickerUploads = [..._stickerAssetUploadRegistry.values()];
+    if (pendingStickerUploads.length > 0) {
+      await Promise.allSettled(pendingStickerUploads);
     }
   },
   beforeRegisterNodeDef(nodeType, nodeData) {

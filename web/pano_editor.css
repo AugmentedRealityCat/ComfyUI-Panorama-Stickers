@@ -60,6 +60,10 @@
   --pano-float-radius: 10px;
   --pano-float-bg: rgba(10, 10, 10, 0.74);
 }
+.pano-modal:focus,
+.pano-modal:focus-visible {
+  outline: none;
+}
 .pano-modal.pano-modal-fullscreen {
   width: 100vw;
   height: 100vh;
@@ -139,6 +143,40 @@
 }
 .pano-stage-wrap.drop-active .pano-stage {
   filter: blur(2px) brightness(0.76);
+}
+.pano-stage-loading {
+  position: absolute;
+  inset: 0;
+  z-index: 2;
+  border-radius: 10px;
+  overflow: hidden;
+  pointer-events: none;
+  background: var(--pano-bg-base, #0a0a0a);
+  transition: opacity 220ms ease;
+}
+.pano-stage-loading::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(
+    90deg,
+    transparent 0%,
+    rgba(255, 255, 255, 0.055) 50%,
+    transparent 100%
+  );
+  transform: translateX(-100%);
+  animation: pano-stage-shimmer 1.6s ease-in-out infinite;
+  will-change: transform;
+}
+.pano-stage-wrap[data-stage-ready] .pano-stage-loading {
+  opacity: 0;
+}
+.pano-modal-fullscreen .pano-stage-loading {
+  border-radius: 0;
+}
+@keyframes pano-stage-shimmer {
+  0%   { transform: translateX(-100%); }
+  100% { transform: translateX(100%); }
 }
 .pano-stage-drop-hint {
   position: absolute;
