@@ -43,6 +43,51 @@ function createCanvasSurface(width, height) {
   return { canvas, ctx };
 }
 
+function panoPaintDebugEnabled() {
+  try {
+    if (window?.__PANO_PAINT_DEBUG__ === true) return true;
+    return String(window?.localStorage?.getItem("panoPaintDebug") || "").trim() === "1";
+  } catch {
+    return false;
+  }
+}
+
+function logPaintDebug(phase, payload) {
+  if (!panoPaintDebugEnabled()) return;
+  console.warn(`[PANO_PAINT][${phase}]`, payload);
+}
+
+function measureAlphaBounds(canvas, threshold = 8) {
+  const ctx = canvas?.getContext?.("2d");
+  const width = Number(canvas?.width || 0);
+  const height = Number(canvas?.height || 0);
+  if (!ctx || width < 1 || height < 1) return null;
+  const data = ctx.getImageData(0, 0, width, height).data;
+  let minX = width;
+  let minY = height;
+  let maxX = -1;
+  let maxY = -1;
+  for (let y = 0; y < height; y += 1) {
+    for (let x = 0; x < width; x += 1) {
+      if (data[(y * width + x) * 4 + 3] <= threshold) continue;
+      if (x < minX) minX = x;
+      if (y < minY) minY = y;
+      if (x > maxX) maxX = x;
+      if (y > maxY) maxY = y;
+    }
+  }
+  if (maxX < minX || maxY < minY) return null;
+  return {
+    minX,
+    minY,
+    maxX,
+    maxY,
+    width: maxX - minX + 1,
+    height: maxY - minY + 1,
+    aspect: Number(((maxX - minX + 1) / Math.max(1, (maxY - minY + 1))).toFixed(4)),
+  };
+}
+
 function createScratchCanvas(width, height) {
   const w = Math.max(1, Math.ceil(width));
   const h = Math.max(1, Math.ceil(height));
@@ -434,6 +479,8 @@ function buildStampContext(ctx, stroke, descriptor) {
   const aspect    = Math.max(0.1, Number(stroke?.aspect ?? 1));
   const angle     = Number(stroke?.angle?.value ?? 0);
   const spacingPx = getSpacingPx(stroke, radiusPx);
+  const viewMode  = String(stroke?.targetSpace?.viewMode || "");
+  const latitudeCorrection = descriptor?.kind === "ERP_GLOBAL" && viewMode !== "unwrap";
   const rawSc     = stroke?.scatter;
   const scatter   = rawSc
     ? { radius: Number(rawSc.radius ?? 1.5), count: Math.max(1, Math.round(rawSc.count ?? 6)) }
@@ -456,7 +503,7 @@ function buildStampContext(ctx, stroke, descriptor) {
     stampTex = buildStampTexture(radiusPx, hardness, col.r, col.g, col.b, col.a);
   }
 
-  return { ctx, stampTex, radiusPx, spacingPx, desc: descriptor, aspect, angle, stampKind, scatter };
+  return { ctx, stampTex, radiusPx, spacingPx, desc: descriptor, aspect, angle, stampKind, scatter, latitudeCorrection };
 }
 
 // ─── Stamp Color ─────────────────────────────────────────────────────────────
@@ -548,7 +595,8 @@ function _drawSingleStamp(sc, cx, cy, widthScale) {
       const sy = cy + Math.sin(a) * d;
       const subRv = Math.max(0.5, sc.radiusPx * ws * 0.48);
       const lat   = (0.5 - sy / Math.max(1, sc.desc.height)) * Math.PI;
-      const rh    = subRv * sc.aspect / Math.max(0.05, Math.cos(lat));
+      const lonScale = sc.latitudeCorrection ? (1 / Math.max(0.05, Math.cos(lat))) : 1;
+      const rh    = subRv * sc.aspect * lonScale;
       _placeStamp(sc, sx, sy, subRv, rh);
     }
     return;
@@ -556,7 +604,8 @@ function _drawSingleStamp(sc, cx, cy, widthScale) {
 
   const rv = Math.max(0.5, sc.radiusPx * ws);
   const lat = (0.5 - cy / Math.max(1, sc.desc.height)) * Math.PI;
-  const rh  = rv * sc.aspect / Math.max(0.05, Math.cos(lat));
+  const lonScale = sc.latitudeCorrection ? (1 / Math.max(0.05, Math.cos(lat))) : 1;
+  const rh  = rv * sc.aspect * lonScale;
   _placeStamp(sc, cx, cy, rv, rh);
 }
 
@@ -1159,6 +1208,18 @@ export function createPaintEngineManager(options = {}) {
       surface.ctx.drawImage(target.currentStroke.canvas, 0, 0);
       surface.ctx.restore();
     }
+
+    logPaintDebug("commit-bounds", {
+      layerKind,
+      toolKind: String(stroke?.toolKind || ""),
+      targetKind: String(targetDesc?.kind || ""),
+      targetWidth: Number(targetDesc?.width || 0),
+      targetHeight: Number(targetDesc?.height || 0),
+      targetViewMode: String(stroke?.targetSpace?.viewMode || ""),
+      strokeAspect: Number(stroke?.aspect ?? 1),
+      activeBounds: measureAlphaBounds(target.currentStroke.canvas),
+      surfaceBounds: measureAlphaBounds(surface.canvas),
+    });
 
     clearSurface(target.currentStroke);
     target.activeStroke = null;

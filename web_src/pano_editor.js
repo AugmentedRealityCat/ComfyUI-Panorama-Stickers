@@ -1039,6 +1039,20 @@ function parseOutputPresetValue(v, fallback = 2048) {
   return Number.isFinite(n) ? Math.round(n) : fallback;
 }
 
+function panoPaintDebugEnabled() {
+  try {
+    if (window?.__PANO_PAINT_DEBUG__ === true) return true;
+    return String(window?.localStorage?.getItem("panoPaintDebug") || "").trim() === "1";
+  } catch {
+    return false;
+  }
+}
+
+function logPaintDebug(phase, payload) {
+  if (!panoPaintDebugEnabled()) return;
+  console.warn(`[PANO_PAINT][${phase}]`, payload);
+}
+
 function getGraphLinkById(graph, linkId) {
   if (!graph || linkId == null) return null;
   const links = graph.links;
@@ -5429,13 +5443,9 @@ async function showEditor(node, type, options = {}) {
   }
 
   function getDesiredPaintTargetDescriptor() {
-    const connected = getConnectedErpImage();
-    const width = Number(connected?.naturalWidth || connected?.width || 0);
-    const height = Number(connected?.naturalHeight || connected?.height || 0);
-    // Ignore 1x1 placeholder/undecoded ERP sources and fall back to the preset workspace size.
-    if (width > 1 && height > 1) {
-      return { kind: "ERP_GLOBAL", width, height };
-    }
+    // Root treatment: the ERP paint/mask workspace is its own coordinate space.
+    // It must not inherit arbitrary connected-image dimensions, otherwise non-ERP
+    // inputs can distort all panorama paint rendering.
     const presetWidth = Math.max(1, Number(state?.output_preset || 2048));
     return {
       kind: "ERP_GLOBAL",
@@ -7952,7 +7962,9 @@ async function showEditor(node, type, options = {}) {
     const stroke = {
       id: makePaintId(layerKind),
       actionGroupId: makePaintId("ag"),
-      targetSpace: targetSpace && typeof targetSpace === "object" ? { ...targetSpace } : { kind: "ERP_GLOBAL" },
+      targetSpace: targetSpace && typeof targetSpace === "object"
+        ? { ...targetSpace, viewMode: String(editor.mode || "pano") }
+        : { kind: "ERP_GLOBAL", viewMode: String(editor.mode || "pano") },
       layerKind,
       toolKind,
       size,
@@ -7967,6 +7979,19 @@ async function showEditor(node, type, options = {}) {
       },
     };
     applyPresetToStroke(stroke, preset);
+    logPaintDebug("stroke-created", {
+      mode: editor.mode,
+      layerKind,
+      toolKind,
+      presetId,
+      presetAspect: Number(preset.aspect ?? 1),
+      strokeAspect: Number(stroke.aspect ?? 1),
+      stampKind: String(stroke.stampKind || ""),
+      size: Number(stroke.size || 0),
+      radiusModel: String(stroke.radiusModel || ""),
+      radiusValue: Number(stroke.radiusValue || 0),
+      targetSpace: { ...stroke.targetSpace },
+    });
     return stroke;
   }
 
@@ -7982,7 +8007,9 @@ async function showEditor(node, type, options = {}) {
     const stroke = {
       id: makePaintId(layerKind),
       actionGroupId: makePaintId("ag"),
-      targetSpace: targetSpace && typeof targetSpace === "object" ? { ...targetSpace } : { kind: "ERP_GLOBAL" },
+      targetSpace: targetSpace && typeof targetSpace === "object"
+        ? { ...targetSpace, viewMode: String(editor.mode || "pano") }
+        : { kind: "ERP_GLOBAL", viewMode: String(editor.mode || "pano") },
       layerKind,
       toolKind,
       size: 10,
@@ -7996,6 +8023,16 @@ async function showEditor(node, type, options = {}) {
       },
     };
     applyPresetToStroke(stroke, preset);
+    logPaintDebug("lasso-created", {
+      mode: editor.mode,
+      layerKind,
+      toolKind,
+      presetId,
+      presetAspect: Number(preset.aspect ?? 1),
+      strokeAspect: Number(stroke.aspect ?? 1),
+      stampKind: String(stroke.stampKind || ""),
+      targetSpace: { ...stroke.targetSpace },
+    });
     return stroke;
   }
 
