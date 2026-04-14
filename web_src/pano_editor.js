@@ -4230,9 +4230,13 @@ async function showEditor(node, type, options = {}) {
       view,
       backgroundOpacity: 1,
     });
-    runtime.backgroundWasVisible = !!surface;
-    runtime.backgroundDirty = !surface;
-    return !!surface;
+    if (!surface) {
+      clearModalBackgroundLayer();
+      return false;
+    }
+    runtime.backgroundWasVisible = true;
+    runtime.backgroundDirty = false;
+    return true;
   }
 
   function drawGridUnwrap(skipBackground = false) {
@@ -7025,7 +7029,11 @@ async function showEditor(node, type, options = {}) {
       requestDraw();
       const uploadPromise = (async () => {
         const uploaded = await uploadStickerAssetFile(file, String(file.name || aid));
+        const stillReferenced = Array.isArray(state.stickers)
+          && state.stickers.some((item) => String(item?.asset_id || "") === aid);
+        if (!stillReferenced) return;
         state.assets[aid] = uploaded;
+        pruneUnusedAssets();
         commitAndRefreshNode();
         requestDraw();
       })();
@@ -7082,6 +7090,7 @@ async function showEditor(node, type, options = {}) {
     if (!selected || !isStickerItem(selected) || isExternalSticker(selected)) return;
     if (!isImageFile(file)) return;
     const previousAssetId = String(selected.asset_id || "");
+    const previousAsset = previousAssetId ? cloneJson(state.assets?.[previousAssetId] || null) : null;
     const previousVfov = Number(selected.vFOV_deg || 0);
     const previousCrop = selected.crop && typeof selected.crop === "object"
       ? { ...selected.crop }
@@ -7103,7 +7112,6 @@ async function showEditor(node, type, options = {}) {
         Number(img.naturalHeight || img.height || 1),
       );
       selected.crop = { x0: 0, y0: 0, x1: 1, y1: 1 };
-      pruneUnusedAssets();
       markObjectVisualsDirty();
       pushHistory();
       updateSidePanel();
@@ -7111,7 +7119,9 @@ async function showEditor(node, type, options = {}) {
       requestDraw();
       const uploadPromise = (async () => {
         const uploaded = await uploadStickerAssetFile(file, String(file.name || nextAssetId));
+        if (String(selected.asset_id || "") !== nextAssetId) return;
         state.assets[nextAssetId] = uploaded;
+        pruneUnusedAssets();
         commitAndRefreshNode();
         requestDraw();
       })();
@@ -7125,9 +7135,12 @@ async function showEditor(node, type, options = {}) {
       console.error("[PanoramaSuite] failed to replace sticker asset", err);
       delete state.assets[nextAssetId];
       imageCache.delete(nextAssetId);
-      selected.asset_id = previousAssetId;
-      selected.vFOV_deg = previousVfov;
-      selected.crop = previousCrop ? { ...previousCrop } : null;
+      if (String(selected.asset_id || "") === nextAssetId) {
+        if (previousAssetId && previousAsset) state.assets[previousAssetId] = previousAsset;
+        selected.asset_id = previousAssetId;
+        selected.vFOV_deg = previousVfov;
+        selected.crop = previousCrop ? { ...previousCrop } : null;
+      }
       markObjectVisualsDirty();
       updateSidePanel();
       updateSelectionMenu();
