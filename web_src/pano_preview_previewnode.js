@@ -232,6 +232,13 @@ class PreviewNodeRuntime {
           fov: clamp(Number(next?.fov || 100), 35, 140),
         };
       },
+      getViewportSize: () => {
+        const rect = this.canvas?.getBoundingClientRect?.();
+        return {
+          w: Math.max(1, Number(rect?.width || this.canvas?.clientWidth || 0)),
+          h: Math.max(1, Number(rect?.height || this.canvas?.clientHeight || 0)),
+        };
+      },
       onInteraction: () => this.requestDraw(),
     });
     this.orig = {

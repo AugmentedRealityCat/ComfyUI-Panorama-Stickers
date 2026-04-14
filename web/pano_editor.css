@@ -744,8 +744,6 @@
   box-shadow: inset 0 0 0 2.5px var(--swatch, #fff);
   opacity: 1;
 }
-.pano-paint-color-dot-rainbow {
-}
 .pano-paint-color-dot-rainbow::before {
   background:
     radial-gradient(circle at center, var(--custom-color, rgba(255,64,64,1)) 0 38%, rgba(255,255,255,0.08) 39%, transparent 43%),
@@ -1299,7 +1297,7 @@
 .pano-picker-item-icon svg {
   width: 14px;
   height: 14px;
-  stroke: currentColor;
+  stroke: currentcolor;
   fill: none;
   stroke-width: 1.6;
   stroke-linecap: round;

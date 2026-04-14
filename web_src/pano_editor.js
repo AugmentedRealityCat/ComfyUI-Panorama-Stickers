@@ -7029,12 +7029,14 @@ async function showEditor(node, type, options = {}) {
       requestDraw();
       const uploadPromise = (async () => {
         const uploaded = await uploadStickerAssetFile(file, String(file.name || aid));
-        const stillReferenced = Array.isArray(state.stickers)
-          && state.stickers.some((item) => String(item?.asset_id || "") === aid);
-        if (!stillReferenced) return;
+        const liveStickers = Array.isArray(state.stickers) ? state.stickers : [];
+        const matching = liveStickers.filter((item) => String(item?.asset_id || "") === aid);
+        if (!matching.length) return;
         state.assets[aid] = uploaded;
         pruneUnusedAssets();
         commitAndRefreshNode();
+        updateSidePanel();
+        updateSelectionMenu();
         requestDraw();
       })();
       _stickerAssetUploadRegistry.set(aid, uploadPromise);
@@ -7047,11 +7049,11 @@ async function showEditor(node, type, options = {}) {
       console.error("[PanoramaSuite] failed to add sticker asset", err);
       delete state.assets[aid];
       imageCache.delete(aid);
-      const idx = state.stickers.findIndex((item) => String(item?.asset_id || "") === aid);
-      if (idx >= 0) {
-        const removed = state.stickers[idx];
-        state.stickers.splice(idx, 1);
-        if (editor.selection?.id && String(editor.selection.id) === String(removed?.id || "")) {
+      const liveStickers = Array.isArray(state.stickers) ? state.stickers : [];
+      const removed = liveStickers.filter((item) => String(item?.asset_id || "") === aid);
+      if (removed.length) {
+        state.stickers = liveStickers.filter((item) => String(item?.asset_id || "") !== aid);
+        if (removed.some((item) => String(item?.id || "") === String(editor.selection?.id || ""))) {
           setSelectedItem(null);
         }
         updateSidePanel();
@@ -7089,6 +7091,7 @@ async function showEditor(node, type, options = {}) {
     const selected = getSelected();
     if (!selected || !isStickerItem(selected) || isExternalSticker(selected)) return;
     if (!isImageFile(file)) return;
+    const selectedId = String(selected.id || "");
     const previousAssetId = String(selected.asset_id || "");
     const previousAsset = previousAssetId ? cloneJson(state.assets?.[previousAssetId] || null) : null;
     const previousVfov = Number(selected.vFOV_deg || 0);
@@ -7119,10 +7122,17 @@ async function showEditor(node, type, options = {}) {
       requestDraw();
       const uploadPromise = (async () => {
         const uploaded = await uploadStickerAssetFile(file, String(file.name || nextAssetId));
-        if (String(selected.asset_id || "") !== nextAssetId) return;
+        const liveStickers = Array.isArray(state.stickers) ? state.stickers : [];
+        const stillCurrent = liveStickers.some((item) => (
+          String(item?.id || "") === selectedId
+          && String(item?.asset_id || "") === nextAssetId
+        ));
+        if (!stillCurrent) return;
         state.assets[nextAssetId] = uploaded;
         pruneUnusedAssets();
         commitAndRefreshNode();
+        updateSidePanel();
+        updateSelectionMenu();
         requestDraw();
       })();
       _stickerAssetUploadRegistry.set(nextAssetId, uploadPromise);
@@ -7135,11 +7145,13 @@ async function showEditor(node, type, options = {}) {
       console.error("[PanoramaSuite] failed to replace sticker asset", err);
       delete state.assets[nextAssetId];
       imageCache.delete(nextAssetId);
-      if (String(selected.asset_id || "") === nextAssetId) {
+      const liveSelected = (Array.isArray(state.stickers) ? state.stickers : [])
+        .find((item) => String(item?.id || "") === selectedId) || null;
+      if (liveSelected && String(liveSelected.asset_id || "") === nextAssetId) {
         if (previousAssetId && previousAsset) state.assets[previousAssetId] = previousAsset;
-        selected.asset_id = previousAssetId;
-        selected.vFOV_deg = previousVfov;
-        selected.crop = previousCrop ? { ...previousCrop } : null;
+        liveSelected.asset_id = previousAssetId;
+        liveSelected.vFOV_deg = previousVfov;
+        liveSelected.crop = previousCrop ? { ...previousCrop } : null;
       }
       markObjectVisualsDirty();
       updateSidePanel();
@@ -7660,6 +7672,14 @@ async function showEditor(node, type, options = {}) {
     return {
       x: ((evt.clientX - r.left) / r.width) * canvas.width,
       y: ((evt.clientY - r.top) / r.height) * canvas.height,
+    };
+  }
+
+  function screenPosCss(evt) {
+    const r = canvas.getBoundingClientRect();
+    return {
+      x: Number(evt.clientX) - Number(r.left || 0),
+      y: Number(evt.clientY) - Number(r.top || 0),
     };
   }
 
@@ -8903,6 +8923,13 @@ async function showEditor(node, type, options = {}) {
       editor.viewPitch = clamp(Number(next.pitch || 0), -89.9, 89.9);
       editor.viewFov = clamp(Number(next.fov || editor.viewFov || 100), 35, 140);
     },
+    getViewportSize: () => {
+      const rect = canvas.getBoundingClientRect();
+      return {
+        w: Math.max(1, Number(rect.width || canvas.clientWidth || 0)),
+        h: Math.max(1, Number(rect.height || canvas.clientHeight || 0)),
+      };
+    },
     getInvert: () => ({
       x: state.ui_settings?.invert_view_x ? -1 : 1,
       y: state.ui_settings?.invert_view_y ? -1 : 1,
@@ -8924,8 +8951,9 @@ async function showEditor(node, type, options = {}) {
     if (e.button === 1) {
       e.preventDefault();
       if (editor.mode !== "frame") {
-        editor.interaction = { kind: "view", last: p, lastTs: performance.now() };
-        viewController.startDrag(p.x, p.y, e.pointerId, performance.now());
+        const dragPos = editor.mode === "unwrap" ? p : screenPosCss(e);
+        editor.interaction = { kind: "view", last: dragPos, lastTs: performance.now() };
+        viewController.startDrag(dragPos.x, dragPos.y, e.pointerId, performance.now());
       }
       updateCursor(p);
       canvas.setPointerCapture(e.pointerId);
@@ -8934,8 +8962,9 @@ async function showEditor(node, type, options = {}) {
     if (e.button !== 0) return;
     if (readOnly) {
       if (editor.mode === "pano") {
-        editor.interaction = { kind: "view", last: p, lastTs: performance.now() };
-        viewController.startDrag(p.x, p.y, e.pointerId, performance.now());
+        const dragPos = screenPosCss(e);
+        editor.interaction = { kind: "view", last: dragPos, lastTs: performance.now() };
+        viewController.startDrag(dragPos.x, dragPos.y, e.pointerId, performance.now());
         updateCursor(p);
         canvas.setPointerCapture(e.pointerId);
       }
@@ -9210,8 +9239,9 @@ async function showEditor(node, type, options = {}) {
     requestDraw();
 
     if (editor.mode === "pano") {
-      editor.interaction = { kind: "view", last: p, lastTs: performance.now() };
-      viewController.startDrag(p.x, p.y, e.pointerId, performance.now());
+      const dragPos = screenPosCss(e);
+      editor.interaction = { kind: "view", last: dragPos, lastTs: performance.now() };
+      viewController.startDrag(dragPos.x, dragPos.y, e.pointerId, performance.now());
       updateCursor(p);
       canvas.setPointerCapture(e.pointerId);
     }
@@ -9256,9 +9286,10 @@ async function showEditor(node, type, options = {}) {
 
     if (it.kind === "view") {
       const now = performance.now();
-      viewController.moveDrag(p.x, p.y, editor.mode === "unwrap" ? "unwrap" : "pano", now);
+      const dragPos = editor.mode === "unwrap" ? p : screenPosCss(e);
+      viewController.moveDrag(dragPos.x, dragPos.y, editor.mode === "unwrap" ? "unwrap" : "pano", now);
       it.lastTs = now;
-      it.last = p;
+      it.last = dragPos;
       requestDraw({ localOnly: true });
       return;
     }

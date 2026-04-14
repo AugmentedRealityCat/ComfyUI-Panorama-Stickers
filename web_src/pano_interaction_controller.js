@@ -13,6 +13,13 @@ export const PANO_INERTIA_DAMPING = 5.5;
 export const PANO_INERTIA_START_SPEED = 20;
 export const PANO_INERTIA_STOP_SPEED = 0.8;
 
+function deriveVerticalFovDeg(horizontalFovDeg, width, height) {
+  const w = Math.max(1, Number(width || 1));
+  const h = Math.max(1, Number(height || 1));
+  const hf = clamp(Number(horizontalFovDeg || PANO_INITIAL_FOV), 1, 179) * DEG2RAD;
+  return (2 * Math.atan(Math.tan(hf * 0.5) * (h / w))) / DEG2RAD;
+}
+
 function readWheelDelta(ev) {
   if (Number.isFinite(Number(ev?.deltaY))) return Number(ev.deltaY);
   if (Number.isFinite(Number(ev?.wheelDelta))) return -Number(ev.wheelDelta);
@@ -25,6 +32,7 @@ export function createPanoInteractionController(options = {}) {
   const setView = typeof options.setView === "function" ? options.setView : (() => {});
   const getInvert = typeof options.getInvert === "function" ? options.getInvert : (() => ({ x: 1, y: 1 }));
   const getUnwrapRect = typeof options.getUnwrapRect === "function" ? options.getUnwrapRect : (() => ({ w: 1, h: 1 }));
+  const getViewportSize = typeof options.getViewportSize === "function" ? options.getViewportSize : (() => ({ w: 0, h: 0 }));
   const onInteraction = typeof options.onInteraction === "function" ? options.onInteraction : (() => {});
   const onDebug = typeof options.onDebug === "function" ? options.onDebug : null;
 
@@ -81,8 +89,18 @@ export function createPanoInteractionController(options = {}) {
       dYaw = -nx * 360 * invX;
       dPitch = ny * 180 * invY;
     } else {
-      dYaw = -dx * PANO_DRAG_SENSITIVITY * invX;
-      dPitch = dy * PANO_DRAG_SENSITIVITY * invY;
+      const viewport = getViewportSize() || { w: 0, h: 0 };
+      const vw = Math.max(1, Number(viewport.w || 0));
+      const vh = Math.max(1, Number(viewport.h || 0));
+      if (vw > 1 && vh > 1) {
+        const hFov = clamp(Number(view.fov || PANO_INITIAL_FOV), 1, 179);
+        const vFov = clamp(deriveVerticalFovDeg(hFov, vw, vh), 0.1, 179);
+        dYaw = -(dx / vw) * hFov * invX;
+        dPitch = (dy / vh) * vFov * invY;
+      } else {
+        dYaw = -dx * PANO_DRAG_SENSITIVITY * invX;
+        dPitch = dy * PANO_DRAG_SENSITIVITY * invY;
+      }
     }
 
     view.yaw = wrapYaw(Number(view.yaw || 0) + dYaw);

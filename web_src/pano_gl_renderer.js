@@ -485,6 +485,16 @@ export function createPanoGlRenderer(options = {}) {
     }
   }
 
+  function clearLayerState(which) {
+    if (which === "background") backgroundRevision = null;
+    else if (which === "paint") paintRevision = null;
+    else maskRevision = null;
+    if (textureMeta[which]) {
+      textureMeta[which].width = 0;
+      textureMeta[which].height = 0;
+    }
+  }
+
   function uploadPartialTexture(texture, source, rects = [], meta = { width: 0, height: 0 }, premultiplyAlpha = false) {
     if (!gl || !texture || !source) return false;
     const sourceWidth = Number(source.width || source.videoWidth || source.naturalWidth || 0);
@@ -539,9 +549,7 @@ export function createPanoGlRenderer(options = {}) {
   function setLayerTexture(which, texture, source, revision, dirtyRects = null, premultiplyAlpha = false) {
     if (!init()) return false;
     if (!source) {
-      if (which === "background") backgroundRevision = null;
-      else if (which === "paint") paintRevision = null;
-      else maskRevision = null;
+      clearLayerState(which);
       return false;
     }
     const nextRevision = String(revision ?? "");
@@ -553,6 +561,7 @@ export function createPanoGlRenderer(options = {}) {
     if (prevRevision === nextRevision && !sizeChanged && !(Array.isArray(dirtyRects) && dirtyRects.length)) return true;
     if (!(sourceWidth > 0) || !(sourceHeight > 0)) {
       logTextureUploadIssue(which, "skip-invalid-size", source, { revision: nextRevision, sourceWidth, sourceHeight });
+      clearLayerState(which);
       return false;
     }
     gl.bindTexture(gl.TEXTURE_2D, texture);
@@ -571,6 +580,7 @@ export function createPanoGlRenderer(options = {}) {
           glError,
         });
         gl.pixelStorei(gl.UNPACK_PREMULTIPLY_ALPHA_WEBGL, 0);
+        clearLayerState(which);
         return false;
       }
       meta.width = sourceWidth;

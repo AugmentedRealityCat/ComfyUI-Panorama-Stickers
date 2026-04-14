@@ -866,6 +866,7 @@ function appendStrokePoint(target, x, y, stroke) {
       lastMidX: px, lastMidY: py,
       stampTex: sc0.stampTex, radiusPx: sc0.radiusPx, spacingPx: sc0.spacingPx,
       aspect: sc0.aspect, angle: sc0.angle, stampKind: sc0.stampKind, scatter: sc0.scatter,
+      latitudeCorrection: sc0.latitudeCorrection,
       strokeOpacity, velocityWidthFactor,
       distSinceStamp: 0,
       isEraser, layerKind,
@@ -883,6 +884,7 @@ function appendStrokePoint(target, x, y, stroke) {
     ctx,
     stampTex: as.stampTex, radiusPx: as.radiusPx, spacingPx: as.spacingPx,
     desc, aspect: as.aspect, angle: as.angle, stampKind: as.stampKind, scatter: as.scatter,
+    latitudeCorrection: as.latitudeCorrection,
   };
 
   if (as.pointCount === 1) {
@@ -1177,7 +1179,7 @@ export function createPaintEngineManager(options = {}) {
         ctx,
         stampTex: as.stampTex, radiusPx: as.radiusPx, spacingPx: as.spacingPx,
         desc: targetDesc, aspect: as.aspect, angle: as.angle,
-        stampKind: as.stampKind, scatter: as.scatter,
+        stampKind: as.stampKind, scatter: as.scatter, latitudeCorrection: as.latitudeCorrection,
       };
       if (as.pointCount === 2) {
         _walkLinearStamps(sc, as.lastMidX, as.lastMidY, as.prev.x, as.prev.y, as.distSinceStamp);
@@ -1209,17 +1211,19 @@ export function createPaintEngineManager(options = {}) {
       surface.ctx.restore();
     }
 
-    logPaintDebug("commit-bounds", {
-      layerKind,
-      toolKind: String(stroke?.toolKind || ""),
-      targetKind: String(targetDesc?.kind || ""),
-      targetWidth: Number(targetDesc?.width || 0),
-      targetHeight: Number(targetDesc?.height || 0),
-      targetViewMode: String(stroke?.targetSpace?.viewMode || ""),
-      strokeAspect: Number(stroke?.aspect ?? 1),
-      activeBounds: measureAlphaBounds(target.currentStroke.canvas),
-      surfaceBounds: measureAlphaBounds(surface.canvas),
-    });
+    if (panoPaintDebugEnabled()) {
+      logPaintDebug("commit-bounds", {
+        layerKind,
+        toolKind: String(stroke?.toolKind || ""),
+        targetKind: String(targetDesc?.kind || ""),
+        targetWidth: Number(targetDesc?.width || 0),
+        targetHeight: Number(targetDesc?.height || 0),
+        targetViewMode: String(stroke?.targetSpace?.viewMode || ""),
+        strokeAspect: Number(stroke?.aspect ?? 1),
+        activeBounds: measureAlphaBounds(target.currentStroke.canvas),
+        surfaceBounds: measureAlphaBounds(surface.canvas),
+      });
+    }
 
     clearSurface(target.currentStroke);
     target.activeStroke = null;
