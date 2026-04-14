@@ -489,6 +489,7 @@ export function createPanoGlRenderer(options = {}) {
     if (!gl || !texture || !source) return false;
     const sourceWidth = Number(source.width || source.videoWidth || source.naturalWidth || 0);
     const sourceHeight = Number(source.height || source.videoHeight || source.naturalHeight || 0);
+    // Partial uploads rely on a real decoded source region; keep 1x1 placeholders out of this path.
     if (!(sourceWidth > 1) || !(sourceHeight > 1)) return false;
     const validRects = Array.isArray(rects) ? rects.filter((rect) => rect && rect.w > 0 && rect.h > 0) : [];
     if (!validRects.length) return false;

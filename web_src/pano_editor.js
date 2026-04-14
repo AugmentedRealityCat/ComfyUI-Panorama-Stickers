@@ -5341,6 +5341,7 @@ function showEditor(node, type, options = {}) {
     const connected = getConnectedErpImage();
     const width = Number(connected?.naturalWidth || connected?.width || 0);
     const height = Number(connected?.naturalHeight || connected?.height || 0);
+    // Ignore 1x1 placeholder/undecoded ERP sources and fall back to the preset workspace size.
     if (width > 1 && height > 1) {
       return { kind: "ERP_GLOBAL", width, height };
     }
