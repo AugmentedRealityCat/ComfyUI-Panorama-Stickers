@@ -3,10 +3,13 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "build:web": "node tools/build_panorama_bundle.mjs",
-    "build:web:vite": "vite build"
+    "build:web": "vite build --config vite.lib.config.js",
+    "dev:web": "vite",
+    "build:web:legacy": "node tools/build_panorama_bundle.mjs"
   },
   "devDependencies": {
-    "vite": "^6.3.5"
+    "@vitejs/plugin-vue": "^6.0.6",
+    "vite": "^6.3.5",
+    "vue": "^3.5.32"
   }
 }

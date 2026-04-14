@@ -43,6 +43,16 @@ function createCanvasSurface(width, height) {
   return { canvas, ctx };
 }
 
+function createScratchCanvas(width, height) {
+  const w = Math.max(1, Math.ceil(width));
+  const h = Math.max(1, Math.ceil(height));
+  if (typeof OffscreenCanvas !== "undefined") return new OffscreenCanvas(w, h);
+  const canvas = document.createElement("canvas");
+  canvas.width = w;
+  canvas.height = h;
+  return canvas;
+}
+
 function resizeSurface(surface, width, height) {
   if (!surface) return createCanvasSurface(width, height);
   const nextW = Math.max(1, Math.round(width));
@@ -202,7 +212,7 @@ function buildStampTexture(radiusPx, hardness, r255, g255, b255, opacity) {
 
   const size = rr * 2 + 2;
   const center = rr + 1;
-  const canvas = new OffscreenCanvas(size, size);
+  const canvas = createScratchCanvas(size, size);
   const ctx = canvas.getContext("2d");
 
   // Radial gradient: innerR = hardness boundary (hard core), outerR = brush edge
@@ -249,7 +259,7 @@ function buildChiselTexture(rx, ry, hardness, col, edgeLift, centerDip, fiber) {
   }
   if (_stampCache.size >= STAMP_CACHE_MAX) _stampCache.delete(_stampCache.keys().next().value);
 
-  const oc = new OffscreenCanvas(cw, ch);
+  const oc = createScratchCanvas(cw, ch);
   const ctx = oc.getContext("2d");
   const img = ctx.createImageData(cw, ch);
   const d = img.data;
@@ -388,7 +398,7 @@ function buildCrayonTexture(rx, ry, hardness, col, grain) {
   }
   if (_stampCache.size >= STAMP_CACHE_MAX) _stampCache.delete(_stampCache.keys().next().value);
 
-  const oc  = new OffscreenCanvas(cw, ch);
+  const oc  = createScratchCanvas(cw, ch);
   const ctx = oc.getContext("2d");
   const img = ctx.createImageData(cw, ch);
   const d   = img.data;

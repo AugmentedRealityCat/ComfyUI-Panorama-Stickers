@@ -151,9 +151,17 @@ export default defineConfig({
 
 **目標：モーダルUIをVue 3コンポーネントに移行し、開発効率を上げる**
 
-#### `feat/vue-modal-base`（先に着手）
+#### `feat/vue-modal-base`（進行中）
 
-- Vite設定にVue 3を追加
+**完了済み（ビルド基盤セットアップ）：**
+- `vue` + `@vitejs/plugin-vue` を devDependencies に追加
+- `vite.config.js` に Vue プラグイン追加
+- Vite を正式ビルドに昇格：`build:web` → `vite build`（旧カスタムバンドラーは `build:web:legacy` として残置）
+- 出力ファイル名を `panorama_suite.vite.js` → `panorama_suite.js` に変更
+- `node_modules/` / `package-lock.json` を `.gitignore` に追加
+- ビルド確認済み（464KB、警告なし）
+
+**残タスク（Codex担当）：**
 - `PanoModal.vue`（ベースレイアウト）
 - `PanoCanvas.vue`（WebGLキャンバス、`dof` prop含む）
 - `ToolBar.vue` / `Inspector.vue`（props制御）

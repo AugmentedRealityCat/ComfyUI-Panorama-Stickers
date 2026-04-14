@@ -1,19 +1,10 @@
 import { defineConfig } from "vite";
+import vue from "@vitejs/plugin-vue";
 
 export default defineConfig({
+  plugins: [vue()],
   build: {
-    lib: {
-      entry: "web_src/pano_editor.js",
-      formats: ["es"],
-      // The canonical ComfyUI runtime bundle is produced by tools/build_panorama_bundle.mjs.
-      // Keep the Vite output separate so it does not overwrite the wrapped test/runtime artifact.
-      fileName: () => "panorama_suite.vite.js",
-    },
-    outDir: "web",
-    emptyOutDir: false,
-    rollupOptions: {
-      external: [/^\.\.\/\.\.\/scripts\//],
-    },
-    assetsInlineLimit: 0,
+    outDir: "dist/vue-modal-base",
+    emptyOutDir: true,
   },
 });
