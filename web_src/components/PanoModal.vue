@@ -20,6 +20,7 @@ const props = defineProps({
 
 const emit = defineEmits(["close"]);
 let previousOverflow = "";
+let didLockBody = false;
 let previousFocusedElement = null;
 const modalRef = ref(null);
 
@@ -90,12 +91,16 @@ function onKeydown(event) {
 }
 
 function lockBody() {
+  if (didLockBody) return;
   previousOverflow = document.body.style.overflow;
   document.body.style.overflow = "hidden";
+  didLockBody = true;
 }
 
 function unlockBody() {
+  if (!didLockBody) return;
   document.body.style.overflow = previousOverflow;
+  didLockBody = false;
 }
 
 function setOpenSideEffects(isOpen) {

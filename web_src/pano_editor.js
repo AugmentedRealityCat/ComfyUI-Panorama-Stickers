@@ -9868,14 +9868,21 @@ function showEditor(node, type, options = {}) {
     if (ev.key !== "Escape") return;
     if (editor.fullscreen && document.fullscreenElement === overlay) {
       ev.preventDefault();
+      ev.stopPropagation();
+      ev.stopImmediatePropagation?.();
       document.exitFullscreen?.().catch(() => { });
       return;
     }
     if (editor.fullscreen) {
       ev.preventDefault();
+      ev.stopPropagation();
+      ev.stopImmediatePropagation?.();
       setFullscreenState(false);
       return;
     }
+    ev.preventDefault();
+    ev.stopPropagation();
+    ev.stopImmediatePropagation?.();
     closeEditor();
   };
   const onDeleteKey = (ev) => {
