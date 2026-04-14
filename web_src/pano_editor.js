@@ -10,6 +10,7 @@ import { isPanoramaPreviewNodeName } from "./pano_preview_identity.js";
 import { renderSharedCutoutPreview } from "./pano_cutout_preview_shared.js";
 import { renderCutoutViewToContext2D, renderErpViewToContext2D, renderSceneToContext2D } from "./pano_gl_viewport.js";
 import { createPanoInteractionController } from "./pano_interaction_controller.js";
+import { createPanoGlRenderer } from "./pano_gl_renderer.js";
 import { clamp, wrapYaw, shortestYawDelta } from "./pano_math.js";
 import { BRUSH_PRESETS, DEFAULT_BRUSH_PRESET_ID, applyPresetToStroke } from "./pano_brush_presets.js";
 import { createHistoryController } from "./pano_paint_history.js";
@@ -47,6 +48,7 @@ const LASSO_CURSOR_HOTSPOT_Y = 4;
 // beforeQueuePrompt waits for all pending promises before sending the graph.
 const _paintLayerUploadRegistry = new Map();
 const _paintLayerSyncRegistry = new Map();
+const _stickerAssetUploadRegistry = new Map();
 const ICON = {
   // Source: @geist-ui/icons globe.js (v1.0.2)
   globe: "<svg viewBox='0 0 24 24' aria-hidden='true' fill='none' stroke='currentColor' stroke-linecap='round' stroke-linejoin='round' stroke-width='1.5' shape-rendering='geometricPrecision'><circle cx='12' cy='12' r='10'/><path d='M2 12h20M12 2a15.3 15.3 0 014 10 15.3 15.3 0 01-4 10 15.3 15.3 0 01-4-10 15.3 15.3 0 014-10z'/></svg>",
@@ -321,13 +323,36 @@ function expandTri(d0, d1, d2, px = 1.1) {
   return [grow(d0), grow(d1), grow(d2)];
 }
 
+let panoSuiteCssReadyPromise = null;
+
 function installCss() {
-  if (document.getElementById("pano-suite-style-link")) return;
-  const link = document.createElement("link");
-  link.id = "pano-suite-style-link";
-  link.rel = "stylesheet";
-  link.href = new URL("./pano_editor.css", import.meta.url).toString();
-  document.head.appendChild(link);
+  if (panoSuiteCssReadyPromise) return panoSuiteCssReadyPromise;
+  panoSuiteCssReadyPromise = new Promise((resolve) => {
+    const existing = document.getElementById("pano-suite-style-link");
+    if (existing) {
+      if (existing.dataset.loaded === "true") {
+        resolve();
+        return;
+      }
+      existing.addEventListener("load", () => {
+        existing.dataset.loaded = "true";
+        resolve();
+      }, { once: true });
+      existing.addEventListener("error", () => resolve(), { once: true });
+      return;
+    }
+    const link = document.createElement("link");
+    link.id = "pano-suite-style-link";
+    link.rel = "stylesheet";
+    link.href = new URL("./pano_editor.css", import.meta.url).toString();
+    link.addEventListener("load", () => {
+      link.dataset.loaded = "true";
+      resolve();
+    }, { once: true });
+    link.addEventListener("error", () => resolve(), { once: true });
+    document.head.appendChild(link);
+  });
+  return panoSuiteCssReadyPromise;
 }
 
 const SHARED_UI_SETTINGS_KEY = "pano_suite.ui_settings.v1";
@@ -1014,6 +1039,20 @@ function parseOutputPresetValue(v, fallback = 2048) {
   return Number.isFinite(n) ? Math.round(n) : fallback;
 }
 
+function panoPaintDebugEnabled() {
+  try {
+    if (window?.__PANO_PAINT_DEBUG__ === true) return true;
+    return String(window?.localStorage?.getItem("panoPaintDebug") || "").trim() === "1";
+  } catch {
+    return false;
+  }
+}
+
+function logPaintDebug(phase, payload) {
+  if (!panoPaintDebugEnabled()) return;
+  console.warn(`[PANO_PAINT][${phase}]`, payload);
+}
+
 function getGraphLinkById(graph, linkId) {
   if (!graph || linkId == null) return null;
   const links = graph.links;
@@ -1492,12 +1531,12 @@ function getPreferredExactLinkedInputImage(node, inputNames = [], onLoad = null,
   return loadLinkedInputImageFromSource(node, key, srcRaw, onLoad);
 }
 
-function showEditor(node, type, options = {}) {
+async function showEditor(node, type, options = {}) {
   const readOnly = options?.readOnly === true;
   const hideSidebar = options?.hideSidebar ?? readOnly;
   const previewMode = readOnly;
   const nodeTitle = getEditorNodeTitle(node, type);
-  installCss();
+  await installCss();
   const presetWidget = getWidget(node, "output_preset");
   const bgWidget = getWidget(node, "bg_color");
   const stateWidget = getWidget(node, STATE_WIDGET);
@@ -1508,10 +1547,6 @@ function showEditor(node, type, options = {}) {
     String(bgWidget?.value || "#00ff00"),
   );
   node.__panoLiveStateOverride = JSON.stringify(state);
-  node.__panoDomPreview?.requestDraw?.();
-  node.setDirtyCanvas?.(true, true);
-  node.graph?.setDirtyCanvas?.(true, true);
-  app?.canvas?.setDirty?.(true, true);
 
   if (type === "cutout") {
     state.shots = Array.isArray(state.shots) ? state.shots.slice(0, 1) : [];
@@ -1549,9 +1584,10 @@ function showEditor(node, type, options = {}) {
 
   const overlay = mountHost.querySelector(".pano-modal-overlay");
   const root = mountHost.querySelector(".pano-modal");
-  const canvas = root?.querySelector("canvas");
+  const canvas = root?.querySelector("[data-stage-overlay]");
+  const backgroundCanvas = root?.querySelector("[data-stage-background]");
   const stageWrap = root?.querySelector(".pano-stage-wrap");
-  if (!overlay || !root || !canvas || !stageWrap) {
+  if (!overlay || !root || !canvas || !backgroundCanvas || !stageWrap) {
     vueApp.unmount();
     mountHost.remove();
     throw new Error("Failed to mount Panorama Vue modal shell");
@@ -1574,6 +1610,7 @@ function showEditor(node, type, options = {}) {
   paintSizePreviewEl.appendChild(paintSizePreviewSampleEl);
   stageWrap?.appendChild(paintSizePreviewEl);
   const ctx = canvas.getContext("2d");
+  const modalBackgroundRenderer = createPanoGlRenderer({ targetCanvas: backgroundCanvas });
   const side = root.querySelector("[data-side]");
   const viewBtns = root.querySelectorAll("[data-view]");
   const viewToggle = root.querySelector(".pano-view-toggle");
@@ -1606,7 +1643,10 @@ function showEditor(node, type, options = {}) {
   let paintSizePreviewTimer = 0;
   let paintPaneFadeTimer = 0;
   let visiblePaintPaneMode = "";
-  if (type === "cutout") canvas.style.opacity = "0";
+  stageWrap?.removeAttribute("data-stage-ready");
+  stageWrap?.setAttribute("data-stage-loading-kind", "boot");
+  canvas.style.opacity = "1";
+  backgroundCanvas.style.opacity = "0";
   if (hideSidebar) {
     side?.remove();
     root.classList.add("pano-modal-readonly");
@@ -1737,7 +1777,9 @@ function showEditor(node, type, options = {}) {
     lastTickTs: 0,
     lastSizeCheckTs: 0,
     pendingStableLayoutFrames: type === "cutout" ? 2 : 0,
-    hasPresentedFrame: type !== "cutout",
+    hasPresentedFrame: false,
+    backgroundDirty: true,
+    backgroundWasVisible: false,
   };
   const tooltip = {
     timer: 0,
@@ -3480,20 +3522,37 @@ function showEditor(node, type, options = {}) {
     if (!ctx || !rect || !view) return false;
     let drewAnything = false;
     const liveEraserPreview = getActivePaintEraserPreviewInfo();
-    if (bgImg && editor.showPanorama) {
-      const bgDrawn = renderCutoutViewToContext2D({
-        owner: node,
-        cacheKey: `${cachePrefix}_bg_only`,
-        ctx,
+    const useModalBackgroundLayer = shouldUseModalBackgroundLayer(rect, view);
+    let modalLayerDrawn = false;
+    const bgReady = !!bgImg
+      && !!bgImg.complete
+      && Number(bgImg.naturalWidth || bgImg.width || 0) > 1
+      && Number(bgImg.naturalHeight || bgImg.height || 0) > 1;
+    if (useModalBackgroundLayer) {
+      modalLayerDrawn = renderModalBackgroundLayer(
         rect,
-        img: bgImg,
         view,
-      });
+        bgReady && editor.showPanorama ? bgImg : null,
+        `${cachePrefix}_bg_gl`,
+      );
+      drewAnything = drewAnything || !!modalLayerDrawn;
+    } else if (bgReady && editor.showPanorama) {
+      const bgDrawn = (
+        renderCutoutViewToContext2D({
+          owner: node,
+          cacheKey: `${cachePrefix}_bg_only`,
+          ctx,
+          rect,
+          img: bgImg,
+          view,
+        })
+      );
       drewAnything = drewAnything || !!bgDrawn;
     }
     if (editor.showObjects) {
       for (const entry of getOrderedDisplayListObjects(true)) {
         if (entry.type === "sticker" && entry.item) {
+          if (useModalBackgroundLayer && modalLayerDrawn) continue;
           const scene = buildSingleStickerScene(entry.item);
           const textures = buildSingleStickerTextures(entry.item, scene);
           const stickerDrawn = renderSceneToContext2D({
@@ -3727,6 +3786,42 @@ function showEditor(node, type, options = {}) {
     }
     const img = getPreferredExactLinkedInputImage(node, preferred, () => requestDraw(), `background:${preferred.join("|")}`);
     return img;
+  }
+
+  function isDecodedImageReady(img) {
+    if (!img) return false;
+    if (img instanceof HTMLImageElement) {
+      return !!img.complete
+        && Number(img.naturalWidth || img.width || 0) > 0
+        && Number(img.naturalHeight || img.height || 0) > 0;
+    }
+    return Number(img.width || img.naturalWidth || 0) > 0
+      && Number(img.height || img.naturalHeight || 0) > 0;
+  }
+
+  function getStageLoadingKind() {
+    if (!runtime.hasPresentedFrame) return "boot";
+    let backgroundPending = false;
+    let stickersPending = false;
+    if (editor.showPanorama) {
+      const bgImg = getConnectedErpImage();
+      backgroundPending = !!bgImg && !isDecodedImageReady(bgImg);
+    }
+    if (editor.showObjects) {
+      const stickers = Array.isArray(state.stickers) ? state.stickers : [];
+      for (const item of stickers) {
+        if (item?.visible === false) continue;
+        const img = getStickerImage(item);
+        if (img && !isDecodedImageReady(img)) {
+          stickersPending = true;
+          break;
+        }
+      }
+    }
+    if (backgroundPending && stickersPending) return "mixed";
+    if (backgroundPending) return "background";
+    if (stickersPending) return "stickers";
+    return "";
   }
 
   function getWrappedErpCanvas(img) {
@@ -4059,6 +4154,91 @@ function showEditor(node, type, options = {}) {
     return [28, 20];
   }
 
+  function modalBackgroundLayerAvailable() {
+    return !!(backgroundCanvas && modalBackgroundRenderer?.isSupported?.());
+  }
+
+  function shouldUseModalBackgroundLayer(rect, view) {
+    if (!modalBackgroundLayerAvailable()) return false;
+    if (type !== "stickers") return false;
+    if (String(view?.mode || "") !== "panorama") return false;
+    return Number(rect?.x || 0) === 0
+      && Number(rect?.y || 0) === 0
+      && Math.round(Number(rect?.w || 0)) === Math.round(Number(canvas?.width || 0))
+      && Math.round(Number(rect?.h || 0)) === Math.round(Number(canvas?.height || 0));
+  }
+
+  function buildModalBackgroundStickerScene() {
+    if (!editor.showObjects) {
+      return { stickers: [], selectedId: null, hoveredId: null };
+    }
+    return buildEditorStickerScene();
+  }
+
+  function buildModalBackgroundStickerTextures(scene) {
+    if (!editor.showObjects || !Array.isArray(scene?.stickers) || scene.stickers.length === 0) return [];
+    return buildEditorStickerTextures(scene);
+  }
+
+  function clearModalBackgroundLayer() {
+    if (!backgroundCanvas) return;
+    const gl = backgroundCanvas.getContext("webgl2");
+    if (gl) {
+      gl.viewport(0, 0, backgroundCanvas.width, backgroundCanvas.height);
+      gl.clearColor(0, 0, 0, 1);
+      gl.clear(gl.COLOR_BUFFER_BIT);
+    } else {
+      const bg2d = backgroundCanvas.getContext("2d");
+      if (bg2d) {
+        bg2d.clearRect(0, 0, backgroundCanvas.width, backgroundCanvas.height);
+        bg2d.fillStyle = "#070707";
+        bg2d.fillRect(0, 0, backgroundCanvas.width, backgroundCanvas.height);
+      }
+    }
+    runtime.backgroundWasVisible = false;
+    runtime.backgroundDirty = false;
+  }
+
+  function renderModalBackgroundLayer(rect, view, bgImg, cachePrefix = "modal_bg_gl") {
+    if (!shouldUseModalBackgroundLayer(rect, view)) return false;
+    if (!runtime.backgroundDirty && runtime.backgroundWasVisible) return true;
+    const scene = buildModalBackgroundStickerScene();
+    const textures = buildModalBackgroundStickerTextures(scene);
+    const bgReady = !!bgImg
+      && !!bgImg.complete
+      && Number(bgImg.naturalWidth || bgImg.width || 0) > 1
+      && Number(bgImg.naturalHeight || bgImg.height || 0) > 1;
+    if (!bgReady && textures.length === 0) {
+      clearModalBackgroundLayer();
+      return false;
+    }
+    const bgRevision = bgReady
+      ? [
+        String(bgImg.currentSrc || bgImg.src || ""),
+        Number(bgImg.naturalWidth || bgImg.width || 0),
+        Number(bgImg.naturalHeight || bgImg.height || 0),
+      ].join("|")
+      : "none";
+    const surface = modalBackgroundRenderer.renderScene({
+      width: rect.w,
+      height: rect.h,
+      dpr: window.devicePixelRatio || 1,
+      backgroundSource: bgReady ? bgImg : null,
+      backgroundRevision: bgReady ? `${cachePrefix}:${bgRevision}` : "",
+      textures,
+      scene,
+      view,
+      backgroundOpacity: 1,
+    });
+    if (!surface) {
+      clearModalBackgroundLayer();
+      return false;
+    }
+    runtime.backgroundWasVisible = true;
+    runtime.backgroundDirty = false;
+    return true;
+  }
+
   function drawGridUnwrap(skipBackground = false) {
     const w = canvas.width;
     const h = canvas.height;
@@ -4125,8 +4305,11 @@ function showEditor(node, type, options = {}) {
     const w = canvas.width;
     const h = canvas.height;
     if (!skipBackground) {
-      ctx.fillStyle = "#070707";
-      ctx.fillRect(0, 0, w, h);
+      if (modalBackgroundLayerAvailable()) ctx.clearRect(0, 0, w, h);
+      else {
+        ctx.fillStyle = "#070707";
+        ctx.fillRect(0, 0, w, h);
+      }
     }
     rebuildPaintEngineIfNeeded();
     drawOrderedDisplayListInView(
@@ -5264,12 +5447,9 @@ function showEditor(node, type, options = {}) {
   }
 
   function getDesiredPaintTargetDescriptor() {
-    const connected = getConnectedErpImage();
-    const width = Number(connected?.naturalWidth || connected?.width || 0);
-    const height = Number(connected?.naturalHeight || connected?.height || 0);
-    if (width > 1 && height > 1) {
-      return { kind: "ERP_GLOBAL", width, height };
-    }
+    // Root treatment: the ERP paint/mask workspace is its own coordinate space.
+    // It must not inherit arbitrary connected-image dimensions, otherwise non-ERP
+    // inputs can distort all panorama paint rendering.
     const presetWidth = Math.max(1, Number(state?.output_preset || 2048));
     return {
       kind: "ERP_GLOBAL",
@@ -5864,7 +6044,15 @@ function showEditor(node, type, options = {}) {
     updateSelectionMenu();
     if (!runtime.hasPresentedFrame) {
       runtime.hasPresentedFrame = true;
-      canvas.style.opacity = "1";
+      backgroundCanvas.style.opacity = "1";
+    }
+    const stageLoadingKind = getStageLoadingKind();
+    if (stageLoadingKind) {
+      stageWrap?.removeAttribute("data-stage-ready");
+      stageWrap?.setAttribute("data-stage-loading-kind", stageLoadingKind);
+    } else {
+      stageWrap?.setAttribute("data-stage-ready", "");
+      stageWrap?.removeAttribute("data-stage-loading-kind");
     }
   }
 
@@ -5872,6 +6060,18 @@ function showEditor(node, type, options = {}) {
     if (type !== "cutout") return false;
     const kind = String(editor.interaction?.kind || "");
     return kind === "move" || kind === "scale" || kind === "scale_x" || kind === "scale_y" || kind === "rotate";
+  }
+
+  function isModalBackgroundObjectInteraction(interaction = editor.interaction) {
+    if (type !== "stickers" || editor.mode !== "pano") return false;
+    const kind = String(interaction?.kind || "");
+    if (kind === "move" || kind === "scale" || kind === "scale_x" || kind === "scale_y" || kind === "rotate") {
+      return true;
+    }
+    if (kind === "move_multi") {
+      return Array.isArray(interaction?.stickerSnapshots) && interaction.stickerSnapshots.length > 0;
+    }
+    return false;
   }
 
   function syncNodeLivePreviewSources(options = {}) {
@@ -5903,7 +6103,18 @@ function showEditor(node, type, options = {}) {
 
   function requestDraw(options = {}) {
     const localOnly = !!options.localOnly;
+    const externalSync = options.externalSync === true;
     const cause = String(options.cause || "");
+    const interactionKind = String(editor.interaction?.kind || "");
+    const backgroundShouldRedraw = !localOnly
+      || interactionKind === "view"
+      || interactionKind === "pan_frame"
+      || isModalBackgroundObjectInteraction()
+      || !!editor.viewTween?.active
+      || cause === "mode"
+      || cause === "frame_view"
+      || cause === "cutout_frame";
+    if (backgroundShouldRedraw) runtime.backgroundDirty = true;
     if (localOnly && isPaintCompositeInteraction()) {
       editor.livePaintInteractionRevision += 1;
     }
@@ -5925,11 +6136,11 @@ function showEditor(node, type, options = {}) {
       || isCutoutTransformInteractionActive()
     );
     syncNodeLivePreviewSources({ updateCutoutPreview: shouldUpdateCutoutPreview });
-    if (shouldUpdateCutoutPreview || !localOnly || type !== "cutout") {
+    if (externalSync && (shouldUpdateCutoutPreview || !localOnly || type !== "cutout")) {
       node.__panoDomPreview?.requestDraw?.();
       node.setDirtyCanvas?.(true, false);
     }
-    if (!localOnly) {
+    if (externalSync && !localOnly) {
       node.graph?.setDirtyCanvas?.(true, true);
       app?.canvas?.setDirty?.(true, true);
     }
@@ -5943,6 +6154,7 @@ function showEditor(node, type, options = {}) {
     if (canvas.width !== nextW || canvas.height !== nextH) {
       canvas.width = nextW;
       canvas.height = nextH;
+      runtime.backgroundDirty = true;
       runtime.dirty = true;
       if (type === "cutout") {
         runtime.pendingStableLayoutFrames = Math.max(Number(runtime.pendingStableLayoutFrames || 0), 1);
@@ -5975,6 +6187,7 @@ function showEditor(node, type, options = {}) {
       editor.viewYaw = wrapYaw(tw.startYaw + tw.deltaYaw * eased);
       editor.viewPitch = tw.startPitch + (tw.targetPitch - tw.startPitch) * eased;
       editor.viewFov = tw.startFov + (tw.targetFov - tw.startFov) * eased;
+      runtime.backgroundDirty = true;
       runtime.dirty = true;
       if (t >= 1) editor.viewTween = null;
     }
@@ -5986,6 +6199,7 @@ function showEditor(node, type, options = {}) {
       editor.viewInertia.vx = Number(viewController.state.inertia.vx || 0);
       editor.viewInertia.vy = Number(viewController.state.inertia.vy || 0);
       editor.viewInertia.active = !!viewController.state.inertia.active;
+      runtime.backgroundDirty = true;
       runtime.dirty = true;
     }
 
@@ -6796,8 +7010,6 @@ function showEditor(node, type, options = {}) {
         i.src = tempUrl;
       });
       imageCache.set(aid, img);
-      const uploaded = await uploadStickerAssetFile(file, String(file.name || aid));
-      state.assets[aid] = uploaded;
       const id = uid("st");
       state.stickers.push({
         id,
@@ -6812,14 +7024,42 @@ function showEditor(node, type, options = {}) {
       setSelectedItem(state.stickers[state.stickers.length - 1]);
       forceCursorTool();
       pushHistory();
-      commitAndRefreshNode();
       updateSidePanel();
       updateSelectionMenu();
       requestDraw();
+      const uploadPromise = (async () => {
+        const uploaded = await uploadStickerAssetFile(file, String(file.name || aid));
+        const liveStickers = Array.isArray(state.stickers) ? state.stickers : [];
+        const matching = liveStickers.filter((item) => String(item?.asset_id || "") === aid);
+        if (!matching.length) return;
+        state.assets[aid] = uploaded;
+        pruneUnusedAssets();
+        commitAndRefreshNode();
+        updateSidePanel();
+        updateSelectionMenu();
+        requestDraw();
+      })();
+      _stickerAssetUploadRegistry.set(aid, uploadPromise);
+      try {
+        await uploadPromise;
+      } finally {
+        _stickerAssetUploadRegistry.delete(aid);
+      }
     } catch (err) {
       console.error("[PanoramaSuite] failed to add sticker asset", err);
       delete state.assets[aid];
       imageCache.delete(aid);
+      const liveStickers = Array.isArray(state.stickers) ? state.stickers : [];
+      const removed = liveStickers.filter((item) => String(item?.asset_id || "") === aid);
+      if (removed.length) {
+        state.stickers = liveStickers.filter((item) => String(item?.asset_id || "") !== aid);
+        if (removed.some((item) => String(item?.id || "") === String(editor.selection?.id || ""))) {
+          setSelectedItem(null);
+        }
+        updateSidePanel();
+        updateSelectionMenu();
+        requestDraw();
+      }
     } finally {
       URL.revokeObjectURL(tempUrl);
     }
@@ -6851,6 +7091,13 @@ function showEditor(node, type, options = {}) {
     const selected = getSelected();
     if (!selected || !isStickerItem(selected) || isExternalSticker(selected)) return;
     if (!isImageFile(file)) return;
+    const selectedId = String(selected.id || "");
+    const previousAssetId = String(selected.asset_id || "");
+    const previousAsset = previousAssetId ? cloneJson(state.assets?.[previousAssetId] || null) : null;
+    const previousVfov = Number(selected.vFOV_deg || 0);
+    const previousCrop = selected.crop && typeof selected.crop === "object"
+      ? { ...selected.crop }
+      : null;
     const nextAssetId = uid("asset");
     const tempUrl = URL.createObjectURL(file);
     try {
@@ -6861,8 +7108,6 @@ function showEditor(node, type, options = {}) {
         i.src = tempUrl;
       });
       imageCache.set(nextAssetId, img);
-      const uploaded = await uploadStickerAssetFile(file, String(file.name || nextAssetId));
-      state.assets[nextAssetId] = uploaded;
       selected.asset_id = nextAssetId;
       selected.vFOV_deg = computeStickerVFov(
         Number(selected.hFOV_deg || 30),
@@ -6870,17 +7115,48 @@ function showEditor(node, type, options = {}) {
         Number(img.naturalHeight || img.height || 1),
       );
       selected.crop = { x0: 0, y0: 0, x1: 1, y1: 1 };
-      pruneUnusedAssets();
       markObjectVisualsDirty();
       pushHistory();
-      commitAndRefreshNode();
       updateSidePanel();
       updateSelectionMenu();
       requestDraw();
+      const uploadPromise = (async () => {
+        const uploaded = await uploadStickerAssetFile(file, String(file.name || nextAssetId));
+        const liveStickers = Array.isArray(state.stickers) ? state.stickers : [];
+        const stillCurrent = liveStickers.some((item) => (
+          String(item?.id || "") === selectedId
+          && String(item?.asset_id || "") === nextAssetId
+        ));
+        if (!stillCurrent) return;
+        state.assets[nextAssetId] = uploaded;
+        pruneUnusedAssets();
+        commitAndRefreshNode();
+        updateSidePanel();
+        updateSelectionMenu();
+        requestDraw();
+      })();
+      _stickerAssetUploadRegistry.set(nextAssetId, uploadPromise);
+      try {
+        await uploadPromise;
+      } finally {
+        _stickerAssetUploadRegistry.delete(nextAssetId);
+      }
     } catch (err) {
       console.error("[PanoramaSuite] failed to replace sticker asset", err);
       delete state.assets[nextAssetId];
       imageCache.delete(nextAssetId);
+      const liveSelected = (Array.isArray(state.stickers) ? state.stickers : [])
+        .find((item) => String(item?.id || "") === selectedId) || null;
+      if (liveSelected && String(liveSelected.asset_id || "") === nextAssetId) {
+        if (previousAssetId && previousAsset) state.assets[previousAssetId] = previousAsset;
+        liveSelected.asset_id = previousAssetId;
+        liveSelected.vFOV_deg = previousVfov;
+        liveSelected.crop = previousCrop ? { ...previousCrop } : null;
+      }
+      markObjectVisualsDirty();
+      updateSidePanel();
+      updateSelectionMenu();
+      requestDraw();
     } finally {
       URL.revokeObjectURL(tempUrl);
     }
@@ -7399,6 +7675,14 @@ function showEditor(node, type, options = {}) {
     };
   }
 
+  function screenPosCss(evt) {
+    const r = canvas.getBoundingClientRect();
+    return {
+      x: Number(evt.clientX) - Number(r.left || 0),
+      y: Number(evt.clientY) - Number(r.top || 0),
+    };
+  }
+
   function supportsErpPainting() {
     return editor.mode === "pano" || editor.mode === "unwrap";
   }
@@ -7711,7 +7995,9 @@ function showEditor(node, type, options = {}) {
     const stroke = {
       id: makePaintId(layerKind),
       actionGroupId: makePaintId("ag"),
-      targetSpace: targetSpace && typeof targetSpace === "object" ? { ...targetSpace } : { kind: "ERP_GLOBAL" },
+      targetSpace: targetSpace && typeof targetSpace === "object"
+        ? { ...targetSpace, viewMode: String(editor.mode || "pano") }
+        : { kind: "ERP_GLOBAL", viewMode: String(editor.mode || "pano") },
       layerKind,
       toolKind,
       size,
@@ -7726,6 +8012,19 @@ function showEditor(node, type, options = {}) {
       },
     };
     applyPresetToStroke(stroke, preset);
+    logPaintDebug("stroke-created", {
+      mode: editor.mode,
+      layerKind,
+      toolKind,
+      presetId,
+      presetAspect: Number(preset.aspect ?? 1),
+      strokeAspect: Number(stroke.aspect ?? 1),
+      stampKind: String(stroke.stampKind || ""),
+      size: Number(stroke.size || 0),
+      radiusModel: String(stroke.radiusModel || ""),
+      radiusValue: Number(stroke.radiusValue || 0),
+      targetSpace: { ...stroke.targetSpace },
+    });
     return stroke;
   }
 
@@ -7741,7 +8040,9 @@ function showEditor(node, type, options = {}) {
     const stroke = {
       id: makePaintId(layerKind),
       actionGroupId: makePaintId("ag"),
-      targetSpace: targetSpace && typeof targetSpace === "object" ? { ...targetSpace } : { kind: "ERP_GLOBAL" },
+      targetSpace: targetSpace && typeof targetSpace === "object"
+        ? { ...targetSpace, viewMode: String(editor.mode || "pano") }
+        : { kind: "ERP_GLOBAL", viewMode: String(editor.mode || "pano") },
       layerKind,
       toolKind,
       size: 10,
@@ -7755,6 +8056,16 @@ function showEditor(node, type, options = {}) {
       },
     };
     applyPresetToStroke(stroke, preset);
+    logPaintDebug("lasso-created", {
+      mode: editor.mode,
+      layerKind,
+      toolKind,
+      presetId,
+      presetAspect: Number(preset.aspect ?? 1),
+      strokeAspect: Number(stroke.aspect ?? 1),
+      stampKind: String(stroke.stampKind || ""),
+      targetSpace: { ...stroke.targetSpace },
+    });
     return stroke;
   }
 
@@ -8612,12 +8923,20 @@ function showEditor(node, type, options = {}) {
       editor.viewPitch = clamp(Number(next.pitch || 0), -89.9, 89.9);
       editor.viewFov = clamp(Number(next.fov || editor.viewFov || 100), 35, 140);
     },
+    getViewportSize: () => {
+      const rect = canvas.getBoundingClientRect();
+      return {
+        w: Math.max(1, Number(rect.width || canvas.clientWidth || 0)),
+        h: Math.max(1, Number(rect.height || canvas.clientHeight || 0)),
+      };
+    },
     getInvert: () => ({
       x: state.ui_settings?.invert_view_x ? -1 : 1,
       y: state.ui_settings?.invert_view_y ? -1 : 1,
     }),
     getUnwrapRect,
     onInteraction: () => {
+      runtime.backgroundDirty = true;
       runtime.dirty = true;
     },
   });
@@ -8632,8 +8951,9 @@ function showEditor(node, type, options = {}) {
     if (e.button === 1) {
       e.preventDefault();
       if (editor.mode !== "frame") {
-        editor.interaction = { kind: "view", last: p, lastTs: performance.now() };
-        viewController.startDrag(p.x, p.y, e.pointerId, performance.now());
+        const dragPos = editor.mode === "unwrap" ? p : screenPosCss(e);
+        editor.interaction = { kind: "view", last: dragPos, lastTs: performance.now() };
+        viewController.startDrag(dragPos.x, dragPos.y, e.pointerId, performance.now());
       }
       updateCursor(p);
       canvas.setPointerCapture(e.pointerId);
@@ -8642,8 +8962,9 @@ function showEditor(node, type, options = {}) {
     if (e.button !== 0) return;
     if (readOnly) {
       if (editor.mode === "pano") {
-        editor.interaction = { kind: "view", last: p, lastTs: performance.now() };
-        viewController.startDrag(p.x, p.y, e.pointerId, performance.now());
+        const dragPos = screenPosCss(e);
+        editor.interaction = { kind: "view", last: dragPos, lastTs: performance.now() };
+        viewController.startDrag(dragPos.x, dragPos.y, e.pointerId, performance.now());
         updateCursor(p);
         canvas.setPointerCapture(e.pointerId);
       }
@@ -8918,8 +9239,9 @@ function showEditor(node, type, options = {}) {
     requestDraw();
 
     if (editor.mode === "pano") {
-      editor.interaction = { kind: "view", last: p, lastTs: performance.now() };
-      viewController.startDrag(p.x, p.y, e.pointerId, performance.now());
+      const dragPos = screenPosCss(e);
+      editor.interaction = { kind: "view", last: dragPos, lastTs: performance.now() };
+      viewController.startDrag(dragPos.x, dragPos.y, e.pointerId, performance.now());
       updateCursor(p);
       canvas.setPointerCapture(e.pointerId);
     }
@@ -8964,9 +9286,10 @@ function showEditor(node, type, options = {}) {
 
     if (it.kind === "view") {
       const now = performance.now();
-      viewController.moveDrag(p.x, p.y, editor.mode === "unwrap" ? "unwrap" : "pano", now);
+      const dragPos = editor.mode === "unwrap" ? p : screenPosCss(e);
+      viewController.moveDrag(dragPos.x, dragPos.y, editor.mode === "unwrap" ? "unwrap" : "pano", now);
       it.lastTs = now;
-      it.last = p;
+      it.last = dragPos;
       requestDraw({ localOnly: true });
       return;
     }
@@ -9846,6 +10169,7 @@ function showEditor(node, type, options = {}) {
     app?.canvas?.setDirty?.(true, true);
     hideTooltip();
     stopRenderLoop();
+    modalBackgroundRenderer?.dispose?.();
     setDropCue(false);
     window.removeEventListener("keydown", onEscClose, true);
     window.removeEventListener("keydown", onDeleteKey, true);
@@ -10121,6 +10445,10 @@ app.registerExtension({
     const pending = [..._paintLayerUploadRegistry.values()];
     if (pending.length > 0) {
       await Promise.allSettled(pending);
+    }
+    const pendingStickerUploads = [..._stickerAssetUploadRegistry.values()];
+    if (pendingStickerUploads.length > 0) {
+      await Promise.allSettled(pendingStickerUploads);
     }
   },
   beforeRegisterNodeDef(nodeType, nodeData) {

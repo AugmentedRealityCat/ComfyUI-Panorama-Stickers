@@ -137,10 +137,12 @@ watch(() => props.open, (nextOpen) => {
   <div v-if="open" class="pano-modal-overlay" @click.self="emit('close')">
     <section ref="modalRef" class="pano-modal" role="dialog" aria-modal="true" :aria-label="nodeTitle" tabindex="-1">
       <div class="pano-stage-wrap">
-        <canvas class="pano-stage" width="1600" height="800" />
-      <div class="pano-stage-drop-hint" aria-hidden="true">
-        <div class="pano-stage-drop-hint-text">Drag and drop image here</div>
-      </div>
+        <canvas class="pano-stage pano-stage-bg" data-stage-background width="1600" height="800" />
+        <canvas class="pano-stage pano-stage-overlay" data-stage-overlay width="1600" height="800" />
+        <div class="pano-stage-loading" aria-hidden="true" />
+        <div class="pano-stage-drop-hint" aria-hidden="true">
+          <div class="pano-stage-drop-hint-text">Drag and drop image here</div>
+        </div>
 
         <template v-if="!previewMode">
           <PanoToolRail :buttons="shellPreset.toolButtons || []" />

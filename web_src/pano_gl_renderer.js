@@ -2,6 +2,40 @@ const DEG2RAD = Math.PI / 180;
 const TWO_PI = Math.PI * 2.0;
 const MAX_RENDER_SIDE = 2048;
 
+function panoGlDebugEnabled() {
+  try {
+    if (window?.__PANO_GL_DEBUG__ === true) return true;
+    return String(window?.localStorage?.getItem("panoGlDebug") || "").trim() === "1";
+  } catch {
+    return false;
+  }
+}
+
+function describeTextureSource(source) {
+  if (!source) return { kind: "null" };
+  const ctor = String(source?.constructor?.name || typeof source);
+  return {
+    kind: ctor,
+    width: Number(source?.width || source?.videoWidth || source?.naturalWidth || 0),
+    height: Number(source?.height || source?.videoHeight || source?.naturalHeight || 0),
+    naturalWidth: Number(source?.naturalWidth || 0),
+    naturalHeight: Number(source?.naturalHeight || 0),
+    videoWidth: Number(source?.videoWidth || 0),
+    videoHeight: Number(source?.videoHeight || 0),
+    complete: source?.complete ?? null,
+    isConnected: source?.isConnected ?? null,
+    src: String(source?.currentSrc || source?.src || ""),
+  };
+}
+
+function logTextureUploadIssue(which, phase, source, extra = {}) {
+  if (!panoGlDebugEnabled()) return;
+  console.warn(`[PANO_GL][${which}] ${phase}`, {
+    ...extra,
+    source: describeTextureSource(source),
+  });
+}
+
 function clamp(value, min, max) {
   return Math.max(min, Math.min(max, value));
 }
@@ -301,8 +335,8 @@ function buildStickerBasis(sticker) {
   };
 }
 
-export function createPanoGlRenderer() {
-  const surface = document.createElement("canvas");
+export function createPanoGlRenderer(options = {}) {
+  const surface = options?.targetCanvas || document.createElement("canvas");
   let gl = null;
   let backgroundProgram = null;
   let stickerProgram = null;
@@ -451,10 +485,22 @@ export function createPanoGlRenderer() {
     }
   }
 
+  function clearLayerState(which) {
+    if (which === "background") backgroundRevision = null;
+    else if (which === "paint") paintRevision = null;
+    else maskRevision = null;
+    if (textureMeta[which]) {
+      textureMeta[which].width = 0;
+      textureMeta[which].height = 0;
+    }
+  }
+
   function uploadPartialTexture(texture, source, rects = [], meta = { width: 0, height: 0 }, premultiplyAlpha = false) {
     if (!gl || !texture || !source) return false;
-    const sourceWidth = Math.max(1, Number(source.width || source.videoWidth || source.naturalWidth || 0));
-    const sourceHeight = Math.max(1, Number(source.height || source.videoHeight || source.naturalHeight || 0));
+    const sourceWidth = Number(source.width || source.videoWidth || source.naturalWidth || 0);
+    const sourceHeight = Number(source.height || source.videoHeight || source.naturalHeight || 0);
+    // Partial uploads rely on a real decoded source region; keep 1x1 placeholders out of this path.
+    if (!(sourceWidth > 1) || !(sourceHeight > 1)) return false;
     const validRects = Array.isArray(rects) ? rects.filter((rect) => rect && rect.w > 0 && rect.h > 0) : [];
     if (!validRects.length) return false;
     gl.bindTexture(gl.TEXTURE_2D, texture);
@@ -503,18 +549,21 @@ export function createPanoGlRenderer() {
   function setLayerTexture(which, texture, source, revision, dirtyRects = null, premultiplyAlpha = false) {
     if (!init()) return false;
     if (!source) {
-      if (which === "background") backgroundRevision = null;
-      else if (which === "paint") paintRevision = null;
-      else maskRevision = null;
+      clearLayerState(which);
       return false;
     }
     const nextRevision = String(revision ?? "");
     const prevRevision = which === "background" ? backgroundRevision : (which === "paint" ? paintRevision : maskRevision);
     const meta = textureMeta[which];
-    const sourceWidth = Math.max(1, Number(source.width || source.videoWidth || source.naturalWidth || 0));
-    const sourceHeight = Math.max(1, Number(source.height || source.videoHeight || source.naturalHeight || 0));
+    const sourceWidth = Number(source.width || source.videoWidth || source.naturalWidth || 0);
+    const sourceHeight = Number(source.height || source.videoHeight || source.naturalHeight || 0);
     const sizeChanged = meta.width !== sourceWidth || meta.height !== sourceHeight;
     if (prevRevision === nextRevision && !sizeChanged && !(Array.isArray(dirtyRects) && dirtyRects.length)) return true;
+    if (!(sourceWidth > 0) || !(sourceHeight > 0)) {
+      logTextureUploadIssue(which, "skip-invalid-size", source, { revision: nextRevision, sourceWidth, sourceHeight });
+      clearLayerState(which);
+      return false;
+    }
     gl.bindTexture(gl.TEXTURE_2D, texture);
     gl.pixelStorei(gl.UNPACK_PREMULTIPLY_ALPHA_WEBGL, premultiplyAlpha ? 1 : 0);
     const didPartial = Array.isArray(dirtyRects) && dirtyRects.length
@@ -522,6 +571,18 @@ export function createPanoGlRenderer() {
       : false;
     if (!didPartial) {
       gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, source);
+      const glError = gl.getError();
+      if (glError !== gl.NO_ERROR) {
+        logTextureUploadIssue(which, "texImage2D-error", source, {
+          revision: nextRevision,
+          sourceWidth,
+          sourceHeight,
+          glError,
+        });
+        gl.pixelStorei(gl.UNPACK_PREMULTIPLY_ALPHA_WEBGL, 0);
+        clearLayerState(which);
+        return false;
+      }
       meta.width = sourceWidth;
       meta.height = sourceHeight;
     }
@@ -553,8 +614,8 @@ export function createPanoGlRenderer() {
     const assetId = String(input.assetId);
     const revision = String(input.revision ?? "");
     const source = input.source;
-    const width = Math.max(1, Number(source.width || source.naturalWidth || source.videoWidth || 0));
-    const height = Math.max(1, Number(source.height || source.naturalHeight || source.videoHeight || 0));
+    const width = Number(source.width || source.naturalWidth || source.videoWidth || 0);
+    const height = Number(source.height || source.naturalHeight || source.videoHeight || 0);
     if (width <= 0 || height <= 0) return null;
     let entry = stickerTextureRegistry.get(assetId);
     if (!entry) {
@@ -570,6 +631,17 @@ export function createPanoGlRenderer() {
       gl.bindTexture(gl.TEXTURE_2D, entry.texture);
       gl.pixelStorei(gl.UNPACK_PREMULTIPLY_ALPHA_WEBGL, 1);
       gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, source);
+      const glError = gl.getError();
+      if (glError !== gl.NO_ERROR) {
+        logTextureUploadIssue(`sticker:${assetId}`, "texImage2D-error", source, {
+          revision,
+          width,
+          height,
+          glError,
+        });
+        gl.pixelStorei(gl.UNPACK_PREMULTIPLY_ALPHA_WEBGL, 0);
+        return null;
+      }
       gl.pixelStorei(gl.UNPACK_PREMULTIPLY_ALPHA_WEBGL, 0);
       entry.revision = revision;
       entry.width = width;

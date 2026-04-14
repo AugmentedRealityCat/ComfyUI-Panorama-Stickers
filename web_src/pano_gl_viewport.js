@@ -116,9 +116,13 @@ export function renderSceneToContext2D(options = {}) {
       entry.cachedCanvas.height = sh;
     }
     const cacheCtx = entry.cachedCanvas.getContext("2d");
-    cacheCtx.clearRect(0, 0, sw, sh);
-    cacheCtx.drawImage(surface, 0, 0);
-    entry.lastRenderKey = renderKey;
+    if (cacheCtx) {
+      cacheCtx.clearRect(0, 0, sw, sh);
+      cacheCtx.drawImage(surface, 0, 0);
+      entry.lastRenderKey = renderKey;
+    } else {
+      entry.lastRenderKey = null;
+    }
   } else {
     entry.lastRenderKey = null;
   }

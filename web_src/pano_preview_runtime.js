@@ -1954,6 +1954,13 @@ function attachLegacyStickersPreview(node) {
     setView: (v) => {
       node.__panoPreviewView = v;
     },
+    getViewportSize: () => {
+      const rect = getNodePreviewRect(node);
+      return {
+        w: Math.max(1, Number(rect?.w || 0)),
+        h: Math.max(1, Number(rect?.h || 0)),
+      };
+    },
     onInteraction: () => {
       markStandaloneInteractionSettled(node);
       node.setDirtyCanvas?.(true, false);
@@ -3723,6 +3730,13 @@ export function attachStandalonePreviewDom(node, options = {}) {
         view.yaw = wrapYaw(Number(next.yaw || 0));
         view.pitch = clamp(Number(next.pitch || 0), -89.9, 89.9);
         view.fov = clamp(Number(next.fov || 100), STANDALONE_FOV_MIN, STANDALONE_FOV_MAX);
+      },
+      getViewportSize: () => {
+        const rect = canvas.getBoundingClientRect();
+        return {
+          w: Math.max(1, Number(rect.width || canvas.clientWidth || 0)),
+          h: Math.max(1, Number(rect.height || canvas.clientHeight || 0)),
+        };
       },
       getInvert: () => {
         const ui = loadSharedUiSettings();
