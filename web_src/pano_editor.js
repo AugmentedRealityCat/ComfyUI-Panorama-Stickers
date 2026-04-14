@@ -10,6 +10,7 @@ import { isPanoramaPreviewNodeName } from "./pano_preview_identity.js";
 import { renderSharedCutoutPreview } from "./pano_cutout_preview_shared.js";
 import { renderCutoutViewToContext2D, renderErpViewToContext2D, renderSceneToContext2D } from "./pano_gl_viewport.js";
 import { createPanoInteractionController } from "./pano_interaction_controller.js";
+import { createPanoGlRenderer } from "./pano_gl_renderer.js";
 import { clamp, wrapYaw, shortestYawDelta } from "./pano_math.js";
 import { BRUSH_PRESETS, DEFAULT_BRUSH_PRESET_ID, applyPresetToStroke } from "./pano_brush_presets.js";
 import { createHistoryController } from "./pano_paint_history.js";
@@ -1549,9 +1550,10 @@ function showEditor(node, type, options = {}) {
 
   const overlay = mountHost.querySelector(".pano-modal-overlay");
   const root = mountHost.querySelector(".pano-modal");
-  const canvas = root?.querySelector("canvas");
+  const canvas = root?.querySelector("[data-stage-overlay]");
+  const backgroundCanvas = root?.querySelector("[data-stage-background]");
   const stageWrap = root?.querySelector(".pano-stage-wrap");
-  if (!overlay || !root || !canvas || !stageWrap) {
+  if (!overlay || !root || !canvas || !backgroundCanvas || !stageWrap) {
     vueApp.unmount();
     mountHost.remove();
     throw new Error("Failed to mount Panorama Vue modal shell");
@@ -1574,6 +1576,7 @@ function showEditor(node, type, options = {}) {
   paintSizePreviewEl.appendChild(paintSizePreviewSampleEl);
   stageWrap?.appendChild(paintSizePreviewEl);
   const ctx = canvas.getContext("2d");
+  const modalBackgroundRenderer = createPanoGlRenderer({ targetCanvas: backgroundCanvas });
   const side = root.querySelector("[data-side]");
   const viewBtns = root.querySelectorAll("[data-view]");
   const viewToggle = root.querySelector(".pano-view-toggle");
@@ -1738,6 +1741,8 @@ function showEditor(node, type, options = {}) {
     lastSizeCheckTs: 0,
     pendingStableLayoutFrames: type === "cutout" ? 2 : 0,
     hasPresentedFrame: type !== "cutout",
+    backgroundDirty: true,
+    backgroundWasVisible: false,
   };
   const tooltip = {
     timer: 0,
@@ -3480,16 +3485,26 @@ function showEditor(node, type, options = {}) {
     if (!ctx || !rect || !view) return false;
     let drewAnything = false;
     const liveEraserPreview = getActivePaintEraserPreviewInfo();
-    if (bgImg && editor.showPanorama) {
-      const bgDrawn = renderCutoutViewToContext2D({
-        owner: node,
-        cacheKey: `${cachePrefix}_bg_only`,
-        ctx,
-        rect,
-        img: bgImg,
-        view,
-      });
+    const bgReady = !!bgImg
+      && !!bgImg.complete
+      && Number(bgImg.naturalWidth || bgImg.width || 0) > 1
+      && Number(bgImg.naturalHeight || bgImg.height || 0) > 1;
+    if (bgReady && editor.showPanorama) {
+      const bgDrawn = (
+        shouldUseModalBackgroundLayer(rect, view)
+          ? renderModalBackgroundLayer(rect, view, bgImg, `${cachePrefix}_bg_gl`)
+          : renderCutoutViewToContext2D({
+            owner: node,
+            cacheKey: `${cachePrefix}_bg_only`,
+            ctx,
+            rect,
+            img: bgImg,
+            view,
+          })
+      );
       drewAnything = drewAnything || !!bgDrawn;
+    } else if (shouldUseModalBackgroundLayer(rect, view)) {
+      clearModalBackgroundLayer();
     }
     if (editor.showObjects) {
       for (const entry of getOrderedDisplayListObjects(true)) {
@@ -4059,6 +4074,62 @@ function showEditor(node, type, options = {}) {
     return [28, 20];
   }
 
+  function modalBackgroundLayerAvailable() {
+    return !!(backgroundCanvas && modalBackgroundRenderer?.isSupported?.());
+  }
+
+  function shouldUseModalBackgroundLayer(rect, view) {
+    if (!modalBackgroundLayerAvailable()) return false;
+    if (String(view?.mode || "") !== "panorama") return false;
+    return Number(rect?.x || 0) === 0
+      && Number(rect?.y || 0) === 0
+      && Math.round(Number(rect?.w || 0)) === Math.round(Number(canvas?.width || 0))
+      && Math.round(Number(rect?.h || 0)) === Math.round(Number(canvas?.height || 0));
+  }
+
+  function clearModalBackgroundLayer() {
+    if (!backgroundCanvas) return;
+    const gl = backgroundCanvas.getContext("webgl2");
+    if (gl) {
+      gl.viewport(0, 0, backgroundCanvas.width, backgroundCanvas.height);
+      gl.clearColor(0, 0, 0, 1);
+      gl.clear(gl.COLOR_BUFFER_BIT);
+    } else {
+      const bg2d = backgroundCanvas.getContext("2d");
+      if (bg2d) {
+        bg2d.clearRect(0, 0, backgroundCanvas.width, backgroundCanvas.height);
+        bg2d.fillStyle = "#070707";
+        bg2d.fillRect(0, 0, backgroundCanvas.width, backgroundCanvas.height);
+      }
+    }
+    runtime.backgroundWasVisible = false;
+    runtime.backgroundDirty = false;
+  }
+
+  function renderModalBackgroundLayer(rect, view, bgImg, cachePrefix = "modal_bg_gl") {
+    if (!shouldUseModalBackgroundLayer(rect, view) || !bgImg) return false;
+    if (!runtime.backgroundDirty && runtime.backgroundWasVisible) return true;
+    const bgRevision = [
+      String(bgImg.currentSrc || bgImg.src || ""),
+      Number(bgImg.naturalWidth || bgImg.width || 0),
+      Number(bgImg.naturalHeight || bgImg.height || 0),
+    ].join("|");
+    const surface = modalBackgroundRenderer.renderScene({
+      width: rect.w,
+      height: rect.h,
+      dpr: window.devicePixelRatio || 1,
+      backgroundSource: bgImg,
+      backgroundRevision: `${cachePrefix}:${bgRevision}`,
+      textures: [],
+      scene: { stickers: [], selectedId: null, hoveredId: null },
+      view,
+      backgroundOpacity: 1,
+    });
+    runtime.backgroundWasVisible = !!surface;
+    runtime.backgroundDirty = !surface;
+    return !!surface;
+  }
+
   function drawGridUnwrap(skipBackground = false) {
     const w = canvas.width;
     const h = canvas.height;
@@ -4125,8 +4196,11 @@ function showEditor(node, type, options = {}) {
     const w = canvas.width;
     const h = canvas.height;
     if (!skipBackground) {
-      ctx.fillStyle = "#070707";
-      ctx.fillRect(0, 0, w, h);
+      if (modalBackgroundLayerAvailable()) ctx.clearRect(0, 0, w, h);
+      else {
+        ctx.fillStyle = "#070707";
+        ctx.fillRect(0, 0, w, h);
+      }
     }
     rebuildPaintEngineIfNeeded();
     drawOrderedDisplayListInView(
@@ -5903,7 +5977,17 @@ function showEditor(node, type, options = {}) {
 
   function requestDraw(options = {}) {
     const localOnly = !!options.localOnly;
+    const externalSync = options.externalSync === true;
     const cause = String(options.cause || "");
+    const interactionKind = String(editor.interaction?.kind || "");
+    const backgroundShouldRedraw = !localOnly
+      || interactionKind === "view"
+      || interactionKind === "pan_frame"
+      || !!editor.viewTween?.active
+      || cause === "mode"
+      || cause === "frame_view"
+      || cause === "cutout_frame";
+    if (backgroundShouldRedraw) runtime.backgroundDirty = true;
     if (localOnly && isPaintCompositeInteraction()) {
       editor.livePaintInteractionRevision += 1;
     }
@@ -5925,11 +6009,11 @@ function showEditor(node, type, options = {}) {
       || isCutoutTransformInteractionActive()
     );
     syncNodeLivePreviewSources({ updateCutoutPreview: shouldUpdateCutoutPreview });
-    if (shouldUpdateCutoutPreview || !localOnly || type !== "cutout") {
+    if (externalSync && (shouldUpdateCutoutPreview || !localOnly || type !== "cutout")) {
       node.__panoDomPreview?.requestDraw?.();
       node.setDirtyCanvas?.(true, false);
     }
-    if (!localOnly) {
+    if (externalSync && !localOnly) {
       node.graph?.setDirtyCanvas?.(true, true);
       app?.canvas?.setDirty?.(true, true);
     }
@@ -5943,6 +6027,7 @@ function showEditor(node, type, options = {}) {
     if (canvas.width !== nextW || canvas.height !== nextH) {
       canvas.width = nextW;
       canvas.height = nextH;
+      runtime.backgroundDirty = true;
       runtime.dirty = true;
       if (type === "cutout") {
         runtime.pendingStableLayoutFrames = Math.max(Number(runtime.pendingStableLayoutFrames || 0), 1);
@@ -5975,6 +6060,7 @@ function showEditor(node, type, options = {}) {
       editor.viewYaw = wrapYaw(tw.startYaw + tw.deltaYaw * eased);
       editor.viewPitch = tw.startPitch + (tw.targetPitch - tw.startPitch) * eased;
       editor.viewFov = tw.startFov + (tw.targetFov - tw.startFov) * eased;
+      runtime.backgroundDirty = true;
       runtime.dirty = true;
       if (t >= 1) editor.viewTween = null;
     }
@@ -5986,6 +6072,7 @@ function showEditor(node, type, options = {}) {
       editor.viewInertia.vx = Number(viewController.state.inertia.vx || 0);
       editor.viewInertia.vy = Number(viewController.state.inertia.vy || 0);
       editor.viewInertia.active = !!viewController.state.inertia.active;
+      runtime.backgroundDirty = true;
       runtime.dirty = true;
     }
 
@@ -8618,6 +8705,7 @@ function showEditor(node, type, options = {}) {
     }),
     getUnwrapRect,
     onInteraction: () => {
+      runtime.backgroundDirty = true;
       runtime.dirty = true;
     },
   });
@@ -9846,6 +9934,7 @@ function showEditor(node, type, options = {}) {
     app?.canvas?.setDirty?.(true, true);
     hideTooltip();
     stopRenderLoop();
+    modalBackgroundRenderer?.dispose?.();
     setDropCue(false);
     window.removeEventListener("keydown", onEscClose, true);
     window.removeEventListener("keydown", onDeleteKey, true);

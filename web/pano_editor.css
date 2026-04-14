@@ -124,6 +124,19 @@
   background: var(--pano-bg-base);
   transition: filter 130ms ease, opacity 130ms ease;
 }
+.pano-stage-bg,
+.pano-stage-overlay {
+  position: absolute;
+  inset: 0;
+}
+.pano-stage-bg {
+  z-index: 0;
+  pointer-events: none;
+}
+.pano-stage-overlay {
+  z-index: 1;
+  background: transparent;
+}
 .pano-stage-wrap.drop-active .pano-stage {
   filter: blur(2px) brightness(0.76);
 }
@@ -133,7 +146,7 @@
   display: none;
   align-items: center;
   justify-content: center;
-  z-index: 1;
+  z-index: 2;
   pointer-events: none;
 }
 .pano-stage-wrap.drop-active .pano-stage-drop-hint {
