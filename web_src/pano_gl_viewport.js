@@ -41,7 +41,7 @@ function viewRevisionKey(view) {
   if (mode === "cutout") {
     return `c|${Number(view.yawDeg || 0).toFixed(4)}|${Number(view.pitchDeg || 0).toFixed(4)}|${Number(view.rollDeg || 0).toFixed(4)}|${Number(view.hFovDeg || 90).toFixed(4)}|${Number(view.vFovDeg || 60).toFixed(4)}`;
   }
-  return `p|${Number(view.yawDeg || 0).toFixed(4)}|${Number(view.pitchDeg || 0).toFixed(4)}|${Number(view.fovDeg || 100).toFixed(4)}`;
+  return `p|${Number(view.yawDeg || 0).toFixed(4)}|${Number(view.pitchDeg || 0).toFixed(4)}|${Number(view.fovDeg || 100).toFixed(4)}|${Number(view.coverageDeg || 360)}`;
 }
 
 function resolveRect(options = {}) {
@@ -150,6 +150,7 @@ export function renderErpViewToContext2D(options = {}) {
       yawDeg: Number(options.yawDeg || 0),
       pitchDeg: Number(options.pitchDeg || 0),
       fovDeg: Number(options.fovDeg || 100),
+      coverageDeg: Number(options.coverageDeg || 360) === 180 ? 180 : 360,
     };
   }
   return renderSceneToContext2D({

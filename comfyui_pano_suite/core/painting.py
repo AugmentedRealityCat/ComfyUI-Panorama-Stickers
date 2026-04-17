@@ -627,27 +627,28 @@ def render_painting_to_erp(painting_state: dict, width: int, height: int) -> tup
     return _clone_render_pair(result)
 
 
-def _warp_erp_layer_to_cutout(erp_layer: np.ndarray, shot: dict, width: int, height: int) -> np.ndarray:
+def _warp_erp_layer_to_cutout(erp_layer: np.ndarray, shot: dict, width: int, height: int, coverage: int = 360) -> np.ndarray:
     yaw = float(shot.get("yaw_deg", 0.0))
     pitch = float(shot.get("pitch_deg", 0.0))
     roll = float(shot.get("roll_deg", 0.0))
     h_fov = max(0.1, float(shot.get("hFOV_deg", 90.0)))
     v_fov = max(0.1, float(shot.get("vFOV_deg", 60.0)))
+    coverage_value = 180 if int(coverage) == 180 else 360
     if erp_layer.ndim == 2:
         rgb = np.repeat(np.clip(erp_layer[..., None].astype(np.float32), 0.0, 1.0), 3, axis=2)
-        warped = cutout_from_erp(rgb, yaw, pitch, h_fov, v_fov, roll, width, height)
+        warped = cutout_from_erp(rgb, yaw, pitch, h_fov, v_fov, roll, width, height, coverage_value)
         return np.clip(warped[..., 0], 0.0, 1.0).astype(np.float32)
     if erp_layer.ndim == 3 and erp_layer.shape[2] in {3, 4}:
         src = np.clip(erp_layer[..., :3].astype(np.float32), 0.0, 1.0)
         if erp_layer.shape[2] == 4:
             alpha = np.clip(erp_layer[..., 3].astype(np.float32), 0.0, 1.0)
             premult = src * alpha[..., None]
-            warped_premult = cutout_from_erp(premult, yaw, pitch, h_fov, v_fov, roll, width, height)
-            warped_alpha = _warp_erp_layer_to_cutout(alpha, shot, width, height)
+            warped_premult = cutout_from_erp(premult, yaw, pitch, h_fov, v_fov, roll, width, height, coverage_value)
+            warped_alpha = _warp_erp_layer_to_cutout(alpha, shot, width, height, coverage_value)
             safe_alpha = np.maximum(warped_alpha[..., None], 1e-6)
             warped_rgb = np.where(warped_alpha[..., None] > 1e-6, warped_premult / safe_alpha, 0.0)
             return np.dstack([np.clip(warped_rgb, 0.0, 1.0), np.clip(warped_alpha, 0.0, 1.0)]).astype(np.float32)
-        warped_rgb = cutout_from_erp(src, yaw, pitch, h_fov, v_fov, roll, width, height)
+        warped_rgb = cutout_from_erp(src, yaw, pitch, h_fov, v_fov, roll, width, height, coverage_value)
         return np.clip(warped_rgb, 0.0, 1.0).astype(np.float32)
     return _empty_rgba(width, height) if erp_layer.ndim == 3 else _empty_mask(width, height)
 
@@ -731,7 +732,9 @@ def render_painting_to_cutout(
     erp_width: int = 2048,
     erp_height: int = 1024,
     painting_layer_payload: dict | None = None,
+    coverage: int = 360,
 ) -> tuple[np.ndarray, np.ndarray]:
+    coverage_value = 180 if int(coverage) == 180 else 360
     payload = load_painting_layer_payload(
         painting_layer_payload,
         erp_width=erp_width,
@@ -744,8 +747,8 @@ def render_painting_to_cutout(
             paint_erp = _empty_rgba(erp_width, erp_height)
         if mask_erp is None:
             mask_erp = _empty_mask(erp_width, erp_height)
-        paint = _warp_erp_layer_to_cutout(paint_erp, shot, width, height)
-        mask = _warp_erp_layer_to_cutout(mask_erp, shot, width, height)
+        paint = _warp_erp_layer_to_cutout(paint_erp, shot, width, height, coverage_value)
+        mask = _warp_erp_layer_to_cutout(mask_erp, shot, width, height, coverage_value)
         return paint, mask
     if not painting_state_has_renderables(painting_state):
         return _empty_rgba(width, height), _empty_mask(width, height)
@@ -772,8 +775,8 @@ def render_painting_to_cutout(
     ss_w = min(max(64, int(erp_width)) * 2, 8192)
     ss_h = min(max(32, int(erp_height)) * 2, 4096)
     paint_erp, mask_erp = render_painting_to_erp(normalized, ss_w, ss_h)
-    paint = _warp_erp_layer_to_cutout(paint_erp, shot, width, height)
-    mask = _warp_erp_layer_to_cutout(mask_erp, shot, width, height)
+    paint = _warp_erp_layer_to_cutout(paint_erp, shot, width, height, coverage_value)
+    mask = _warp_erp_layer_to_cutout(mask_erp, shot, width, height, coverage_value)
     result = (paint.astype(np.float32), mask.astype(np.float32))
     _cache_put(_CUTOUT_RENDER_CACHE, cache_key, result)
     return _clone_render_pair(result)

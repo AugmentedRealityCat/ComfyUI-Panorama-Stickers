@@ -152,6 +152,7 @@ class TestNodesPreview(unittest.TestCase):
 
             res = node.run(
                 output_preset="1024 x 512",
+                coverage="360",
                 bg_color="#000000",
                 state_json="",
                 bg_erp=dummy_erp
@@ -177,6 +178,7 @@ class TestNodesPreview(unittest.TestCase):
 
             res = node.run(
                 output_preset="1024 x 512",
+                coverage="360",
                 bg_color="#000000",
                 state_json="",
                 bg_erp=None
@@ -202,6 +204,7 @@ class TestNodesPreview(unittest.TestCase):
 
             res = node.run(
                 erp_image=dummy_erp,
+                coverage="360",
                 state_json=""
             )
 
@@ -214,7 +217,7 @@ class TestNodesPreview(unittest.TestCase):
         node = PanoramaPreviewNode()
         dummy_erp = MagicMock()
 
-        res = node.run(erp_image=dummy_erp)
+        res = node.run(erp_image=dummy_erp, coverage="360")
 
         self.mock_preview_image.save_images.assert_called_once()
         assert isinstance(res, dict)
@@ -229,8 +232,9 @@ class TestNodesPreview(unittest.TestCase):
         assert PanoramaPreviewNode.RETURN_TYPES == ()
         input_types = PanoramaPreviewNode.INPUT_TYPES()
         assert "required" in input_types
-        assert set(input_types["required"].keys()) == {"erp_image"}
+        assert set(input_types["required"].keys()) == {"erp_image", "coverage"}
         assert input_types["required"]["erp_image"] == ("IMAGE",)
+        assert input_types["required"]["coverage"] == (["360", "180"],)
 
     def test_preview_frontend_route_is_isolated(self):
         preview_wire = self._web_source_path("pano_node_preview.js").read_text(encoding="utf-8")

@@ -7,6 +7,7 @@ import {
   attachStickersNodePreview,
 } from "./pano_node_preview.js";
 import { isPanoramaPreviewNodeName } from "./pano_preview_identity.js";
+import { renderPanoramaBackgroundPass } from "./pano_preview_render.js";
 import { renderSharedCutoutPreview } from "./pano_cutout_preview_shared.js";
 import { renderCutoutViewToContext2D, renderErpViewToContext2D, renderSceneToContext2D } from "./pano_gl_viewport.js";
 import { createPanoInteractionController } from "./pano_interaction_controller.js";
@@ -95,6 +96,14 @@ const ICON = {
   lock_closed: "<svg data-testid='geist-icon' height='16' stroke-linejoin='round' viewBox='0 0 16 16' width='16' style='color: currentcolor;' aria-hidden='true'><path fill-rule='evenodd' clip-rule='evenodd' d='M10 4.5V6H6V4.5C6 3.39543 6.89543 2.5 8 2.5C9.10457 2.5 10 3.39543 10 4.5ZM4.5 6V4.5C4.5 2.567 6.067 1 8 1C9.933 1 11.5 2.567 11.5 4.5V6H12.5H14V7.5V12.5C14 13.8807 12.8807 15 11.5 15H4.5C3.11929 15 2 13.8807 2 12.5V7.5V6H3.5H4.5ZM11.5 7.5H10H6H4.5H3.5V12.5C3.5 13.0523 3.94772 13.5 4.5 13.5H11.5C12.0523 13.5 12.5 13.0523 12.5 12.5V7.5H11.5Z' fill='currentColor'></path></svg>",
   lock_open: "<svg data-testid='geist-icon' height='16' stroke-linejoin='round' viewBox='0 0 16 16' width='16' style='color: currentcolor;' aria-hidden='true'><path fill-rule='evenodd' clip-rule='evenodd' d='M14 6V4.5C14 3.39543 13.1046 2.5 12 2.5C10.8954 2.5 10 3.39543 10 4.5V6H10.5H12V7.5V12.5C12 13.8807 10.8807 15 9.5 15H2.5C1.11929 15 0 13.8807 0 12.5V7.5V6H1.5H8.5V4.5C8.5 2.567 10.067 1 12 1C13.933 1 15.5 2.567 15.5 4.5V6H14ZM10.5 7.5H10H8.5H1.5V12.5C1.5 13.0523 1.94772 13.5 2.5 13.5H9.5C10.0523 13.5 10.5 13.0523 10.5 12.5V7.5Z' fill='currentColor'></path></svg>",
 };
+
+function normalizeCoverageValue(value) {
+  return Number(value) === 180 ? 180 : 360;
+}
+
+function getCoverageLabel(value) {
+  return normalizeCoverageValue(value) === 180 ? "180° Front" : "360° Full";
+}
 
 function easeInOutCubic(t) {
   return t < 0.5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2;
@@ -515,12 +524,13 @@ function cloneShotList(raw) {
   });
 }
 
-function parseState(text, preset = 2048, bg = "#00ff00") {
+function parseState(text, preset = 2048, bg = "#00ff00", coverage = 360) {
   const sharedUi = loadSharedUiSettings();
   const base = {
     version: 1,
     projection_model: "pinhole_rectilinear",
     alpha_mode: "straight",
+    coverage: normalizeCoverageValue(coverage),
     bg_color: bg,
     output_preset: preset,
     assets: {},
@@ -571,6 +581,9 @@ function parseState(text, preset = 2048, bg = "#00ff00") {
     if (sharedUi) {
       merged.ui_settings = normalizeUiSettings({ ...merged.ui_settings, ...sharedUi });
     }
+    merged.output_preset = parseOutputPresetValue(preset, Number(merged.output_preset || base.output_preset));
+    merged.bg_color = String(bg || merged.bg_color || base.bg_color);
+    merged.coverage = normalizeCoverageValue(coverage);
     delete merged.editor_history;
     return merged;
   } catch {
@@ -793,7 +806,9 @@ function drawPanoramaNodePreview(node, ctx) {
   const stateWidget = getWidget(node, STATE_WIDGET);
   const raw = String(stateWidget?.value || "");
   const bg = String(getWidget(node, "bg_color")?.value || "#00ff00");
-  const state = parseState(raw, 2048, bg);
+  const preset = parseOutputPresetValue(getWidget(node, "output_preset")?.value, 2048);
+  const coverage = normalizeCoverageValue(getWidget(node, "coverage")?.value);
+  const state = parseState(raw, preset, bg, coverage);
 
   const rect = getNodePreviewRect(node);
   if (!rect) return;
@@ -967,6 +982,78 @@ function getNodePreviewResetButtonRect(rect) {
 }
 
 function getWidget(node, name) { return node.widgets?.find((w) => w.name === name) || null; }
+function syncCoverageWidgetRedraw(node) {
+  if (!node || node.__panoCoverageWidgetSyncInstalled) return;
+  const coverageWidget = getWidget(node, "coverage");
+  if (!coverageWidget) return;
+  const prevCallback = typeof coverageWidget.callback === "function" ? coverageWidget.callback.bind(coverageWidget) : null;
+  coverageWidget.callback = function (...args) {
+    const result = prevCallback ? prevCallback(...args) : undefined;
+    node.__panoStateCache = null;
+    node.__panoLiveStateOverride = null;
+    node.__panoWrappedErpCache = null;
+    node.__panoPanoBackgroundCache = null;
+    node.__panoDomPreview?.requestDraw?.();
+    node.setDirtyCanvas?.(true, true);
+    node.graph?.setDirtyCanvas?.(true, true);
+    app?.canvas?.setDirty?.(true, true);
+    return result;
+  };
+  node.__panoCoverageWidgetSyncInstalled = true;
+}
+function isHexColorString(value) {
+  const text = String(value ?? "").trim();
+  return /^#?[0-9a-fA-F]{6}$/.test(text) || /^#?[0-9a-fA-F]{3}$/.test(text);
+}
+function looksLikeJsonObjectString(value) {
+  const text = String(value ?? "").trim();
+  return text.startsWith("{") && text.endsWith("}");
+}
+function migratePanoramaStickersWidgetOrder(node) {
+  if (!node || node.__panoCoverageWidgetOrderMigrated) return;
+  const coverage = getWidget(node, "coverage");
+  const bg = getWidget(node, "bg_color");
+  const stateWidget = getWidget(node, STATE_WIDGET);
+  const stickerState = getWidget(node, "sticker_state");
+  if (!coverage || !bg || !stateWidget) {
+    node.__panoCoverageWidgetOrderMigrated = true;
+    return;
+  }
+  const coverageRaw = String(coverage.value ?? "").trim();
+  const bgRaw = String(bg.value ?? "").trim();
+  const stateRaw = String(stateWidget.value ?? "").trim();
+  const needsMigration = !/^(180|360)$/.test(coverageRaw)
+    && isHexColorString(coverageRaw)
+    && (looksLikeJsonObjectString(bgRaw) || bgRaw === "");
+  if (!needsMigration) {
+    node.__panoCoverageWidgetOrderMigrated = true;
+    return;
+  }
+  let migratedCoverage = "360";
+  if (looksLikeJsonObjectString(bgRaw)) {
+    try {
+      const parsed = JSON.parse(bgRaw);
+      migratedCoverage = String(normalizeCoverageValue(parsed?.coverage));
+    } catch {
+      migratedCoverage = "360";
+    }
+  }
+  const migratedBg = coverageRaw;
+  const migratedState = bgRaw;
+  const migratedStickerState = stateRaw;
+  coverage.value = migratedCoverage;
+  coverage.callback?.(migratedCoverage);
+  bg.value = migratedBg;
+  bg.callback?.(migratedBg);
+  stateWidget.value = migratedState;
+  stateWidget.callback?.(migratedState);
+  if (stickerState) {
+    stickerState.value = migratedStickerState;
+    stickerState.callback?.(migratedStickerState);
+  }
+  node.setDirtyCanvas?.(true, true);
+  node.__panoCoverageWidgetOrderMigrated = true;
+}
 function escapeHtml(text) {
   return String(text ?? "")
     .replaceAll("&", "&amp;")
@@ -1538,6 +1625,7 @@ async function showEditor(node, type, options = {}) {
   const nodeTitle = getEditorNodeTitle(node, type);
   await installCss();
   const presetWidget = getWidget(node, "output_preset");
+  const coverageWidget = getWidget(node, "coverage");
   const bgWidget = getWidget(node, "bg_color");
   const stateWidget = getWidget(node, STATE_WIDGET);
 
@@ -1545,6 +1633,7 @@ async function showEditor(node, type, options = {}) {
     String(stateWidget?.value || ""),
     parseOutputPresetValue(presetWidget?.value, 2048),
     String(bgWidget?.value || "#00ff00"),
+    normalizeCoverageValue(coverageWidget?.value),
   );
   node.__panoLiveStateOverride = JSON.stringify(state);
 
@@ -1711,6 +1800,7 @@ async function showEditor(node, type, options = {}) {
     viewYaw: 0,
     viewPitch: 0,
     viewFov: 100,
+    coverage: normalizeCoverageValue(state.coverage),
     historyController: createHistoryController(80, { version: 1, entries: [initialHistorySnapshot], index: 0 }),
     primaryTool: "cursor",
     paintTool: "pen",
@@ -3825,6 +3915,7 @@ async function showEditor(node, type, options = {}) {
   }
 
   function getWrappedErpCanvas(img) {
+    if (normalizeCoverageValue(state.coverage) === 180) return null;
     if (!img || !img.complete || !(img.naturalWidth || img.width)) return null;
     const iw = Number(img.naturalWidth || img.width || 0);
     const ih = Number(img.naturalHeight || img.height || 0);
@@ -3854,6 +3945,7 @@ async function showEditor(node, type, options = {}) {
       rect,
       img,
       mode: "unwrap",
+      coverageDeg: normalizeCoverageValue(state.coverage),
       backgroundOpacity: 0.94,
     })) {
       return;
@@ -3867,93 +3959,25 @@ async function showEditor(node, type, options = {}) {
   function drawErpBackgroundPano() {
     const img = getConnectedErpImage();
     if (!img || !img.complete || !(img.naturalWidth || img.width)) return;
-    if (renderErpViewToContext2D({
+    const q = String(state.ui_settings?.preview_quality || "balanced");
+    const Nu = q === "high" ? 44 : (q === "draft" ? 24 : 32);
+    const Nv = q === "high" ? 28 : (q === "draft" ? 14 : 20);
+    renderPanoramaBackgroundPass({
       owner: node,
       cacheKey: "modal_pano_bg",
       ctx,
       rect: { x: 0, y: 0, w: canvas.width, h: canvas.height },
       img,
-      mode: "panorama",
       yawDeg: Number(editor.viewYaw || 0),
       pitchDeg: Number(editor.viewPitch || 0),
       fovDeg: Number(editor.viewFov || 100),
-    })) {
-      return;
-    }
-    const iw = Number(img.naturalWidth || img.width || 0);
-    const ih = Number(img.naturalHeight || img.height || 0);
-    if (iw <= 1 || ih <= 1) return;
-    const wrapped = getWrappedErpCanvas(img);
-    if (!wrapped) return;
-    const q = String(state.ui_settings?.preview_quality || "balanced");
-    const cacheKey = [
-      String(img.src || ""),
-      iw,
-      ih,
-      canvas.width,
-      canvas.height,
-      q,
-      Number(editor.viewYaw || 0).toFixed(4),
-      Number(editor.viewPitch || 0).toFixed(4),
-      Number(editor.viewFov || 100).toFixed(4),
-    ].join("|");
-    const cached = node.__panoPanoBackgroundCache;
-    if (cached?.canvas && cached.key === cacheKey) {
-      ctx.drawImage(cached.canvas, 0, 0);
-      return;
-    }
-    const bgCanvas = document.createElement("canvas");
-    bgCanvas.width = canvas.width;
-    bgCanvas.height = canvas.height;
-    const bgCtx = bgCanvas.getContext("2d");
-    if (!bgCtx) return;
-    const Nu = q === "high" ? 44 : (q === "draft" ? 24 : 32);
-    const Nv = q === "high" ? 28 : (q === "draft" ? 14 : 20);
-    const verts = Array.from({ length: Nv + 1 }, () => Array(Nu + 1).fill(null));
-    const sample = Array.from({ length: Nv + 1 }, () => Array(Nu + 1).fill(null));
-
-    for (let j = 0; j <= Nv; j += 1) {
-      for (let i = 0; i <= Nu; i += 1) {
-        const x = (canvas.width * i) / Nu;
-        const y = (canvas.height * j) / Nv;
-        const d = screenToWorldDir(x, y);
-        const ll = dirToLonLat(d);
-        let u = (ll.lon / (2 * Math.PI) + 0.5) * iw;
-        while (u < 0) u += iw;
-        while (u >= iw) u -= iw;
-        const v = (0.5 - ll.lat / Math.PI) * ih;
-        verts[j][i] = { x, y };
-        sample[j][i] = { x: u, y: v };
-      }
-    }
-
-    bgCtx.save();
-    bgCtx.globalAlpha = 0.94;
-    for (let j = 0; j < Nv; j += 1) {
-      for (let i = 0; i < Nu; i += 1) {
-        const p00 = verts[j][i];
-        const p10 = verts[j][i + 1];
-        const p01 = verts[j + 1][i];
-        const p11 = verts[j + 1][i + 1];
-        if (!p00 || !p10 || !p01 || !p11) continue;
-        const s00 = { ...sample[j][i] };
-        const s10 = { ...sample[j][i + 1] };
-        const s01 = { ...sample[j + 1][i] };
-        const s11 = { ...sample[j + 1][i + 1] };
-        const umin = Math.min(s00.x, s10.x, s01.x, s11.x);
-        const umax = Math.max(s00.x, s10.x, s01.x, s11.x);
-        if (umax - umin > iw * 0.5) {
-          [s00, s10, s01, s11].forEach((s) => {
-            if (s.x < iw * 0.5) s.x += iw;
-          });
-        }
-        drawImageTriTo(bgCtx, wrapped, s00, s10, s11, p00, p10, p11);
-        drawImageTriTo(bgCtx, wrapped, s00, s11, s01, p00, p11, p01);
-      }
-    }
-    bgCtx.restore();
-    node.__panoPanoBackgroundCache = { key: cacheKey, canvas: bgCanvas };
-    ctx.drawImage(bgCanvas, 0, 0);
+      coverageDeg: normalizeCoverageValue(state.coverage),
+      viewBasis: cameraBasis(Number(editor.viewYaw || 0), Number(editor.viewPitch || 0), 0),
+      tanHalfY: Math.tan((Number(editor.viewFov || 100) * DEG2RAD) * 0.5),
+      mesh: { Nu, Nv },
+      backgroundOpacity: 0.94,
+      resolveWrappedSource: (sourceImg) => getWrappedErpCanvas(sourceImg),
+    });
   }
 
   function pruneUnusedAssets() {
@@ -4160,7 +4184,7 @@ async function showEditor(node, type, options = {}) {
 
   function shouldUseModalBackgroundLayer(rect, view) {
     if (!modalBackgroundLayerAvailable()) return false;
-    if (type !== "stickers") return false;
+    if (type !== "stickers" && type !== "cutout") return false;
     if (String(view?.mode || "") !== "panorama") return false;
     return Number(rect?.x || 0) === 0
       && Number(rect?.y || 0) === 0
@@ -4168,15 +4192,15 @@ async function showEditor(node, type, options = {}) {
       && Math.round(Number(rect?.h || 0)) === Math.round(Number(canvas?.height || 0));
   }
 
-  function buildModalBackgroundStickerScene() {
-    if (!editor.showObjects) {
+  function buildModalBackgroundScene() {
+    if (type !== "stickers" || !editor.showObjects) {
       return { stickers: [], selectedId: null, hoveredId: null };
     }
     return buildEditorStickerScene();
   }
 
-  function buildModalBackgroundStickerTextures(scene) {
-    if (!editor.showObjects || !Array.isArray(scene?.stickers) || scene.stickers.length === 0) return [];
+  function buildModalBackgroundTextures(scene) {
+    if (type !== "stickers" || !editor.showObjects || !Array.isArray(scene?.stickers) || scene.stickers.length === 0) return [];
     return buildEditorStickerTextures(scene);
   }
 
@@ -4202,8 +4226,8 @@ async function showEditor(node, type, options = {}) {
   function renderModalBackgroundLayer(rect, view, bgImg, cachePrefix = "modal_bg_gl") {
     if (!shouldUseModalBackgroundLayer(rect, view)) return false;
     if (!runtime.backgroundDirty && runtime.backgroundWasVisible) return true;
-    const scene = buildModalBackgroundStickerScene();
-    const textures = buildModalBackgroundStickerTextures(scene);
+    const scene = buildModalBackgroundScene();
+    const textures = buildModalBackgroundTextures(scene);
     const bgReady = !!bgImg
       && !!bgImg.complete
       && Number(bgImg.naturalWidth || bgImg.width || 0) > 1
@@ -4320,6 +4344,7 @@ async function showEditor(node, type, options = {}) {
         yawDeg: editor.viewYaw,
         pitchDeg: editor.viewPitch,
         fovDeg: editor.viewFov,
+        coverageDeg: normalizeCoverageValue(state.coverage),
       },
       getConnectedErpImage(),
       "modal_pano",
@@ -6474,6 +6499,54 @@ async function showEditor(node, type, options = {}) {
     if (previewMode) {
       const inspector = document.createElement("div");
       inspector.className = "pano-inspector";
+      const sceneSection = document.createElement("div");
+      sceneSection.className = "pano-field-wide pano-target-row";
+      sceneSection.innerHTML = `
+      <label>Coverage</label>
+      <div class="pano-picker">
+        <button class="pano-picker-trigger" type="button">
+          <span class="pano-picker-label"></span>
+          <span class="pano-picker-caret">▾</span>
+        </button>
+        <div class="pano-picker-pop" hidden></div>
+      </div>
+    `;
+      const coverageTrigger = sceneSection.querySelector(".pano-picker-trigger");
+      const coverageLabel = sceneSection.querySelector(".pano-picker-label");
+      const coveragePop = sceneSection.querySelector(".pano-picker-pop");
+      const coverageOptions = [
+        { value: 360, label: "360° Full" },
+        { value: 180, label: "180° Front" },
+      ];
+      const currentCoverage = normalizeCoverageValue(state.coverage);
+      coverageLabel.textContent = getCoverageLabel(currentCoverage);
+      coveragePop.innerHTML = "";
+      coverageOptions.forEach((option) => {
+        const btn = document.createElement("button");
+        btn.type = "button";
+        btn.className = `pano-picker-item${option.value === currentCoverage ? " active" : ""}`;
+        btn.textContent = option.label;
+        btn.onclick = () => {
+          coveragePop.hidden = true;
+          const nextCoverage = normalizeCoverageValue(option.value);
+          if (nextCoverage === normalizeCoverageValue(state.coverage)) return;
+          state.coverage = nextCoverage;
+          editor.coverage = nextCoverage;
+          if (coverageWidget) {
+            coverageWidget.value = String(nextCoverage);
+            coverageWidget.callback?.(coverageWidget.value);
+          }
+          runtime.backgroundDirty = true;
+          requestDraw();
+          updateSidePanel();
+        };
+        coveragePop.appendChild(btn);
+      });
+      coverageTrigger.onclick = (ev) => {
+        ev.stopPropagation();
+        coveragePop.hidden = !coveragePop.hidden;
+      };
+      inspector.appendChild(sceneSection);
       const uiDetails = document.createElement("details");
       uiDetails.className = "pano-ui-settings";
       uiDetails.open = false;
@@ -6638,6 +6711,60 @@ async function showEditor(node, type, options = {}) {
 
     const inspector = document.createElement("div");
     inspector.className = "pano-inspector";
+
+    const sceneSection = document.createElement("div");
+    sceneSection.className = "pano-field-wide pano-target-row";
+    sceneSection.innerHTML = `
+      <label>Coverage</label>
+      <div class="pano-picker">
+        <button class="pano-picker-trigger" type="button">
+          <span class="pano-picker-label"></span>
+          <span class="pano-picker-caret">▾</span>
+        </button>
+        <div class="pano-picker-pop" hidden></div>
+      </div>
+    `;
+    const coverageTrigger = sceneSection.querySelector(".pano-picker-trigger");
+    const coverageLabel = sceneSection.querySelector(".pano-picker-label");
+    const coveragePop = sceneSection.querySelector(".pano-picker-pop");
+    const coverageOptions = [
+      { value: 360, label: "360° Full" },
+      { value: 180, label: "180° Front" },
+    ];
+    const currentCoverage = normalizeCoverageValue(state.coverage);
+    coverageLabel.textContent = getCoverageLabel(currentCoverage);
+    coveragePop.innerHTML = "";
+    coverageOptions.forEach((option) => {
+      const btn = document.createElement("button");
+      btn.type = "button";
+      btn.className = `pano-picker-item${option.value === currentCoverage ? " active" : ""}`;
+      btn.textContent = option.label;
+      btn.onclick = () => {
+        coveragePop.hidden = true;
+        const nextCoverage = normalizeCoverageValue(option.value);
+        if (nextCoverage === normalizeCoverageValue(state.coverage)) return;
+        state.coverage = nextCoverage;
+        editor.coverage = nextCoverage;
+        if (coverageWidget) {
+          coverageWidget.value = String(nextCoverage);
+          coverageWidget.callback?.(coverageWidget.value);
+        }
+        commitAndRefreshNode();
+        node.setDirtyCanvas?.(true, true);
+        updateSidePanel();
+        updateSelectionMenu();
+        requestDraw();
+      };
+      coveragePop.appendChild(btn);
+    });
+    coverageTrigger.disabled = readOnly;
+    coverageTrigger.onclick = (ev) => {
+      ev.stopPropagation();
+      if (coverageTrigger.disabled) return;
+      coveragePop.hidden = !coveragePop.hidden;
+    };
+    inspector.appendChild(sceneSection);
+
     const summary = document.createElement("div");
     summary.innerHTML = `
       <div class="pano-section-title">
@@ -7635,6 +7762,7 @@ async function showEditor(node, type, options = {}) {
     state.projection_model = "pinhole_rectilinear";
     state.alpha_mode = "straight";
     if (presetWidget) state.output_preset = parseOutputPresetValue(presetWidget.value, Number(state.output_preset || 2048));
+    if (coverageWidget) state.coverage = normalizeCoverageValue(coverageWidget.value);
     if (bgWidget) state.bg_color = String(bgWidget.value || state.bg_color || "#00ff00");
     commitState();
     node.setDirtyCanvas(true, true);
@@ -7642,6 +7770,7 @@ async function showEditor(node, type, options = {}) {
 
   function commitState() {
     if (readOnly) return;
+    state.coverage = normalizeCoverageValue(state.coverage);
     const text = JSON.stringify(state);
     if (stateWidget) {
       stateWidget.value = text;
@@ -10297,6 +10426,7 @@ function installEditorButton(nodeType, nodeData, matchType, buttonText) {
     if (alreadyAttached) return;
 
     cleanupPreviewBindings(node);
+    if (matchType === "PanoramaStickers") migratePanoramaStickersWidgetOrder(node);
     hideWidget(node, STATE_WIDGET);
 
     const sw = getWidget(node, STATE_WIDGET);
@@ -10412,6 +10542,7 @@ function installStandalonePreviewInstance(node) {
       requestAnimationFrame(tryInstall);
       return;
     }
+    syncCoverageWidgetRedraw(node);
     ensureActionButtonWidget(node, "Open Preview", () => showEditor(node, "stickers", { readOnly: true, hideSidebar: false }));
     attachPreviewNode(node, {
       buttonText: "Open Preview",
@@ -10465,6 +10596,7 @@ app.registerExtension({
   },
   nodeCreated(node) {
     const name = String(node?.comfyClass || node?.type || node?.title || "");
+    syncCoverageWidgetRedraw(node);
     if (!isPanoramaPreviewNodeName(name)) return;
     installStandalonePreviewInstance(node);
   },

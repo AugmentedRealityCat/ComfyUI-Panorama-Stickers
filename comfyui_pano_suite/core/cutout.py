@@ -13,6 +13,7 @@ def cutout_from_erp(
     roll_deg: float,
     out_w: int,
     out_h: int,
+    coverage_deg: int = 360,
 ) -> np.ndarray:
     out_w = max(8, int(out_w))
     out_h = max(8, int(out_h))
@@ -43,6 +44,17 @@ def cutout_from_erp(
     dirs = dirs / np.maximum(norm, 1e-8)
 
     lon, lat = dir_to_lon_lat(dirs)
-    u, v = lon_lat_to_erp(lon, lat, erp_rgb.shape[1], erp_rgb.shape[0])
+    coverage = 180 if int(coverage_deg) == 180 else 360
+    if coverage == 180:
+        valid = np.abs(lon) <= (math.pi * 0.5)
+        u = (lon / math.pi + 0.5) * erp_rgb.shape[1]
+        v = (0.5 - (lat / math.pi)) * erp_rgb.shape[0]
+        u = np.clip(u, 0.0, max(erp_rgb.shape[1] - 1.0, 0.0))
+        v = np.clip(v, 0.0, max(erp_rgb.shape[0] - 1.0, 0.0))
+        sampled = sample_erp_bilinear(erp_rgb, u, v).astype(np.float32)
+        if sampled.ndim == 3:
+            sampled[~valid] = 0.0
+        return sampled
 
+    u, v = lon_lat_to_erp(lon, lat, erp_rgb.shape[1], erp_rgb.shape[0])
     return sample_erp_bilinear(erp_rgb, u, v).astype(np.float32)

@@ -16,6 +16,7 @@ import {
 } from "./pano_interaction_controller.js";
 import { clamp, wrapYaw } from "./pano_math.js";
 import { isPanoramaPreviewNodeName } from "./pano_preview_identity.js";
+import { renderPanoramaBackgroundPass } from "./pano_preview_render.js";
 import {
   buildCutoutViewParamsFromShot,
   buildPanoramaViewParamsFromRuntime,
@@ -528,6 +529,7 @@ function parseState(value, bg = "#00ff00") {
     version: 1,
     projection_model: "pinhole_rectilinear",
     alpha_mode: "straight",
+    coverage: 360,
     bg_color: bg,
     output_preset: 2048,
     assets: {},
@@ -555,6 +557,7 @@ function parseState(value, bg = "#00ff00") {
     return {
       ...base,
       ...p,
+      coverage: Number(p.coverage) === 180 ? 180 : 360,
       assets: p.assets && typeof p.assets === "object" ? p.assets : {},
       stickers: Array.isArray(p.stickers) ? p.stickers : [],
       shots: Array.isArray(p.shots) ? p.shots : [],
@@ -575,12 +578,14 @@ function getEffectiveStateSource(node) {
 function getCachedState(node) {
   const source = getEffectiveStateSource(node);
   const bg = String(getWidget(node, "bg_color")?.value || "#1a1a1e");
+  const coverage = Number(getWidget(node, "coverage")?.value || 360) === 180 ? 180 : 360;
   const cache = node.__panoStateCache;
-  if (cache && cache.source === source && cache.bg === bg) {
+  if (cache && cache.source === source && cache.bg === bg && cache.coverage === coverage) {
     return cache.parsed;
   }
   const parsed = parseState(source, bg);
-  node.__panoStateCache = { source, bg, parsed };
+  parsed.coverage = coverage;
+  node.__panoStateCache = { source, bg, coverage, parsed };
   return parsed;
 }
 
@@ -1458,6 +1463,8 @@ function hasValidCutoutStats(node) {
 }
 
 function getWrappedErpCanvas(node, img) {
+  const state = getCachedState(node);
+  if (Number(state?.coverage || 360) === 180) return null;
   if (!img || !img.complete || !(img.naturalWidth || img.width)) return null;
   const iw = Number(img.naturalWidth || img.width || 0);
   const ih = Number(img.naturalHeight || img.height || 0);
@@ -1801,7 +1808,7 @@ function drawPanoramaPreview(node, ctx, interaction = null) {
 
   const scene = buildRuntimePreviewScene(node, state);
   const textures = buildRuntimePreviewTextures(node, state, scene);
-  const view = buildPanoramaViewParamsFromRuntime(node.__panoPreviewView);
+  const view = buildPanoramaViewParamsFromRuntime(node.__panoPreviewView, state?.coverage);
   const drawn = bgReady ? renderSceneToContext2D({
     owner: node,
     cacheKey: "runtime_panorama_scene",
@@ -2440,7 +2447,7 @@ function drawCanvas(node, canvas, fovBtn, interaction = null) {
 
     const scene = buildRuntimePreviewScene(node, state);
     const textures = buildRuntimePreviewTextures(node, state, scene);
-    const view = buildPanoramaViewParamsFromRuntime(node.__panoPreviewView);
+    const view = buildPanoramaViewParamsFromRuntime(node.__panoPreviewView, state?.coverage);
 
     // Composite paint strokes into the background before WebGL rendering so
     // stickers remain on top and no extra GL context is needed.
@@ -2516,100 +2523,24 @@ function drawCanvas(node, canvas, fovBtn, interaction = null) {
 }
 
 export function drawErpBackground(node, ctx, rect, viewBasis, tanHalfY, img, mesh = STANDALONE_MESH_BALANCED) {
-  const isCanvasLike = !!img && (
-    (typeof HTMLCanvasElement !== "undefined" && img instanceof HTMLCanvasElement)
-    || (typeof OffscreenCanvas !== "undefined" && img instanceof OffscreenCanvas)
-    || (typeof ImageBitmap !== "undefined" && img instanceof ImageBitmap)
-  );
-  const ready = isCanvasLike || (!!img && img.complete && (img.naturalWidth || img.width));
-  if (!ready) return;
+  const state = getCachedState(node);
   const view = node?.__panoPreviewView || { yaw: 0, pitch: 0, fov: 100 };
-  if (renderErpViewToContext2D({
+  renderPanoramaBackgroundPass({
     owner: node,
     cacheKey: "runtime_pano_bg",
     ctx,
     rect,
     img,
-    mode: "panorama",
     yawDeg: Number(view.yaw || 0),
     pitchDeg: Number(view.pitch || 0),
     fovDeg: Number(view.fov || 100),
-  })) return;
-  const iw = Number(img.naturalWidth || img.width || 0);
-  const ih = Number(img.naturalHeight || img.height || 0);
-  if (iw <= 1 || ih <= 1) return;
-  const wrapped = getWrappedErpCanvas(node, img);
-  const source = wrapped || img;
-  const Nu = Math.max(4, Number(mesh?.Nu || STANDALONE_MESH_BALANCED.Nu));
-  const Nv = Math.max(4, Number(mesh?.Nv || STANDALONE_MESH_BALANCED.Nv));
-  const triExpand = (Nu <= STANDALONE_MESH_LOW.Nu && Nv <= STANDALONE_MESH_LOW.Nv) ? 0.24 : ((Nu >= STANDALONE_MESH_HIGH.Nu && Nv >= STANDALONE_MESH_HIGH.Nv) ? 0.42 : 0.34);
-
-  const verts = [];
-  const sample = [];
-  for (let j = 0; j <= Nv; j++) {
-    verts[j] = [];
-    sample[j] = [];
-  }
-
-  const cx = rect.x + rect.w * 0.5;
-  const cy = rect.y + rect.h * 0.5;
-  const hRectH = rect.h * 0.5;
-
-  for (let j = 0; j <= Nv; j++) {
-    const y = rect.y + (rect.h * j) / Nv;
-    const sy = ((cy - y) / hRectH) * tanHalfY;
-
-    for (let i = 0; i <= Nu; i++) {
-      const x = rect.x + (rect.w * i) / Nu;
-      const sx = ((x - cx) / hRectH) * tanHalfY;
-
-      // Inlined dot, add, mul, norm for d
-      const dx = viewBasis.fwd.x + viewBasis.right.x * sx + viewBasis.up.x * sy;
-      const dy = viewBasis.fwd.y + viewBasis.right.y * sx + viewBasis.up.y * sy;
-      const dz = viewBasis.fwd.z + viewBasis.right.z * sx + viewBasis.up.z * sy;
-      const dmag = Math.hypot(dx, dy, dz) || 1e-8;
-      const dnx = dx / dmag;
-      const dny = dy / dmag;
-      const dnz = dz / dmag;
-
-      const lon = Math.atan2(dnx, dnz);
-      const lat = Math.asin(clamp(dny, -1, 1));
-      let u = (lon / (2 * Math.PI) + 0.5) * iw;
-      while (u < 0) u += iw;
-      while (u >= iw) u -= iw;
-      const v = (0.5 - lat / Math.PI) * ih;
-      verts[j][i] = { x, y };
-      sample[j][i] = { x: u, y: v };
-    }
-  }
-  ctx.save();
-  ctx.__panoTriExpandPx = triExpand;
-  // Use opaque rendering for background to avoid seam transparency.
-  ctx.globalAlpha = 1.0;
-  for (let j = 0; j < Nv; j += 1) {
-    for (let i = 0; i < Nu; i += 1) {
-      const p00 = verts[j][i];
-      const p10 = verts[j][i + 1];
-      const p01 = verts[j + 1][i];
-      const p11 = verts[j + 1][i + 1];
-      if (!p00 || !p10 || !p01 || !p11) continue;
-      const s00 = { ...sample[j][i] };
-      const s10 = { ...sample[j][i + 1] };
-      const s01 = { ...sample[j + 1][i] };
-      const s11 = { ...sample[j + 1][i + 1] };
-      const umin = Math.min(s00.x, s10.x, s01.x, s11.x);
-      const umax = Math.max(s00.x, s10.x, s01.x, s11.x);
-      if (umax - umin > iw * 0.5) {
-        [s00, s10, s01, s11].forEach((s) => {
-          if (s.x < iw * 0.5) s.x += iw;
-        });
-      }
-      drawImageTri(ctx, source, s00, s10, s11, p00, p10, p11);
-      drawImageTri(ctx, source, s00, s11, s01, p00, p11, p01);
-    }
-  }
-  ctx.__panoTriExpandPx = 0.45;
-  ctx.restore();
+    coverageDeg: Number(state?.coverage || 360) === 180 ? 180 : 360,
+    viewBasis,
+    tanHalfY,
+    mesh,
+    backgroundOpacity: 1,
+    resolveWrappedSource: (sourceImg) => getWrappedErpCanvas(node, sourceImg),
+  });
 }
 
 function drawLineOnSphere(ctx, pointsDir, viewBasis, rect, tanHalfY, color, width = 1) {

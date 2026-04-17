@@ -9,6 +9,7 @@ DEFAULT_STATE = {
     "version": 1,
     "projection_model": "pinhole_rectilinear",
     "alpha_mode": "straight",
+    "coverage": 360,
     "bg_color": "#00ff00",
     "output_preset": 2048,
     "assets": {},
@@ -21,6 +22,13 @@ DEFAULT_STATE = {
         "selected_shot_id": None,
     },
 }
+
+
+def normalize_coverage(value) -> int:
+    try:
+        return 180 if int(value) == 180 else 360
+    except Exception:
+        return 360
 
 
 def make_id(prefix: str) -> str:
@@ -41,6 +49,7 @@ def merge_state(state_in: str | None, internal_state: str | None, fallback_prese
     state["version"] = 1
     state["projection_model"] = "pinhole_rectilinear"
     state["alpha_mode"] = "straight"
+    state["coverage"] = normalize_coverage(state.get("coverage"))
     if "assets" not in state or not isinstance(state["assets"], dict):
         state["assets"] = {}
     if "stickers" not in state or not isinstance(state["stickers"], list):
@@ -144,4 +153,3 @@ def parse_sticker_state(state_raw: str | None) -> dict | None:
             out["source_aspect"] = source_aspect_val
 
     return out
-

@@ -1,4 +1,4 @@
-from comfyui_pano_suite.core.state import DEFAULT_STATE, merge_state, parse_sticker_state
+from comfyui_pano_suite.core.state import DEFAULT_STATE, merge_state, normalize_coverage, parse_sticker_state
 
 
 def test_merge_state_handles_none_inputs():
@@ -8,6 +8,7 @@ def test_merge_state_handles_none_inputs():
     assert state["projection_model"] == "pinhole_rectilinear"
     assert state["alpha_mode"] == "straight"
     assert state["output_preset"] == DEFAULT_STATE["output_preset"]
+    assert state["coverage"] == DEFAULT_STATE["coverage"]
     assert state["bg_color"] == DEFAULT_STATE["bg_color"]
     assert isinstance(state["assets"], dict)
     assert isinstance(state["stickers"], list)
@@ -24,6 +25,7 @@ def test_merge_state_handles_empty_dict_inputs_and_fallbacks():
     state = merge_state("{}", "{}", fallback_preset=1024, fallback_bg="#112233")
 
     assert state["output_preset"] == 1024
+    assert state["coverage"] == 360
     assert state["bg_color"] == "#112233"
     assert state["assets"] == {}
     assert state["stickers"] == []
@@ -50,6 +52,21 @@ def test_merge_state_fills_missing_active_keys():
 
     assert state["active"]["selected_sticker_id"] == "st_1"
     assert state["active"]["selected_shot_id"] is None
+
+
+def test_merge_state_normalizes_coverage():
+    state_180 = merge_state(None, '{"coverage":180}')
+    state_invalid = merge_state(None, '{"coverage":"weird"}')
+
+    assert state_180["coverage"] == 180
+    assert state_invalid["coverage"] == 360
+
+
+def test_normalize_coverage_accepts_only_180_or_360():
+    assert normalize_coverage(180) == 180
+    assert normalize_coverage("180") == 180
+    assert normalize_coverage(360) == 360
+    assert normalize_coverage("foo") == 360
 
 
 def test_parse_sticker_state_reads_canonical_format():

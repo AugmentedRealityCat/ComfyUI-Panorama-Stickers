@@ -181,6 +181,7 @@ uniform int u_hasPaint;
 uniform int u_hasMask;
 uniform int u_showMaskTint;
 uniform vec3 u_maskTint;
+uniform int u_coverage;
 
 const float PI = 3.1415926535897932384626433832795;
 const float TWO_PI = 6.283185307179586476925286766559;
@@ -217,6 +218,11 @@ vec2 projectCameraUv(float yaw, float pitch, float roll, float hfov, float vfov)
   vec3 dir = normalize(basis[2] + basis[0] * nx + basis[1] * ny);
   float lon = atan(dir.x, dir.z);
   float lat = asin(clamp(dir.y, -1.0, 1.0));
+  if (u_coverage == 180) {
+    if (abs(lon) > PI * 0.5) return vec2(-1.0, -1.0);
+    float localU = clamp(lon / PI + 0.5, 0.0, 1.0);
+    return vec2(localU, clamp(0.5 - lat / PI, 0.0, 1.0));
+  }
   return vec2(lon / TWO_PI + 0.5, clamp(0.5 - lat / PI, 0.0, 1.0));
 }
 
@@ -225,6 +231,7 @@ void main() {
   if (u_mode == 1 || u_mode == 2) {
     sampleUv = projectCameraUv(u_yaw, u_pitch, u_roll, u_hfov, u_vfov);
   }
+  if (sampleUv.x < 0.0 || sampleUv.y < 0.0) discard;
   vec4 bg = texture(u_background, sampleUv);
   vec4 paint = u_hasPaint == 1 ? texture(u_paint, sampleUv) : vec4(0.0);
   vec4 mask = u_hasMask == 1 ? texture(u_mask, sampleUv) : vec4(0.0);
@@ -399,6 +406,7 @@ export function createPanoGlRenderer(options = {}) {
         hasMask: gl.getUniformLocation(backgroundProgram, "u_hasMask"),
         showMaskTint: gl.getUniformLocation(backgroundProgram, "u_showMaskTint"),
         maskTint: gl.getUniformLocation(backgroundProgram, "u_maskTint"),
+        coverage: gl.getUniformLocation(backgroundProgram, "u_coverage"),
         background: gl.getUniformLocation(backgroundProgram, "u_background"),
         paint: gl.getUniformLocation(backgroundProgram, "u_paint"),
         mask: gl.getUniformLocation(backgroundProgram, "u_mask"),
@@ -717,6 +725,8 @@ export function createPanoGlRenderer(options = {}) {
     gl.uniform1i(backgroundUniforms.hasMask, maskRevision != null ? 1 : 0);
     gl.uniform1i(backgroundUniforms.showMaskTint, params.showMaskTint === false ? 0 : 1);
     gl.uniform3f(backgroundUniforms.maskTint, 34 / 255, 197 / 255, 94 / 255);
+    const coverageDeg = Number(view?.coverageDeg || params?.coverageDeg || 360) === 180 ? 180 : 360;
+    gl.uniform1i(backgroundUniforms.coverage, coverageDeg);
     gl.drawArrays(gl.TRIANGLES, 0, 6);
     return surface;
   }

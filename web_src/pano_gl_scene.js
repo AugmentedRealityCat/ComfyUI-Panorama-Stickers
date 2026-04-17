@@ -96,20 +96,22 @@ export function buildPanoramaViewParamsFromEditor(editor) {
     yawDeg: Number(editor?.viewYaw || 0),
     pitchDeg: Number(editor?.viewPitch || 0),
     fovDeg: clamp(Number(editor?.viewFov || 100), 1, 179),
+    coverageDeg: Number(editor?.coverage || 360) === 180 ? 180 : 360,
   };
 }
 
-export function buildPanoramaViewParamsFromRuntime(runtimeState) {
+export function buildPanoramaViewParamsFromRuntime(runtimeState, coverage = 360) {
   return {
     mode: "panorama",
     yawDeg: Number(runtimeState?.yaw || 0),
     pitchDeg: Number(runtimeState?.pitch || 0),
     fovDeg: clamp(Number(runtimeState?.fov || 100), 1, 179),
+    coverageDeg: Number(coverage || 360) === 180 ? 180 : 360,
   };
 }
 
-export function buildPreviewNodeViewParams(nodeState) {
-  return buildPanoramaViewParamsFromRuntime(nodeState);
+export function buildPreviewNodeViewParams(nodeState, coverage = 360) {
+  return buildPanoramaViewParamsFromRuntime(nodeState, coverage);
 }
 
 export function buildCutoutViewParamsFromShot(shot) {

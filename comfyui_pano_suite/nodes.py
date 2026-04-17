@@ -6,6 +6,7 @@ import logging
 import numpy as np
 import torch
 import torch.nn.functional as F
+from PIL import Image
 from comfy_api.latest import io
 
 try:
@@ -27,7 +28,7 @@ from .core.painting import (
     render_painting_to_cutout,
     render_painting_to_erp,
 )
-from .core.state import merge_state, parse_sticker_state
+from .core.state import merge_state, normalize_coverage, parse_sticker_state
 from .core.stickers import compose_stickers_to_erp
 
 
@@ -41,6 +42,42 @@ def _save_input_preview(images, key="pano_input_images"):
     except Exception:
         logging.getLogger(__name__).exception("Failed to save preview image for %s", key)
     return {}
+
+
+def _apply_coverage_to_rgba(arr, coverage: int, out_w: int, out_h: int):
+    if arr is None:
+        return None
+    rgba = np.clip(arr.astype(np.float32), 0.0, 1.0)
+    if int(rgba.shape[0]) != int(out_h) or int(rgba.shape[1]) != int(out_w):
+        pil = Image.fromarray((rgba * 255.0).astype(np.uint8))
+        rgba = np.asarray(pil.resize((int(out_w), int(out_h)), Image.BILINEAR), dtype=np.float32) / 255.0
+    return rgba
+
+
+def _apply_coverage_to_mask(arr, coverage: int, out_w: int, out_h: int):
+    if arr is None:
+        return None
+    mask = np.clip(arr.astype(np.float32), 0.0, 1.0)
+    if int(mask.shape[0]) != int(out_h) or int(mask.shape[1]) != int(out_w):
+        pil = Image.fromarray(np.clip(mask * 255.0, 0.0, 255.0).astype(np.uint8))
+        mask = np.asarray(pil.resize((int(out_w), int(out_h)), Image.BILINEAR), dtype=np.float32) / 255.0
+    return mask
+
+
+def _apply_coverage_to_rgb(arr, coverage: int, out_w: int, out_h: int):
+    if arr is None:
+        return None
+    rgb = np.clip(arr.astype(np.float32), 0.0, 1.0)
+    if rgb.ndim != 3:
+        return None
+    if rgb.shape[-1] < 3:
+        rgb = np.repeat(rgb[..., :1], 3, axis=-1)
+    elif rgb.shape[-1] > 3:
+        rgb = rgb[..., :3]
+    if int(rgb.shape[0]) != int(out_h) or int(rgb.shape[1]) != int(out_w):
+        pil = Image.fromarray((rgb * 255.0).astype(np.uint8))
+        rgb = np.asarray(pil.resize((int(out_w), int(out_h)), Image.BILINEAR), dtype=np.float32) / 255.0
+    return rgb
 
 
 def _push_ui_warning(ui_ret: dict, key: str, message: str):
@@ -414,8 +451,13 @@ class PanoramaStickersNode(io.ComfyNode):
             inputs=[
                 io.Combo.Input(
                     "output_preset",
-                    options=["1024 x 512", "2048 x 1024", "4096 x 2048"],
-                    default="2048 x 1024",
+                    options=["1024", "2048", "4096"],
+                    default="2048",
+                ),
+                io.Combo.Input(
+                    "coverage",
+                    options=["360", "180"],
+                    default="360",
                 ),
                 io.String.Input("bg_color", default="#00ff00", multiline=False),
                 io.String.Input(
@@ -468,9 +510,12 @@ class PanoramaStickersNode(io.ComfyNode):
         return f"#{s.lower()}"
 
     @classmethod
-    def execute(cls, output_preset, bg_color, state_json, bg_erp=None, sticker_image=None, sticker_state=""):
+    def execute(cls, output_preset, coverage, bg_color, state_json, bg_erp=None, sticker_image=None, sticker_state=""):
         out_w = cls._parse_output_preset(output_preset, max_val=cls.MAX_OUTPUT_SIDE)
-        out_h = max(1, out_w // 2)
+        coverage_value = normalize_coverage(coverage)
+        out_h = max(1, out_w if coverage_value == 180 else (out_w // 2))
+        workspace_w = out_w
+        workspace_h = max(1, workspace_w // 2)
         bg_hex = cls._normalize_hex_color(bg_color)
         state = merge_state(state_in=None, internal_state=state_json, fallback_preset=out_w, fallback_bg=bg_hex)
         warnings = []
@@ -478,14 +523,13 @@ class PanoramaStickersNode(io.ComfyNode):
         bg_np = None
         if bg_erp is not None:
             bg_np = _single_image_to_numpy(bg_erp, warnings)
+            bg_np = _apply_coverage_to_rgb(bg_np, coverage_value, out_w, out_h)
         if bg_np is None:
             bg_np = np.broadcast_to(_hex_color_to_rgb01(bg_hex), (out_h, out_w, 3)).copy()
-        else:
-            out_h = int(bg_np.shape[0])
-            out_w = int(bg_np.shape[1])
 
         state["output_preset"] = out_w
         state["bg_color"] = bg_hex
+        state["coverage"] = coverage_value
 
         render_stickers = []
         for sticker in state.get("stickers", []):
@@ -556,8 +600,8 @@ class PanoramaStickersNode(io.ComfyNode):
 
         painting_payload = resolve_painting_layer_payload(
             state.get("painting_layer"),
-            erp_width=out_w,
-            erp_height=out_h,
+            erp_width=workspace_w,
+            erp_height=workspace_h,
         )
         out, used_group_layers = _compose_display_list_to_erp(
             render_state,
@@ -569,7 +613,7 @@ class PanoramaStickersNode(io.ComfyNode):
         painting_state = state.get("painting")
         paint_rgba = None
         if used_group_layers:
-            paint_rgba = _render_remaining_flat_paint_layer_from_state(painting_state, out_w, out_h)
+            paint_rgba = _render_remaining_flat_paint_layer_from_state(painting_state, workspace_w, workspace_h)
         else:
             paint_rgba = painting_payload.get("paint") if isinstance(painting_payload, dict) else None
             if paint_rgba is None:
@@ -579,7 +623,8 @@ class PanoramaStickersNode(io.ComfyNode):
                         "pano_sticker_warnings",
                         "Paint export fell back to backend stroke rendering because uploaded paint layers were unavailable.",
                     )
-                paint_rgba, _mask_bw = render_painting_to_erp(state.get("painting"), out_w, out_h)
+                paint_rgba, _mask_bw = render_painting_to_erp(state.get("painting"), workspace_w, workspace_h)
+        paint_rgba = _apply_coverage_to_rgba(paint_rgba, coverage_value, out_w, out_h)
         if paint_rgba is not None:
             out = alpha_composite_over_rgb(out, paint_rgba)
         mask_bw = painting_payload.get("mask") if isinstance(painting_payload, dict) else None
@@ -590,7 +635,8 @@ class PanoramaStickersNode(io.ComfyNode):
                     "pano_sticker_warnings",
                     "Mask export fell back to backend stroke rendering because uploaded mask layers were unavailable.",
                 )
-            _paint_rgba, mask_bw = render_painting_to_erp(state.get("painting"), out_w, out_h)
+            _paint_rgba, mask_bw = render_painting_to_erp(state.get("painting"), workspace_w, workspace_h)
+        mask_bw = _apply_coverage_to_mask(mask_bw, coverage_value, out_w, out_h)
         if mask_bw is None:
             mask_bw = np.zeros((out_h, out_w), dtype=np.float32)
 
@@ -618,6 +664,11 @@ class PanoramaCutoutNode(io.ComfyNode):
             category="Panorama Suite",
             inputs=[
                 io.Image.Input("erp_image"),
+                io.Combo.Input(
+                    "coverage",
+                    options=["360", "180"],
+                    default="360",
+                ),
                 io.String.Input(
                     "state_json",
                     default="",
@@ -645,9 +696,11 @@ class PanoramaCutoutNode(io.ComfyNode):
         )
 
     @classmethod
-    def execute(cls, erp_image, state_json, output_megapixels=1.0):
+    def execute(cls, erp_image, coverage, state_json, output_megapixels=1.0):
         output_megapixels = max(0.01, finite_float(output_megapixels, 1.0))
         state = merge_state(state_in=None, internal_state=state_json)
+        coverage_value = normalize_coverage(coverage)
+        state["coverage"] = coverage_value
         shots = state.get("shots", []) if isinstance(state, dict) else []
         src = None
         try:
@@ -752,7 +805,7 @@ class PanoramaCutoutNode(io.ComfyNode):
                 base_dir=Path.cwd(),
                 quality="export",
             )
-            out = cutout_from_erp(src, yaw, pitch, hfov, vfov, roll, ow, oh)
+            out = cutout_from_erp(src, yaw, pitch, hfov, vfov, roll, ow, oh, coverage_value)
             if out.ndim != 3 or out.shape[-1] != 3:
                 out = np.zeros((oh, ow, 3), dtype=np.float32)
             painting_state = state.get("painting")
@@ -774,6 +827,7 @@ class PanoramaCutoutNode(io.ComfyNode):
                         erp_width=src.shape[1],
                         erp_height=src.shape[0],
                         painting_layer_payload=None,
+                        coverage=coverage_value,
                     )
                     _paint_unused, mask_bw = render_painting_to_cutout(
                         state.get("painting"),
@@ -783,6 +837,7 @@ class PanoramaCutoutNode(io.ComfyNode):
                         erp_width=src.shape[1],
                         erp_height=src.shape[0],
                         painting_layer_payload=painting_payload,
+                        coverage=coverage_value,
                     )
                 else:
                     paint_rgba, mask_bw = render_painting_to_cutout(
@@ -793,6 +848,7 @@ class PanoramaCutoutNode(io.ComfyNode):
                         erp_width=src.shape[1],
                         erp_height=src.shape[0],
                         painting_layer_payload=painting_payload,
+                        coverage=coverage_value,
                     )
             else:
                 paint_rgba = np.zeros((oh, ow, 4), dtype=np.float32)
@@ -823,13 +879,20 @@ class PanoramaPreviewNode(io.ComfyNode):
             node_id="PanoramaPreview",
             display_name="Panorama Preview",
             category="Panorama Suite",
-            inputs=[io.Image.Input("erp_image")],
+            inputs=[
+                io.Image.Input("erp_image"),
+                io.Combo.Input(
+                    "coverage",
+                    options=["360", "180"],
+                    default="360",
+                ),
+            ],
             outputs=[],
             is_output_node=True,
         )
 
     @classmethod
-    def execute(cls, erp_image):
+    def execute(cls, erp_image, coverage="360"):
         ui_ret = {}
         if erp_image is not None:
             ui_ret = _save_input_preview(erp_image)
