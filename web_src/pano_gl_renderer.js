@@ -427,6 +427,7 @@ export function createPanoGlRenderer(options = {}) {
   let uploadScratchCtx = null;
   const stickerTextureRegistry = new Map();
   let currentState = {
+    objectPass: { objects: [], selectedId: null, hoveredId: null },
     scene: { stickers: [], selectedId: null, hoveredId: null },
     textures: [],
     backgroundOpacity: 1,
@@ -890,6 +891,90 @@ export function createPanoGlRenderer(options = {}) {
     gl.disable(gl.BLEND);
   }
 
+  function drawObjectPass(objectPass, view) {
+    const objects = Array.isArray(objectPass?.objects) ? objectPass.objects : [];
+    if (!objects.length) return;
+    const mode = view?.mode === "unwrap" ? 0 : (view?.mode === "cutout" ? 2 : 1);
+    const viewAngles = getViewAngles(view, viewport.width, viewport.height) || {
+      yawDeg: 0,
+      pitchDeg: 0,
+      rollDeg: 0,
+      hFovDeg: 90,
+      vFovDeg: 90,
+    };
+    const viewBasis = cameraBasis(viewAngles.yawDeg, viewAngles.pitchDeg, viewAngles.rollDeg);
+    const sorted = objects.slice().sort((a, b) => Number(a?.zIndex || 0) - Number(b?.zIndex || 0));
+    for (const object of sorted) {
+      if (!object || object.visible === false) continue;
+      if (object.type === "sticker") {
+        const texture = ensureStickerTexture({
+          assetId: String(object?.params?.assetId || object?.id || ""),
+          source: object.source,
+          revision: object.revision,
+        });
+        if (!texture) continue;
+        const basis = buildStickerBasis({
+          yawDeg: object?.transform?.yawDeg || 0,
+          pitchDeg: object?.transform?.pitchDeg || 0,
+          rollDeg: object?.transform?.rollDeg || 0,
+          hFovDeg: object?.transform?.hFovDeg || 30,
+          vFovDeg: object?.transform?.vFovDeg || 30,
+          crop: object?.params?.crop || { x0: 0, y0: 0, x1: 1, y1: 1 },
+          opacity: object?.opacity ?? 1,
+        });
+        gl.enable(gl.BLEND);
+        gl.blendFunc(gl.ONE, gl.ONE_MINUS_SRC_ALPHA);
+        bindQuad(stickerProgram);
+        gl.uniform1i(stickerUniforms.texture, 0);
+        gl.uniform1i(stickerUniforms.mode, mode);
+        gl.uniform3f(stickerUniforms.viewRight, viewBasis.right.x, viewBasis.right.y, viewBasis.right.z);
+        gl.uniform3f(stickerUniforms.viewUp, viewBasis.up.x, viewBasis.up.y, viewBasis.up.z);
+        gl.uniform3f(stickerUniforms.viewFwd, viewBasis.fwd.x, viewBasis.fwd.y, viewBasis.fwd.z);
+        gl.uniform1f(stickerUniforms.viewHfov, clamp(Number(viewAngles.hFovDeg || 90), 0.1, 179) * DEG2RAD);
+        gl.uniform1f(stickerUniforms.viewVfov, clamp(Number(viewAngles.vFovDeg || 60), 0.1, 179) * DEG2RAD);
+        gl.activeTexture(gl.TEXTURE0);
+        gl.bindTexture(gl.TEXTURE_2D, texture);
+        gl.uniform3f(stickerUniforms.stickerRight, basis.right.x, basis.right.y, basis.right.z);
+        gl.uniform3f(stickerUniforms.stickerUp, basis.up.x, basis.up.y, basis.up.z);
+        gl.uniform3f(stickerUniforms.stickerFwd, basis.fwd.x, basis.fwd.y, basis.fwd.z);
+        gl.uniform1f(stickerUniforms.stickerTanX, Math.max(1e-6, basis.tanX));
+        gl.uniform1f(stickerUniforms.stickerTanY, Math.max(1e-6, basis.tanY));
+        gl.uniform4f(
+          stickerUniforms.crop,
+          clamp(Number(basis.crop.x0 ?? 0), 0, 1),
+          clamp(Number(basis.crop.y0 ?? 0), 0, 1),
+          clamp(Number(basis.crop.x1 ?? 1), 0, 1),
+          clamp(Number(basis.crop.y1 ?? 1), 0, 1),
+        );
+        gl.uniform1f(stickerUniforms.opacity, basis.opacity);
+        gl.drawArrays(gl.TRIANGLES, 0, 6);
+        gl.disable(gl.BLEND);
+        continue;
+      }
+      if (object.type === "paint" || object.type === "raster") {
+        if (!setPaintErp(object.source, object.revision ?? "")) continue;
+        clearLayerState("mask");
+        drawLayers(view, {
+          paintOpacity: Number(object.opacity ?? 1),
+          maskOpacity: 0,
+          showMaskTint: false,
+        });
+        continue;
+      }
+      if (object.type === "mask") {
+        if (!setMaskErp(object.source, object.revision ?? "")) continue;
+        clearLayerState("paint");
+        drawLayers(view, {
+          paintOpacity: 0,
+          maskOpacity: Number(object.opacity ?? 1),
+          showMaskTint: true,
+        });
+      }
+    }
+    clearLayerState("paint");
+    clearLayerState("mask");
+  }
+
   function renderPanorama(params) {
     if (!setupFrame() || !backgroundRevision) return null;
     drawBackground({
@@ -945,6 +1030,9 @@ export function createPanoGlRenderer(options = {}) {
     if (hasScene) {
       currentState.scene = input.scene || { stickers: [], selectedId: null, hoveredId: null };
     }
+    if (Object.prototype.hasOwnProperty.call(input, "objectPass")) {
+      currentState.objectPass = input.objectPass || { objects: [], selectedId: null, hoveredId: null };
+    }
     if (Object.prototype.hasOwnProperty.call(input, "backgroundOpacity")) {
       currentState.backgroundOpacity = Number(input.backgroundOpacity ?? 1);
     }
@@ -962,14 +1050,8 @@ export function createPanoGlRenderer(options = {}) {
         coverageDeg: Number(input.coverageDeg || currentState.coverageDeg || 360) === 180 ? 180 : 360,
       });
     }
-    drawLayers(input.view || { mode: "panorama", yawDeg: 0, pitchDeg: 0, fovDeg: 100 }, {
-      ...currentState,
-      ...input,
-      showMaskTint: input.showMaskTint ?? currentState.showMaskTint ?? false,
-    });
-    drawStickerScene(
-      currentState.scene || { stickers: [], selectedId: null, hoveredId: null },
-      currentState.textures || [],
+    drawObjectPass(
+      currentState.objectPass || { objects: [], selectedId: null, hoveredId: null },
       input.view || { mode: "panorama", yawDeg: 0, pitchDeg: 0, fovDeg: 100 },
     );
     return surface;

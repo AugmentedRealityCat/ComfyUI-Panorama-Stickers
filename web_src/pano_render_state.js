@@ -1,6 +1,12 @@
 import {
   buildPanoramaRenderDescriptor,
 } from "./pano_render_object_pass.js";
+import {
+  buildStickerObjectDescriptors,
+} from "./pano_render_descriptors.js";
+import {
+  buildPanoramaLayerDescriptors,
+} from "./pano_render_layer_descriptors.js";
 
 function normalizeDescriptor(descriptor = {}) {
   if (descriptor?.background || descriptor?.objectPass || descriptor?.overlay) {
@@ -48,6 +54,7 @@ function normalizeDescriptor(descriptor = {}) {
       maskRevision: String(maskEntry?.revision || ""),
       textures,
       scene,
+      objectPass: normalized.objectPass,
       backgroundOpacity: Number(normalized.background?.opacity ?? 1),
       showMaskTint: descriptor?.overlay?.showMaskTint === true,
     };
@@ -55,6 +62,24 @@ function normalizeDescriptor(descriptor = {}) {
   const scene = descriptor.scene || { stickers: [], selectedId: null, hoveredId: null };
   const textures = Array.isArray(descriptor.textures) ? descriptor.textures : [];
   const layers = descriptor.layers || {};
+  const objectPass = buildPanoramaRenderDescriptor({
+    objectPass: {
+      selectedId: scene?.selectedId ?? null,
+      hoveredId: scene?.hoveredId ?? null,
+      objects: [
+        ...buildStickerObjectDescriptors(scene, textures),
+        ...buildPanoramaLayerDescriptors({
+          paintSource: descriptor.paintSource || layers.paintSource || null,
+          paintRevision: descriptor.paintRevision || layers.paintRevision || "",
+          paintOptions: descriptor.paintOptions || null,
+          maskSource: descriptor.maskSource || layers.maskSource || null,
+          maskRevision: descriptor.maskRevision || layers.maskRevision || "",
+          maskOptions: descriptor.maskOptions || null,
+          rasterEntries: descriptor.rasterEntries || [],
+        }),
+      ],
+    },
+  }).objectPass;
   return {
     stateRevision: String(descriptor.stateRevision || ""),
     backgroundSource: descriptor.backgroundSource || null,
@@ -66,6 +91,7 @@ function normalizeDescriptor(descriptor = {}) {
     maskRevision: String(layers.maskRevision || ""),
     textures,
     scene,
+    objectPass,
     backgroundOpacity: Number(descriptor.backgroundOpacity ?? 1),
     showMaskTint: descriptor.showMaskTint === true,
   };
@@ -87,6 +113,7 @@ export function createPanoramaRendererStateController(renderer) {
       maskRevision: next.maskRevision,
       textures: next.textures,
       scene: next.scene,
+      objectPass: next.objectPass,
       backgroundOpacity: next.backgroundOpacity,
       showMaskTint: next.showMaskTint,
     });
