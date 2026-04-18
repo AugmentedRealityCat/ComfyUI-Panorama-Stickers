@@ -2195,7 +2195,7 @@ async function showEditor(node, type, options = {}) {
     const kind = String(interaction?.kind || "");
     if (kind === "paint_stroke" || kind === "paint_lasso_fill") return true;
     if (kind === "move_stroke_group" || kind === "scale_stroke_group" || kind === "rotate_stroke_group") return true;
-    if (kind === "move_raster_object") return true;
+    if (kind === "move_raster_object" || kind === "scale_raster_object") return true;
     if (kind === "move_multi") {
       const hasStrokeSnapshots = Array.isArray(interaction?.strokeSnapshots) && interaction.strokeSnapshots.length > 0;
       const hasRasterSnapshots = Array.isArray(interaction?.rasterSnapshots) && interaction.rasterSnapshots.length > 0;
@@ -2480,6 +2480,19 @@ async function showEditor(node, type, options = {}) {
     if (!item.transform) item.transform = { du: 0, dv: 0, rot_deg: 0, scale: 1 };
     item.transform.du = nextDu;
     item.transform.dv = nextDv;
+    return true;
+  }
+  function applyRasterObjectTransform(idOrRasterId, scale = 1, snapshot = null) {
+    const rid = parseRasterObjectSelectionId(idOrRasterId);
+    if (!rid) return false;
+    const item = getRasterObjectList().find((entry) => String(entry?.id || "").trim() === rid);
+    if (!item) return false;
+    const source = snapshot && typeof snapshot === "object" ? snapshot : item;
+    const sourceTf = source?.transform || {};
+    const sourceScale = Math.max(0.01, Number(sourceTf.scale || 1));
+    const nextScale = clamp(sourceScale * Math.max(0.01, Number(scale || 1)), 0.01, 100);
+    if (!item.transform) item.transform = { du: 0, dv: 0, rot_deg: 0, scale: 1 };
+    item.transform.scale = nextScale;
     return true;
   }
   function getSelected() {
@@ -4730,17 +4743,13 @@ async function showEditor(node, type, options = {}) {
   function getCutoutSelectableItemsForDisplay() {
     const stickers = [...(Array.isArray(state.stickers) ? state.stickers : [])]
       .sort((a, b) => Number(a.z_index || 0) - Number(b.z_index || 0));
-    if (editor.mode === "frame") return stickers;
-    const shots = Array.isArray(state.shots) ? state.shots : [];
-    return [...stickers, ...shots];
+    return stickers;
   }
 
   function getCutoutSelectableItemsForHit() {
     const stickers = [...(Array.isArray(state.stickers) ? state.stickers : [])]
       .sort((a, b) => Number(b.z_index || 0) - Number(a.z_index || 0));
-    if (editor.mode === "frame") return stickers;
-    const shots = Array.isArray(state.shots) ? state.shots : [];
-    return [...stickers, ...shots];
+    return stickers;
   }
 
   function traceQuad(ctx2d, corners = []) {
@@ -4821,22 +4830,7 @@ async function showEditor(node, type, options = {}) {
     const [usedNu, usedNv] = getMeshDivisions();
     const selectedItems = getSelectedItems();
     const multiSelected = selectedItems.length > 1;
-    const rawList = type === "cutout"
-      ? [
-        ...getOrderedDisplayListObjects(false)
-          .map((entry) => {
-            if (entry.type === "strokeGroup") {
-              return getStrokeGroupItem(makeStrokeGroupSelectionId("paint", entry.actionGroupId || entry.id || ""));
-            }
-            if (entry.type === "rasterObject") {
-              return getRasterObjectItem(makeRasterObjectSelectionId(entry.item?.id || entry.id || ""));
-            }
-            return entry.item;
-          })
-          .filter(Boolean),
-        ...getCutoutSelectableItemsForDisplay().filter((item) => isShotItem(item)),
-      ]
-      : getList();
+    const rawList = type === "cutout" ? getCutoutSelectableItemsForDisplay() : getList();
     const orderKey = rawList.map((item) => `${String(item?.id || "")}:${isShotItem(item) ? "frame" : Number(item?.z_index || 0)}`).join("|");
     if (!editor._sortedItemsCache || editor._sortedItemsCache.src !== rawList || editor._sortedItemsCache.orderKey !== orderKey) {
       editor._sortedItemsCache = {
@@ -4850,13 +4844,15 @@ async function showEditor(node, type, options = {}) {
       const selected = !multiSelected && isItemSelected(item);
       if (editor.mode === "frame" && !selected) continue;
       if (!editor.showObjects && !isShotItem(item)) continue;
+      const itemIsSticker = isStickerItem(item);
+      const itemLocked = isItemLocked(item);
+      if (!itemIsSticker) {
+        continue;
+      }
       const g = objectGeom(item);
       if (type !== "stickers" && !g.visible) {
         continue;
       }
-
-      const itemIsSticker = isStickerItem(item);
-      const itemLocked = isItemLocked(item);
       drawObjectBody(item, g, selected, itemLocked);
 
       if (selected && g.visible) {
@@ -4899,10 +4895,8 @@ async function showEditor(node, type, options = {}) {
         ctx.closePath();
         ctx.stroke();
         ctx.setLineDash([]);
-        if (isStrokeGroupItem(selected)) {
-          ctx.fillStyle = accent;
-          g.corners.forEach((p) => { ctx.beginPath(); ctx.arc(p.x, p.y, 6.5, 0, Math.PI * 2); ctx.fill(); });
-        }
+        ctx.fillStyle = accent;
+        g.corners.forEach((p) => { ctx.beginPath(); ctx.arc(p.x, p.y, 6.5, 0, Math.PI * 2); ctx.fill(); });
         ctx.restore();
       });
     }
@@ -8499,6 +8493,14 @@ async function showEditor(node, type, options = {}) {
       return { kind: "none", cursor: editor.mode === "pano" ? "grab" : "default" };
     }
     if (geom.kind === "rasterObject") {
+      const cornerIdx = geom.corners.findIndex((c) => dist2(c, p) <= 11 * 11);
+      if (cornerIdx >= 0) {
+        const c = geom.corners[cornerIdx];
+        const vx = c.x - geom.center.x;
+        const vy = c.y - geom.center.y;
+        const cursor = (vx * vy) >= 0 ? "nwse-resize" : "nesw-resize";
+        return { kind: "scale", cornerIdx, cursor };
+      }
       if (pointInPoly(p, geom.corners)) return { kind: "move", cursor: "default" };
       return { kind: "none", cursor: editor.mode === "pano" ? "grab" : "default" };
     }
@@ -8555,7 +8557,7 @@ async function showEditor(node, type, options = {}) {
       else if (editor.interaction.kind === "view") canvas.style.cursor = "grabbing";
       else if (editor.interaction.kind === "pan_frame") canvas.style.cursor = "grabbing";
     else if (editor.interaction.kind === "move" || editor.interaction.kind === "move_multi" || editor.interaction.kind === "move_stroke_group" || editor.interaction.kind === "move_raster_object") canvas.style.cursor = "move";
-      else if (editor.interaction.kind === "scale" || editor.interaction.kind === "scale_x" || editor.interaction.kind === "scale_y") canvas.style.cursor = editor.interaction.cursor || "nwse-resize";
+      else if (editor.interaction.kind === "scale" || editor.interaction.kind === "scale_x" || editor.interaction.kind === "scale_y" || editor.interaction.kind === "scale_raster_object") canvas.style.cursor = editor.interaction.cursor || "nwse-resize";
       else if (editor.interaction.kind === "rotate") canvas.style.cursor = "grabbing";
       else canvas.style.cursor = "default";
       return;
@@ -9005,6 +9007,15 @@ async function showEditor(node, type, options = {}) {
             frameSnapshot: cloneJson(ensureGroupFrame(selected.actionGroupId, selected.layerKind)),
             cursor: h.cursor,
           }
+          : isRasterObjectItem(selected)
+          ? {
+            kind: "scale_raster_object",
+            item: selected,
+            center: selGeom.center,
+            startDist: Math.max(1, Math.hypot(p.x - selGeom.center.x, p.y - selGeom.center.y)),
+            snapshot: cloneJson(getRasterObjectList().find((entry) => String(entry?.id || "") === parseRasterObjectSelectionId(selected.rasterObjectId || selected.id || ""))),
+            cursor: h.cursor,
+          }
           : {
             kind: "scale",
             item: selected,
@@ -9286,6 +9297,16 @@ async function showEditor(node, type, options = {}) {
       return;
     }
 
+    if (it.kind === "scale_raster_object") {
+      const d = Math.max(1, Math.hypot(p.x - it.center.x, p.y - it.center.y));
+      const ratio = d / Math.max(1, Number(it.startDist || 1));
+      if (applyRasterObjectTransform(it.item?.rasterObjectId || it.item?.id || "", ratio, it.snapshot)) {
+        markPaintCompositeVisualsDirty();
+        requestDraw({ localOnly: true });
+      }
+      return;
+    }
+
     if (it.kind === "move_multi") {
       const tx = p.x - Number(it.offset?.x || 0);
       const ty = p.y - Number(it.offset?.y || 0);
@@ -9502,7 +9523,7 @@ async function showEditor(node, type, options = {}) {
         || editor.interaction.kind === "rotate_stroke_group") {
         compositeChanged = true;
       }
-      if (editor.interaction.kind === "move_raster_object") {
+      if (editor.interaction.kind === "move_raster_object" || editor.interaction.kind === "scale_raster_object") {
         compositeChanged = true;
       }
       if (editor.interaction.kind === "move_multi" && Array.isArray(editor.interaction.strokeSnapshots) && editor.interaction.strokeSnapshots.length) {
