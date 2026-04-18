@@ -3553,9 +3553,10 @@ async function showEditor(node, type, options = {}) {
     }
     const scene = buildModalBackgroundScene();
     const textures = buildModalBackgroundTextures(scene);
-    const interleavedLayerEntries = editor.showObjects ? buildModalInterleavedLayerEntries() : [];
+    const interleavedLayerEntries = editor.showObjects
+      ? buildModalInterleavedLayerEntries()
+      : appendMaskDisplayLayerEntry([]);
     const paintSource = null;
-    const maskSource = editor.showMask ? getModalLayerMaskSource() : null;
     const descriptor = buildPanoramaCompositeDescriptor({
       stateRevision: [
         cachePrefix,
@@ -3564,7 +3565,6 @@ async function showEditor(node, type, options = {}) {
         bgReady ? Number(bgImg.naturalHeight || bgImg.height || 0) : 0,
         Array.isArray(textures) ? textures.map((item) => `${String(item?.assetId || "")}:${String(item?.revision || "")}`).join(",") : "none",
         interleavedLayerEntries.length ? interleavedLayerEntries.map((entry) => `${String(entry?.id || "")}:${String(entry?.revision || "")}:${Number(entry?.zIndex || 0)}`).join(",") : "paint:none",
-        maskSource ? `${getPaintingCompositeRevisionKey()}:mask` : "mask:none",
       ].join("|"),
       backgroundSource: bgReady && editor.showPanorama ? bgImg : null,
       backgroundRevision: bgReady ? `${cachePrefix}:bg` : "",
@@ -3573,8 +3573,6 @@ async function showEditor(node, type, options = {}) {
       textures,
       paintSource,
       paintRevision: "",
-      maskSource,
-      maskRevision: maskSource ? `${getPaintingCompositeRevisionKey()}:mask` : "",
       rasterEntries: interleavedLayerEntries,
       backgroundOpacity: 1,
       showMaskTint: false,
@@ -4075,6 +4073,33 @@ async function showEditor(node, type, options = {}) {
     return editor.paintEngine?.getErpTarget?.(orderedGroupIds)?.committedMask?.canvas || null;
   }
 
+  function getModalLayerMaskDisplaySource() {
+    return editor.paintEngine?.getMaskDisplayCanvas?.() || null;
+  }
+
+  function getMaskDisplayRevisionKey() {
+    const source = getModalLayerMaskDisplaySource();
+    if (!source) return "";
+    return `${getDisplayPaintRevisionKey()}:mask_display`;
+  }
+
+  function appendMaskDisplayLayerEntry(entries) {
+    if (!editor.showMask) return entries;
+    const source = getModalLayerMaskDisplaySource();
+    if (!source) return entries;
+    const revision = getMaskDisplayRevisionKey();
+    const topZ = entries.reduce((max, entry) => Math.max(max, Number(entry?.zIndex || 0)), -1);
+    entries.push({
+      id: "mask_display",
+      source,
+      revision,
+      zIndex: topZ + 1,
+      opacity: 1,
+      visible: true,
+    });
+    return entries;
+  }
+
   function buildModalInterleavedLayerEntries() {
     const ordered = getOrderedDisplayListObjects(true);
     const previewInfo = getActivePaintEraserPreviewInfo();
@@ -4121,7 +4146,7 @@ async function showEditor(node, type, options = {}) {
         });
       }
     }
-    return entries;
+    return appendMaskDisplayLayerEntry(entries);
   }
 
   function buildModalPanoramaDescriptor(bgImg, cachePrefix = "modal_bg_gl") {
@@ -4138,16 +4163,16 @@ async function showEditor(node, type, options = {}) {
         Number(bgImg.naturalHeight || bgImg.height || 0),
       ].join("|")
       : "none";
-    const interleavedLayerEntries = editor.showObjects ? buildModalInterleavedLayerEntries() : [];
+    const interleavedLayerEntries = editor.showObjects
+      ? buildModalInterleavedLayerEntries()
+      : appendMaskDisplayLayerEntry([]);
     const paintSource = null;
-    const maskSource = editor.showMask ? getModalLayerMaskSource() : null;
     const stateRevision = [
       cachePrefix,
       bgRevision,
       Array.isArray(scene?.stickers) ? scene.stickers.map((item) => String(item?.id || "")).join(",") : "none",
       Array.isArray(textures) ? textures.map((item) => `${String(item?.assetId || "")}:${String(item?.revision || "")}`).join(",") : "none",
       interleavedLayerEntries.length ? interleavedLayerEntries.map((entry) => `${String(entry?.id || "")}:${String(entry?.revision || "")}:${Number(entry?.zIndex || 0)}`).join(",") : "paint:none",
-      maskSource ? `${getPaintingCompositeRevisionKey()}:mask` : "mask:none",
       editor.showPanorama ? "panorama:1" : "panorama:0",
       editor.showObjects ? "objects:1" : "objects:0",
       editor.showMask ? "showMask:1" : "showMask:0",
@@ -4162,13 +4187,11 @@ async function showEditor(node, type, options = {}) {
         textures,
         paintSource,
         paintRevision: "",
-        maskSource,
-        maskRevision: maskSource ? `${getPaintingCompositeRevisionKey()}:mask` : "",
         rasterEntries: interleavedLayerEntries,
         backgroundOpacity: 1,
         showMaskTint: false,
       }),
-      hasContent: bgReady || textures.length > 0 || interleavedLayerEntries.length > 0 || !!maskSource,
+      hasContent: bgReady || textures.length > 0 || interleavedLayerEntries.length > 0,
     };
   }
 
@@ -5875,7 +5898,7 @@ async function showEditor(node, type, options = {}) {
         }
       }
       if (editor.showMask) {
-        const maskCanvas = erpTarget?.committedMask?.canvas || null;
+        const maskCanvas = editor.paintEngine?.getMaskDisplayCanvas?.() || null;
         if (maskCanvas) {
           drew = drawCutoutProjectionPreview(ctx, node, maskCanvas, rect, shot, previewQuality) || drew;
         }
