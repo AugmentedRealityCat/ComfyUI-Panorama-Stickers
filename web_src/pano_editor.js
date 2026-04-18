@@ -1838,13 +1838,9 @@ async function showEditor(node, type, options = {}) {
     paintCompositeRevision: 0,
     objectVisualRevision: 0,
     livePaintInteractionRevision: 0,
-    cutoutPreviewSurfaceRaf: 0,
-    cutoutPreviewSurfaceTimer: 0,
-    cutoutPreviewSurfaceLastTs: 0,
     selectedIds: [],
     _sortedItemsCache: null,
     _strokeGeomCache: new Map(),
-    _strokeRasterBoundsCache: new Map(),
     marqueeModifier: false,
     panelLastValues: null,
     panelWasEnabled: false,
@@ -2008,6 +2004,31 @@ async function showEditor(node, type, options = {}) {
     }
     return entry;
   }
+  function getFrameCornersUv(frame) {
+    if (!frame?.centerUv) return [];
+    const centerU = Number(frame.centerUv.u || 0);
+    const centerV = Number(frame.centerUv.v || 0);
+    const halfW = Number(frame.halfW || 0);
+    const halfH = Number(frame.halfH || 0);
+    return [
+      {
+        u: ((centerU - halfW) % 1 + 1) % 1,
+        v: clamp(centerV - halfH, 0, 1),
+      },
+      {
+        u: ((centerU + halfW) % 1 + 1) % 1,
+        v: clamp(centerV - halfH, 0, 1),
+      },
+      {
+        u: ((centerU + halfW) % 1 + 1) % 1,
+        v: clamp(centerV + halfH, 0, 1),
+      },
+      {
+        u: ((centerU - halfW) % 1 + 1) % 1,
+        v: clamp(centerV + halfH, 0, 1),
+      },
+    ];
+  }
   function syncPaintingGroupEntries() {
     const ids = new Set(getPaintStrokeActionGroupIds());
     const groups = getPaintingGroupList();
@@ -2032,6 +2053,7 @@ async function showEditor(node, type, options = {}) {
   // Returns { centerUv, rot_deg, halfW, halfH, uvPad } or null when no points.
   // Rotation is stored separately and accumulated via transforms — no PCA.
   function computeGroupFrame(actionGroupId, layerKind, strokes) {
+    const normalizeU = (u) => ((Number(u || 0) % 1) + 1) % 1;
     const sourcePoints = [];
     for (const stroke of strokes) {
       const geometry = stroke?.geometry;
@@ -2041,13 +2063,20 @@ async function showEditor(node, type, options = {}) {
       if (Array.isArray(pts)) sourcePoints.push(...pts);
     }
     if (!sourcePoints.length) return null;
-    let sumU = 0, sumV = 0;
-    sourcePoints.forEach((pt) => { sumU += Number(pt?.u || 0); sumV += Number(pt?.v || 0); });
-    const centU = sumU / sourcePoints.length;
+    const baseU = normalizeU(sourcePoints[0]?.u || 0);
+    let sumU = 0;
+    let sumV = 0;
+    sourcePoints.forEach((pt) => {
+      const u = normalizeU(pt?.u || 0);
+      sumU += baseU + shortestWrappedDelta(u, baseU);
+      sumV += Number(pt?.v || 0);
+    });
+    const centU = ((sumU / sourcePoints.length) % 1 + 1) % 1;
     const centV = sumV / sourcePoints.length;
     let minDU = Infinity, maxDU = -Infinity, minV = Infinity, maxV = -Infinity;
     sourcePoints.forEach((pt) => {
-      const du = shortestWrappedDelta(Number(pt?.u || 0), centU);
+      const u = normalizeU(pt?.u || 0);
+      const du = shortestWrappedDelta(u, centU);
       minDU = Math.min(minDU, du); maxDU = Math.max(maxDU, du);
       const v = Number(pt?.v || 0);
       minV = Math.min(minV, v); maxV = Math.max(maxV, v);
@@ -2068,17 +2097,15 @@ async function showEditor(node, type, options = {}) {
     };
   }
 
-  // Return the persistent frame for a group, initializing via PCA if frame is null.
-  // Pass strokes to avoid a second lookup when objectGeom() already has them.
+  // Stroke groups must derive their frame from the current stroke data every time.
+  // A persistent/stale frame breaks seam-crossing selection and transforms.
   function ensureGroupFrame(actionGroupId, layerKind, strokes) {
     const gid = String(actionGroupId || "").trim();
     if (!gid) return null;
     const entry = getPaintingGroupList().find((g) => String(g?.actionGroupId || "") === gid);
     if (!entry) return null;
-    if (!entry.frame) {
-      const s = strokes || getStrokeGroupStrokes(gid, layerKind);
-      entry.frame = computeGroupFrame(gid, layerKind, s);
-    }
+    const s = strokes || getStrokeGroupStrokes(gid, layerKind);
+    entry.frame = computeGroupFrame(gid, layerKind, s);
     return entry.frame;
   }
 
@@ -2196,17 +2223,6 @@ async function showEditor(node, type, options = {}) {
     return 0;
   }
 
-  function cancelScheduledCutoutPreviewSurfaceUpdate() {
-    if (editor.cutoutPreviewSurfaceRaf) {
-      cancelAnimationFrame(editor.cutoutPreviewSurfaceRaf);
-      editor.cutoutPreviewSurfaceRaf = 0;
-    }
-    if (editor.cutoutPreviewSurfaceTimer) {
-      clearTimeout(editor.cutoutPreviewSurfaceTimer);
-      editor.cutoutPreviewSurfaceTimer = 0;
-    }
-  }
-
   function getSharedLivePaintSurface() {
     let livePaint = null;
     try {
@@ -2222,10 +2238,6 @@ async function showEditor(node, type, options = {}) {
       livePaint = null;
     }
     return livePaint;
-  }
-
-  function shouldSchedulePassiveCutoutPreviewUpdate(options = {}) {
-    return false;
   }
 
   function getLivePaintRevisionSuffix() {
@@ -2244,13 +2256,10 @@ async function showEditor(node, type, options = {}) {
     return `_${interactionKind}_${groupId || rasterId || "active"}_${editor.livePaintInteractionRevision}`;
   }
   function getCutoutSelectableItems() {
-    return [
-      ...(Array.isArray(state.stickers) ? state.stickers : []),
-      ...(Array.isArray(state.shots) ? state.shots : []),
-    ];
+    return [...(Array.isArray(state.stickers) ? state.stickers : [])];
   }
   function isShotItem(item) {
-    return !!item && Array.isArray(state.shots) && state.shots.includes(item);
+    return false;
   }
   function isStickerItem(item) {
     return !!item && Array.isArray(state.stickers) && state.stickers.includes(item);
@@ -2323,7 +2332,7 @@ async function showEditor(node, type, options = {}) {
   function getStrokeGeomCacheKey(actionGroupId, layerKind = "paint") {
     const gid = String(actionGroupId || "").trim();
     const kind = String(layerKind || "paint").trim() || "paint";
-    const base = `${kind}:${gid}:${editor.mode}:${getPaintingRevisionKey()}`;
+    const base = `geomv5:${kind}:${gid}:${editor.mode}:${getPaintingRevisionKey()}`;
     if (editor.mode === "frame") {
       const shot = getActiveCutoutShot();
       const shotId = String(shot?.id || "");
@@ -2331,39 +2340,6 @@ async function showEditor(node, type, options = {}) {
       return `${base}:frame:${shotId}:${Math.round(Number(rect?.x || 0))}:${Math.round(Number(rect?.y || 0))}:${Math.round(Number(rect?.w || 0))}:${Math.round(Number(rect?.h || 0))}:${Math.round(Number(editor.frameView?.zoom || 1) * 1000)}:${Math.round(Number(editor.frameView?.panX || 0))}:${Math.round(Number(editor.frameView?.panY || 0))}`;
     }
     return `${base}:view:${Math.round(Number(editor.viewYaw || 0) * 100)}:${Math.round(Number(editor.viewPitch || 0) * 100)}:${Math.round(Number(editor.viewFov || 0) * 100)}:${Math.round(Number(canvas?.width || 0))}:${Math.round(Number(canvas?.height || 0))}`;
-  }
-  function getStrokeRasterBounds(actionGroupId) {
-    const gid = String(actionGroupId || "").trim();
-    if (!gid) return null;
-    const key = `${gid}:${getPaintingRevisionKey()}`;
-    const cached = editor._strokeRasterBoundsCache.get(key);
-    if (cached) return cached;
-    if (editor._strokeRasterBoundsCache.size > 128) editor._strokeRasterBoundsCache.clear();
-    const raster = editor.paintEngine?.getGroupDisplayCanvas?.(gid);
-    const ctx2d = raster?.getContext?.("2d");
-    if (!raster || !ctx2d) return null;
-    const w = Number(raster.width || 0);
-    const h = Number(raster.height || 0);
-    if (w < 1 || h < 1) return null;
-    const data = ctx2d.getImageData(0, 0, w, h).data;
-    let minX = w;
-    let minY = h;
-    let maxX = -1;
-    let maxY = -1;
-    for (let y = 0; y < h; y += 1) {
-      const row = y * w * 4;
-      for (let x = 0; x < w; x += 1) {
-        if (data[row + x * 4 + 3] <= 8) continue;
-        if (x < minX) minX = x;
-        if (y < minY) minY = y;
-        if (x > maxX) maxX = x;
-        if (y > maxY) maxY = y;
-      }
-    }
-    if (maxX < minX || maxY < minY) return null;
-    const bounds = { minX, minY, maxX, maxY, width: w, height: h };
-    editor._strokeRasterBoundsCache.set(key, bounds);
-    return bounds;
   }
   function translateErpPoint(point, du, dv) {
     if (!point || typeof point !== "object") return point;
@@ -2449,18 +2425,9 @@ async function showEditor(node, type, options = {}) {
         changed = true;
       }
     });
-    // Keep the persistent frame in sync so objectGeom() remains stable.
     if (changed && frameSnapshot) {
       const entry = getPaintingGroupList().find((g) => String(g?.actionGroupId || "") === gid);
-      if (entry) {
-        entry.frame = {
-          ...frameSnapshot,
-          centerUv: {
-            u: ((frameSnapshot.centerUv.u + du) % 1 + 1) % 1,
-            v: clamp(frameSnapshot.centerUv.v + dv, 0, 1),
-          },
-        };
-      }
+      if (entry) entry.frame = null;
     }
     return changed;
   }
@@ -2495,19 +2462,9 @@ async function showEditor(node, type, options = {}) {
         changed = true;
       }
     });
-    // Update the persistent frame so objectGeom() reflects the new orientation/scale.
     if (changed && frameSnapshot) {
-      const s = Number(scale || 1);
       const entry = getPaintingGroupList().find((g) => String(g?.actionGroupId || "") === gid);
-      if (entry) {
-        entry.frame = {
-          centerUv: frameSnapshot.centerUv,
-          rot_deg: Number(frameSnapshot.rot_deg || 0) + Number(rotationDeg || 0),
-          halfW: frameSnapshot.halfW * s,
-          halfH: frameSnapshot.halfH * s,
-          uvPad: frameSnapshot.uvPad,
-        };
-      }
+      if (entry) entry.frame = null;
     }
     return changed;
   }
@@ -2684,11 +2641,6 @@ async function showEditor(node, type, options = {}) {
     else if (!nextIds.length) state.active.selected_shot_id = null;
   }
   function getCutoutInspectorItems() {
-    const frames = (Array.isArray(state.shots) ? state.shots : []).map((item, index) => ({
-      kind: "frame",
-      item,
-      label: "Frame",
-    }));
     const images = (Array.isArray(state.stickers) ? state.stickers : []).map((item, index) => {
       const baseLabel = isExternalSticker(item)
         ? String(item.id || EXTERNAL_STICKER_ID)
@@ -2699,7 +2651,7 @@ async function showEditor(node, type, options = {}) {
         label: baseLabel,
       };
     });
-    return [...frames, ...images];
+    return images;
   }
 
   function getSelectionItemIcon(kind) {
@@ -3126,36 +3078,21 @@ async function showEditor(node, type, options = {}) {
   }
   function applyInitialCutoutFocus() {
     if (type !== "cutout") return;
-    const shots = Array.isArray(state.shots) ? state.shots : [];
-    if (!Array.isArray(shots) || shots.length === 0) return;
-    const preferredId = String(state.active?.selected_shot_id || "");
-    const target = shots.find((s) => String(s?.id || "") === preferredId) || shots[0];
-    if (!target) return;
-    state.active.selected_shot_id = target.id || null;
-    editor.viewYaw = wrapYaw(Number(target.yaw_deg || 0));
-    editor.viewPitch = clamp(Number(target.pitch_deg || 0), -89.9, 89.9);
   }
   function syncLookAtFrameButtonState() {
     if (!addOrLookBtn) return;
-    const hasFrames = type === "cutout" && Array.isArray(state.shots) && state.shots.length > 0;
-    if (hasFrames) {
-      addOrLookBtn.innerHTML = ICON.crosshair;
-      addOrLookBtn.setAttribute("aria-label", "Look at frame");
-      addOrLookBtn.setAttribute("data-tip", "Look at frame");
-    } else {
-      addOrLookBtn.innerHTML = ICON.plus_circle;
-      addOrLookBtn.setAttribute("aria-label", "Add frame");
-      addOrLookBtn.setAttribute("data-tip", "Add frame");
-    }
+    addOrLookBtn.style.display = "none";
   }
 
   function syncViewToggleState() {
-    const frameEnabled = type === "cutout" && Array.isArray(state.shots) && state.shots.length > 0;
-    if (editor.mode === "frame" && !frameEnabled) editor.mode = "pano";
+    if (editor.mode === "frame") editor.mode = "pano";
+    editor.outputPreviewRect = null;
     if (frameViewBtn) {
-      frameViewBtn.disabled = !frameEnabled;
-      frameViewBtn.setAttribute("aria-disabled", frameEnabled ? "false" : "true");
+      frameViewBtn.disabled = true;
+      frameViewBtn.setAttribute("aria-disabled", "true");
+      frameViewBtn.style.display = "none";
     }
+    if (outputPreviewToggleBtn) outputPreviewToggleBtn.style.display = "none";
     viewBtns.forEach((btn) => {
       const active = btn.dataset.view === editor.mode;
       btn.setAttribute("aria-pressed", active ? "true" : "false");
@@ -3385,7 +3322,7 @@ async function showEditor(node, type, options = {}) {
         : (Array.isArray(geometry.points) ? geometry.points : []);
       geometry.processedPoints = processFreehandPoints(raw, previewStroke.targetSpace, true);
     }
-    const surface = createRasterSurface(erpDesc.width, erpDesc.height);
+    const surface = createRasterSurface(erpDesc.width, erpDesc.height, { readback: true });
     if (!rasterizeStrokeToSurface(surface, previewStroke, { w: erpDesc.width, h: erpDesc.height })) return null;
     const data = surface.ctx?.getImageData(0, 0, erpDesc.width, erpDesc.height)?.data || null;
     if (!data) return null;
@@ -3486,13 +3423,34 @@ async function showEditor(node, type, options = {}) {
       ? editor._liveEraserPreviewCanvasCache
       : (editor._liveEraserPreviewCanvasCache = new Map());
     if (cache.has(cacheKey)) return cache.get(cacheKey);
-    const surface = createRasterSurface(width, height);
+    const minX = clamp(Math.floor(Number(previewInfo.bounds?.minX || 0)), 0, Math.max(0, width - 1));
+    const minY = clamp(Math.floor(Number(previewInfo.bounds?.minY || 0)), 0, Math.max(0, height - 1));
+    const maxX = clamp(Math.ceil(Number(previewInfo.bounds?.maxX || 0)), minX, Math.max(0, width - 1));
+    const maxY = clamp(Math.ceil(Number(previewInfo.bounds?.maxY || 0)), minY, Math.max(0, height - 1));
+    const regionW = Math.max(1, maxX - minX + 1);
+    const regionH = Math.max(1, maxY - minY + 1);
+    const surface = createRasterSurface(width, height, { readback: true });
     surface.ctx.clearRect(0, 0, width, height);
     surface.ctx.drawImage(sourceCanvas, 0, 0);
+    const beforeData = surface.ctx.getImageData(minX, minY, regionW, regionH);
     surface.ctx.save();
     surface.ctx.globalCompositeOperation = "destination-out";
     surface.ctx.drawImage(previewInfo.surface.canvas, 0, 0);
     surface.ctx.restore();
+    const afterData = surface.ctx.getImageData(minX, minY, regionW, regionH);
+    let touched = false;
+    for (let i = 0; i < regionW * regionH; i += 1) {
+      const beforeAlpha = beforeData.data[i * 4 + 3];
+      const afterAlpha = afterData.data[i * 4 + 3];
+      if (beforeAlpha > afterAlpha) {
+        touched = true;
+        break;
+      }
+    }
+    if (!touched) {
+      cache.set(cacheKey, sourceCanvas);
+      return sourceCanvas;
+    }
     if (cache.size > 64) cache.clear();
     cache.set(cacheKey, surface.canvas);
     return surface.canvas;
@@ -3571,29 +3529,6 @@ async function showEditor(node, type, options = {}) {
       && !!bgImg.complete
       && Number(bgImg.naturalWidth || bgImg.width || 0) > 1
       && Number(bgImg.naturalHeight || bgImg.height || 0) > 1;
-    if (mode === "unwrap") {
-      let drew = false;
-      if (bgReady && editor.showPanorama) {
-        ctx.save();
-        ctx.globalAlpha = 1;
-        ctx.drawImage(bgImg, rect.x, rect.y, rect.w, rect.h);
-        ctx.restore();
-        drew = true;
-      }
-      const orderedGroupIds = getOrderedPaintGroupIds();
-      const erpTarget = editor.paintEngine?.getErpTarget?.(orderedGroupIds) || null;
-      const paintCanvas = editor.showObjects ? (erpTarget?.displayPaint?.canvas || null) : null;
-      const maskCanvas = editor.showMask ? (erpTarget?.committedMask?.canvas || null) : null;
-      if (paintCanvas) {
-        ctx.drawImage(paintCanvas, rect.x, rect.y, rect.w, rect.h);
-        drew = true;
-      }
-      if (maskCanvas) {
-        ctx.drawImage(maskCanvas, rect.x, rect.y, rect.w, rect.h);
-        drew = true;
-      }
-      return drew;
-    }
     const useModalBackgroundLayer = shouldUseModalBackgroundLayer(rect, view);
     if (useModalBackgroundLayer) {
       return renderModalBackgroundLayer(
@@ -3605,7 +3540,8 @@ async function showEditor(node, type, options = {}) {
     }
     const scene = buildModalBackgroundScene();
     const textures = buildModalBackgroundTextures(scene);
-    const paintSource = editor.showObjects ? getModalLayerPaintSource() : null;
+    const interleavedLayerEntries = editor.showObjects ? buildModalInterleavedLayerEntries() : [];
+    const paintSource = null;
     const maskSource = editor.showMask ? getModalLayerMaskSource() : null;
     const descriptor = buildPanoramaCompositeDescriptor({
       stateRevision: [
@@ -3614,7 +3550,7 @@ async function showEditor(node, type, options = {}) {
         bgReady ? Number(bgImg.naturalWidth || bgImg.width || 0) : 0,
         bgReady ? Number(bgImg.naturalHeight || bgImg.height || 0) : 0,
         Array.isArray(textures) ? textures.map((item) => `${String(item?.assetId || "")}:${String(item?.revision || "")}`).join(",") : "none",
-        paintSource ? getDisplayPaintRevisionKey() : "paint:none",
+        interleavedLayerEntries.length ? interleavedLayerEntries.map((entry) => `${String(entry?.id || "")}:${String(entry?.revision || "")}:${Number(entry?.zIndex || 0)}`).join(",") : "paint:none",
         maskSource ? `${getPaintingCompositeRevisionKey()}:mask` : "mask:none",
       ].join("|"),
       backgroundSource: bgReady && editor.showPanorama ? bgImg : null,
@@ -3623,10 +3559,10 @@ async function showEditor(node, type, options = {}) {
       scene,
       textures,
       paintSource,
-      paintRevision: paintSource ? getDisplayPaintRevisionKey() : "",
+      paintRevision: "",
       maskSource,
       maskRevision: maskSource ? `${getPaintingCompositeRevisionKey()}:mask` : "",
-      rasterEntries: [],
+      rasterEntries: interleavedLayerEntries,
       backgroundOpacity: 1,
       showMaskTint: false,
     });
@@ -4126,6 +4062,55 @@ async function showEditor(node, type, options = {}) {
     return editor.paintEngine?.getErpTarget?.(orderedGroupIds)?.committedMask?.canvas || null;
   }
 
+  function buildModalInterleavedLayerEntries() {
+    const ordered = getOrderedDisplayListObjects(true);
+    const previewInfo = getActivePaintEraserPreviewInfo();
+    const entries = [];
+    for (const entry of ordered) {
+      if (entry?.type === "strokeGroup") {
+        const gid = String(entry.actionGroupId || entry.id || "");
+        if (!gid) continue;
+        const source = editor.paintEngine?.getGroupDisplayCanvas?.(gid) || null;
+        if (!source) continue;
+        entries.push({
+          id: `paint_group:${gid}`,
+          source,
+          revision: `${getDisplayPaintRevisionKey()}:${gid}`,
+          zIndex: Number(entry?.z_index || 0),
+          opacity: 1,
+          visible: true,
+        });
+        continue;
+      }
+      if (entry?.type === "rasterObject") {
+        const item = entry.item || null;
+        const rid = parseRasterObjectSelectionId(item?.id || entry.id || "");
+        if (!rid) continue;
+        const baseSource = buildRasterObjectEditCanvas(item, () => requestDraw());
+        if (!baseSource) continue;
+        const source = getLiveEraserAppliedCanvas(baseSource, entry, previewInfo);
+        const tf = item?.transform || {};
+        entries.push({
+          id: `raster:${rid}`,
+          source,
+          revision: [
+            getPaintingCompositeRevisionKey(),
+            previewInfo?.key || "",
+            rid,
+            Number(tf.du || 0).toFixed(6),
+            Number(tf.dv || 0).toFixed(6),
+            Number(tf.rot_deg || 0).toFixed(3),
+            Number(tf.scale || 1).toFixed(4),
+          ].join(":"),
+          zIndex: Number(entry?.z_index || 0),
+          opacity: 1,
+          visible: item?.visible !== false,
+        });
+      }
+    }
+    return entries;
+  }
+
   function buildModalPanoramaDescriptor(bgImg, cachePrefix = "modal_bg_gl") {
     const scene = buildModalBackgroundScene();
     const textures = buildModalBackgroundTextures(scene);
@@ -4140,14 +4125,15 @@ async function showEditor(node, type, options = {}) {
         Number(bgImg.naturalHeight || bgImg.height || 0),
       ].join("|")
       : "none";
-    const paintSource = editor.showObjects ? getModalLayerPaintSource() : null;
+    const interleavedLayerEntries = editor.showObjects ? buildModalInterleavedLayerEntries() : [];
+    const paintSource = null;
     const maskSource = editor.showMask ? getModalLayerMaskSource() : null;
     const stateRevision = [
       cachePrefix,
       bgRevision,
       Array.isArray(scene?.stickers) ? scene.stickers.map((item) => String(item?.id || "")).join(",") : "none",
       Array.isArray(textures) ? textures.map((item) => `${String(item?.assetId || "")}:${String(item?.revision || "")}`).join(",") : "none",
-      paintSource ? getDisplayPaintRevisionKey() : "paint:none",
+      interleavedLayerEntries.length ? interleavedLayerEntries.map((entry) => `${String(entry?.id || "")}:${String(entry?.revision || "")}:${Number(entry?.zIndex || 0)}`).join(",") : "paint:none",
       maskSource ? `${getPaintingCompositeRevisionKey()}:mask` : "mask:none",
       editor.showPanorama ? "panorama:1" : "panorama:0",
       editor.showObjects ? "objects:1" : "objects:0",
@@ -4162,14 +4148,14 @@ async function showEditor(node, type, options = {}) {
         scene,
         textures,
         paintSource,
-        paintRevision: paintSource ? getDisplayPaintRevisionKey() : "",
+        paintRevision: "",
         maskSource,
         maskRevision: maskSource ? `${getPaintingCompositeRevisionKey()}:mask` : "",
-        rasterEntries: [],
+        rasterEntries: interleavedLayerEntries,
         backgroundOpacity: 1,
         showMaskTint: false,
       }),
-      hasContent: bgReady || textures.length > 0 || !!paintSource || !!maskSource,
+      hasContent: bgReady || textures.length > 0 || interleavedLayerEntries.length > 0 || !!maskSource,
     };
   }
 
@@ -4339,21 +4325,33 @@ async function showEditor(node, type, options = {}) {
     }
   }
 
-  function projectEditorPoints(points, frameShot = null, frameRect = null) {
+  function projectEditorPoints(points, frameShot = null, frameRect = null, unwrapRefU = null) {
     if (editor.mode === "frame") {
       const shot = frameShot || getActiveCutoutShot();
       if (!shot) return [];
       const rect = frameRect || getFrameViewRect(shot);
       return projectErpPointsToFrameRect(points, shot, rect);
     }
-    return projectErpPointsToCurrentView(points);
+    return projectErpPointsToCurrentView(points, unwrapRefU);
+  }
+
+  function projectErpPointToEditor(point, refX = null, frameShot = null, frameRect = null, unwrapRefU = null) {
+    if (!point) return null;
+    if (editor.mode === "unwrap") {
+      const projected = projectErpPointsToCurrentView([point], unwrapRefU);
+      return projected[0] ? { x: projected[0].x, y: projected[0].y, z: 1 } : null;
+    }
+    const dir = erpPointToWorldDir(point);
+    return dir ? projectSceneItemDir(dir, refX, frameShot, frameRect) : null;
   }
 
   function buildStrokeGroupGeom(item, cacheKey) {
     const actionGroupId = String(item.actionGroupId || item.id || "").trim();
     const strokes = getStrokeGroupStrokes(actionGroupId, item.layerKind);
+    const frame = ensureGroupFrame(actionGroupId, item.layerKind, strokes);
+    const centerPoint = frame?.centerUv || getStrokeGroupCenterUv(actionGroupId, item.layerKind, strokes);
+    const unwrapRefU = editor.mode === "unwrap" ? Number(centerPoint?.u || 0) : null;
     const strokePaths = [];
-    const projected = [];
     const frameShot = editor.mode === "frame" ? getActiveCutoutShot() : null;
     const frameRect = frameShot ? getFrameViewRect(frameShot) : null;
     for (const stroke of strokes) {
@@ -4361,9 +4359,9 @@ async function showEditor(node, type, options = {}) {
       const srcPoints = geometry?.geometryKind === "lasso_fill"
         ? geometry?.points
         : (geometry?.processedPoints || geometry?.rawPoints || geometry?.points || []);
-      const pts = projectEditorPoints(srcPoints, frameShot, frameRect).filter((pt) => Number.isFinite(pt?.x) && Number.isFinite(pt?.y));
+      const pts = projectEditorPoints(srcPoints, frameShot, frameRect, unwrapRefU)
+        .filter((pt) => Number.isFinite(pt?.x) && Number.isFinite(pt?.y));
       if (!pts.length) continue;
-      projected.push(...pts);
       const presetId = getBrushPresetIdForTool(String(stroke?.toolKind || "pen"));
       const preset = BRUSH_PRESETS[presetId] || BRUSH_PRESETS[DEFAULT_BRUSH_PRESET_ID];
       strokePaths.push({
@@ -4373,53 +4371,43 @@ async function showEditor(node, type, options = {}) {
         layerKind: String(stroke?.layerKind || item.layerKind || "paint"),
       });
     }
-    if (!projected.length) {
+    const center = projectErpPointToEditor(centerPoint, null, frameShot, frameRect, unwrapRefU);
+    if (!center) {
       const hidden = { visible: false, kind: "strokeGroup" };
       editor._strokeGeomCache.set(cacheKey, hidden);
       return hidden;
     }
-    let minX = Infinity;
-    let minY = Infinity;
-    let maxX = -Infinity;
-    let maxY = -Infinity;
-    for (const path of strokePaths) {
-      const pad = 2;
-      for (const pt of (Array.isArray(path?.points) ? path.points : [])) {
-        const x = Number(pt?.x || 0);
-        const y = Number(pt?.y || 0);
-        minX = Math.min(minX, x - pad);
-        minY = Math.min(minY, y - pad);
-        maxX = Math.max(maxX, x + pad);
-        maxY = Math.max(maxY, y + pad);
-      }
-    }
-    if (!Number.isFinite(minX) || !Number.isFinite(minY) || !Number.isFinite(maxX) || !Number.isFinite(maxY)) {
+    const cornersUv = getFrameCornersUv(frame);
+    const corners = cornersUv
+      .map((pt) => projectErpPointToEditor(pt, center.x, frameShot, frameRect, unwrapRefU))
+      .filter((pt) => Number.isFinite(pt?.x) && Number.isFinite(pt?.y))
+      .map((pt) => ({ x: Number(pt.x || 0), y: Number(pt.y || 0) }));
+    if (corners.length < 4) {
       const hidden = { visible: false, kind: "strokeGroup" };
       editor._strokeGeomCache.set(cacheKey, hidden);
       return hidden;
     }
-    const corners = [
-      { x: minX, y: minY },
-      { x: maxX, y: minY },
-      { x: maxX, y: maxY },
-      { x: minX, y: maxY },
-    ];
-    const center = { x: (minX + maxX) * 0.5, y: (minY + maxY) * 0.5 };
-    const topMid = { x: center.x, y: minY };
-    const rightMid = { x: maxX, y: center.y };
-    const bottomMid = { x: center.x, y: maxY };
-    const leftMid = { x: minX, y: center.y };
+    const edgeMidpoint = (a, b) => ({
+      x: (Number(a?.x || 0) + Number(b?.x || 0)) * 0.5,
+      y: (Number(a?.y || 0) + Number(b?.y || 0)) * 0.5,
+      a,
+      b,
+    });
+    const topMid = edgeMidpoint(corners[0], corners[1]);
+    const rightMid = edgeMidpoint(corners[1], corners[2]);
+    const bottomMid = edgeMidpoint(corners[2], corners[3]);
+    const leftMid = edgeMidpoint(corners[3], corners[0]);
     const geom = {
       kind: "strokeGroup",
-      center,
+      center: { x: Number(center.x || 0), y: Number(center.y || 0) },
       corners,
       edgeMidpoints: [
-        { edge: "top", x: topMid.x, y: topMid.y, a: corners[0], b: corners[1] },
-        { edge: "right", x: rightMid.x, y: rightMid.y, a: corners[1], b: corners[2] },
-        { edge: "bottom", x: bottomMid.x, y: bottomMid.y, a: corners[2], b: corners[3] },
-        { edge: "left", x: leftMid.x, y: leftMid.y, a: corners[3], b: corners[0] },
+        { edge: "top", ...topMid },
+        { edge: "right", ...rightMid },
+        { edge: "bottom", ...bottomMid },
+        { edge: "left", ...leftMid },
       ],
-      rotateStemBase: topMid,
+      rotateStemBase: { x: topMid.x, y: topMid.y },
       rotateHandle: { x: topMid.x, y: topMid.y - 30 },
       strokePaths,
       visible: true,
@@ -4429,8 +4417,15 @@ async function showEditor(node, type, options = {}) {
   }
 
   function buildRasterObjectGeom(item, cacheKey) {
+    const frameShot = editor.mode === "frame" ? getActiveCutoutShot() : null;
+    const frameRect = frameShot ? getFrameViewRect(frameShot) : null;
+    const centerUv = getRasterObjectCenterUv(item);
+    const unwrapRefU = editor.mode === "unwrap" ? Number(centerUv?.u || 0) : null;
+    const centerPoint = projectErpPointToEditor(centerUv, null, frameShot, frameRect, unwrapRefU);
     const erpPoints = getRasterObjectTransformedErpPoints(item);
-    const projected = projectEditorPoints(erpPoints);
+    const projected = erpPoints
+      .map((pt) => projectErpPointToEditor(pt, centerPoint?.x ?? null, frameShot, frameRect, unwrapRefU))
+      .filter((pt) => Number.isFinite(pt?.x) && Number.isFinite(pt?.y));
     if (!Array.isArray(projected) || projected.length < 4) {
       const hidden = { visible: false, kind: "rasterObject" };
       editor._strokeGeomCache.set(cacheKey, hidden);
@@ -4735,17 +4730,13 @@ async function showEditor(node, type, options = {}) {
   function getCutoutSelectableItemsForDisplay() {
     const stickers = [...(Array.isArray(state.stickers) ? state.stickers : [])]
       .sort((a, b) => Number(a.z_index || 0) - Number(b.z_index || 0));
-    if (editor.mode === "frame") return stickers;
-    const shots = Array.isArray(state.shots) ? state.shots : [];
-    return [...stickers, ...shots];
+    return stickers;
   }
 
   function getCutoutSelectableItemsForHit() {
     const stickers = [...(Array.isArray(state.stickers) ? state.stickers : [])]
       .sort((a, b) => Number(b.z_index || 0) - Number(a.z_index || 0));
-    if (editor.mode === "frame") return stickers;
-    const shots = Array.isArray(state.shots) ? state.shots : [];
-    return [...stickers, ...shots];
+    return stickers;
   }
 
   function traceQuad(ctx2d, corners = []) {
@@ -4840,13 +4831,15 @@ async function showEditor(node, type, options = {}) {
       const selected = !multiSelected && isItemSelected(item);
       if (editor.mode === "frame" && !selected) continue;
       if (!editor.showObjects && !isShotItem(item)) continue;
+      const itemIsSticker = isStickerItem(item);
+      const itemLocked = isItemLocked(item);
+      if (!itemIsSticker) {
+        continue;
+      }
       const g = objectGeom(item);
       if (type !== "stickers" && !g.visible) {
         continue;
       }
-
-      const itemIsSticker = isStickerItem(item);
-      const itemLocked = isItemLocked(item);
       drawObjectBody(item, g, selected, itemLocked);
 
       if (selected && g.visible) {
@@ -4983,31 +4976,13 @@ async function showEditor(node, type, options = {}) {
     ].join("|");
   }
 
-  function ensureNodeCutoutPreviewSurface(options = {}) {
-    node.__panoCutoutPreviewSurface = null;
-    return null;
-  }
-
   function drawCutoutOutputPreview() {
     editor.outputPreviewRect = null;
     if (outputPreviewToggleBtn) outputPreviewToggleBtn.style.display = "none";
   }
 
   function renderCutoutPreviewToContext(targetCtx, rect, shot, options = {}) {
-    return true;
-  }
-
-  function renderCutoutPreviewToTarget(shot, size, options = {}) {
-    return null;
-  }
-
-  function syncNodeCutoutPreviewSurface() {
-    node.__panoCutoutPreviewSurface = null;
-  }
-
-  function scheduleNodeCutoutPreviewSurfaceUpdate() {
-    cancelScheduledCutoutPreviewSurfaceUpdate();
-    node.__panoCutoutPreviewSurface = null;
+    return false;
   }
 
   function projectErpStrokeToCurrentView(stroke) {
@@ -5056,36 +5031,63 @@ async function showEditor(node, type, options = {}) {
     return { ...base, ...extra, u: x, v: y };
   }
 
-  function interpolateTargetPoint(a, b, t) {
-    const ac = getTargetSpaceCoord(a);
-    const bc = getTargetSpaceCoord(b);
-    return cloneTargetPointWithCoords(a, lerp(ac.x, bc.x, t), lerp(ac.y, bc.y, t), {
-      t: lerp(Number(a?.t || 0), Number(b?.t || 0), t),
-      widthScale: lerp(getStrokePointScalar(a, "widthScale", 1), getStrokePointScalar(b, "widthScale", 1), t),
-      pressureLike: lerp(getStrokePointScalar(a, "pressureLike", 1), getStrokePointScalar(b, "pressureLike", 1), t),
-    });
-  }
-
   function getFreehandResampleSpacing(targetSpace, finalPass = false) {
     return finalPass ? 0.0012 : 0.0018;
   }
 
   function processFreehandPoints(rawPoints, targetSpace, finalPass = false) {
     if (!Array.isArray(rawPoints) || !rawPoints.length) return [];
-    if (rawPoints.length === 1) return [cloneTargetPointWithCoords(rawPoints[0], getTargetSpaceCoord(rawPoints[0]).x, getTargetSpaceCoord(rawPoints[0]).y)];
+    const isErpGlobal = String(targetSpace?.kind || "") === "ERP_GLOBAL";
+    const pointCoords = new WeakMap();
+    if (isErpGlobal) {
+      let prevContinuousU = null;
+      rawPoints.forEach((point) => {
+        const rawU = Number(point?.u || 0);
+        const rawV = Number(point?.v || 0);
+        const wrappedU = ((rawU % 1) + 1) % 1;
+        const continuousU = prevContinuousU == null
+          ? wrappedU
+          : (prevContinuousU + shortestWrappedDelta(wrappedU, ((prevContinuousU % 1) + 1) % 1));
+        pointCoords.set(point, { x: continuousU, y: rawV });
+        prevContinuousU = continuousU;
+      });
+    }
+    const getCoord = (point) => {
+      if (!point || typeof point !== "object") return { x: 0, y: 0 };
+      return pointCoords.get(point) || getTargetSpaceCoord(point);
+    };
+    const cloneWithCoords = (template, x, y, extra = {}) => {
+      const outX = isErpGlobal ? ((((Number(x) % 1) + 1) % 1)) : Number(x);
+      const next = cloneTargetPointWithCoords(template, outX, y, extra);
+      pointCoords.set(next, { x: Number(x), y: Number(y) });
+      return next;
+    };
+    const interpolatePoint = (a, b, t) => {
+      const ac = getCoord(a);
+      const bc = getCoord(b);
+      return cloneWithCoords(a, lerp(ac.x, bc.x, t), lerp(ac.y, bc.y, t), {
+        t: lerp(Number(a?.t || 0), Number(b?.t || 0), t),
+        widthScale: lerp(getStrokePointScalar(a, "widthScale", 1), getStrokePointScalar(b, "widthScale", 1), t),
+        pressureLike: lerp(getStrokePointScalar(a, "pressureLike", 1), getStrokePointScalar(b, "pressureLike", 1), t),
+      });
+    };
+    if (rawPoints.length === 1) {
+      const onlyCoord = getCoord(rawPoints[0]);
+      return [cloneWithCoords(rawPoints[0], onlyCoord.x, onlyCoord.y)];
+    }
     const spacing = getFreehandResampleSpacing(targetSpace, finalPass);
     const buildUniformSamples = (srcPoints, sampleSpacing) => {
       const cumulative = [0];
       for (let i = 1; i < srcPoints.length; i += 1) {
-        const a = getTargetSpaceCoord(srcPoints[i - 1]);
-        const b = getTargetSpaceCoord(srcPoints[i]);
+        const a = getCoord(srcPoints[i - 1]);
+        const b = getCoord(srcPoints[i]);
         cumulative.push(cumulative[i - 1] + Math.hypot(b.x - a.x, b.y - a.y));
       }
       const totalLen = cumulative[cumulative.length - 1] || 0;
       if (totalLen <= 1e-8) {
         const only = srcPoints[0];
-        const onlyCoord = getTargetSpaceCoord(only);
-        return [cloneTargetPointWithCoords(only, onlyCoord.x, onlyCoord.y)];
+        const onlyCoord = getCoord(only);
+        return [cloneWithCoords(only, onlyCoord.x, onlyCoord.y)];
       }
       const out = [];
       let segIndex = 0;
@@ -5094,26 +5096,27 @@ async function showEditor(node, type, options = {}) {
         const s0 = cumulative[segIndex];
         const s1 = cumulative[segIndex + 1];
         const range = Math.max(1e-8, s1 - s0);
-        out.push(interpolateTargetPoint(srcPoints[segIndex], srcPoints[segIndex + 1], clamp((d - s0) / range, 0, 1)));
+        out.push(interpolatePoint(srcPoints[segIndex], srcPoints[segIndex + 1], clamp((d - s0) / range, 0, 1)));
       }
       const tail = srcPoints[srcPoints.length - 1];
-      const tailCoord = getTargetSpaceCoord(tail);
+      const tailCoord = getCoord(tail);
       const prev = out[out.length - 1];
-      const prevCoord = prev ? getTargetSpaceCoord(prev) : null;
+      const prevCoord = prev ? getCoord(prev) : null;
       if (!prevCoord || Math.hypot(prevCoord.x - tailCoord.x, prevCoord.y - tailCoord.y) > sampleSpacing * 0.35) {
-        out.push(cloneTargetPointWithCoords(tail, tailCoord.x, tailCoord.y));
+        out.push(cloneWithCoords(tail, tailCoord.x, tailCoord.y));
       }
       return out;
     };
     const chaikinPass = (srcPoints) => {
       if (!Array.isArray(srcPoints) || srcPoints.length < 3) return srcPoints ? srcPoints.slice() : [];
-      const out = [cloneTargetPointWithCoords(srcPoints[0], getTargetSpaceCoord(srcPoints[0]).x, getTargetSpaceCoord(srcPoints[0]).y)];
+      const firstCoord = getCoord(srcPoints[0]);
+      const out = [cloneWithCoords(srcPoints[0], firstCoord.x, firstCoord.y)];
       for (let i = 0; i < srcPoints.length - 1; i += 1) {
         const a = srcPoints[i];
         const b = srcPoints[i + 1];
-        const ac = getTargetSpaceCoord(a);
-        const bc = getTargetSpaceCoord(b);
-        const q = cloneTargetPointWithCoords(a,
+        const ac = getCoord(a);
+        const bc = getCoord(b);
+        const q = cloneWithCoords(a,
           (ac.x * 0.75) + (bc.x * 0.25),
           (ac.y * 0.75) + (bc.y * 0.25),
           {
@@ -5121,17 +5124,19 @@ async function showEditor(node, type, options = {}) {
             widthScale: (getStrokePointScalar(a, "widthScale", 1) * 0.75) + (getStrokePointScalar(b, "widthScale", 1) * 0.25),
             pressureLike: (getStrokePointScalar(a, "pressureLike", 1) * 0.75) + (getStrokePointScalar(b, "pressureLike", 1) * 0.25),
           });
-        const r = cloneTargetPointWithCoords(a,
+        const r = cloneWithCoords(a,
           (ac.x * 0.25) + (bc.x * 0.75),
           (ac.y * 0.25) + (bc.y * 0.75),
           {
             t: (Number(a.t || 0) * 0.25) + (Number(b.t || 0) * 0.75),
             widthScale: (getStrokePointScalar(a, "widthScale", 1) * 0.25) + (getStrokePointScalar(b, "widthScale", 1) * 0.75),
             pressureLike: (getStrokePointScalar(a, "pressureLike", 1) * 0.25) + (getStrokePointScalar(b, "pressureLike", 1) * 0.75),
-          });
+        });
         out.push(q, r);
       }
-      out.push(cloneTargetPointWithCoords(srcPoints[srcPoints.length - 1], getTargetSpaceCoord(srcPoints[srcPoints.length - 1]).x, getTargetSpaceCoord(srcPoints[srcPoints.length - 1]).y));
+      const tail = srcPoints[srcPoints.length - 1];
+      const tailCoord = getCoord(tail);
+      out.push(cloneWithCoords(tail, tailCoord.x, tailCoord.y));
       return out;
     };
     const resampled = buildUniformSamples(rawPoints, spacing);
@@ -5169,11 +5174,11 @@ async function showEditor(node, type, options = {}) {
     };
   }
 
-  function createRasterSurface(width, height) {
+  function createRasterSurface(width, height, options = {}) {
     const surface = document.createElement("canvas");
     surface.width = Math.max(1, Math.round(width));
     surface.height = Math.max(1, Math.round(height));
-    const surfaceCtx = surface.getContext("2d");
+    const surfaceCtx = surface.getContext("2d", options.readback ? { willReadFrequently: true } : void 0);
     if (surfaceCtx) {
       surfaceCtx.clearRect(0, 0, surface.width, surface.height);
       surfaceCtx.imageSmoothingEnabled = true;
@@ -5557,13 +5562,13 @@ async function showEditor(node, type, options = {}) {
           if (cx > maxX) maxX = cx;
           if (cy > maxY) maxY = cy;
           const neighbors = [
-            [cx - 1, cy],
-            [cx + 1, cy],
+            [(cx - 1 + width) % width, cy],
+            [(cx + 1) % width, cy],
             [cx, cy - 1],
             [cx, cy + 1],
           ];
           for (const [nx, ny] of neighbors) {
-            if (nx < 0 || ny < 0 || nx >= width || ny >= height) continue;
+            if (ny < 0 || ny >= height) continue;
             const nidx = ny * width + nx;
             if (visited[nidx] || alpha[nidx] <= threshold) continue;
             visited[nidx] = 1;
@@ -5578,6 +5583,37 @@ async function showEditor(node, type, options = {}) {
     return components;
   }
 
+  function getWrappedComponentWindow(component, width) {
+    const xs = [...new Set((Array.isArray(component?.pixels) ? component.pixels : []).map((pt) => Number(pt?.x || 0)).filter((x) => Number.isFinite(x)))].sort((a, b) => a - b);
+    if (!xs.length) return null;
+    if (xs.length === 1) {
+      return { startX: xs[0], widthPx: 1 };
+    }
+    let bestGap = -1;
+    let bestIndex = 0;
+    for (let i = 0; i < xs.length; i += 1) {
+      const current = xs[i];
+      const next = i === xs.length - 1 ? xs[0] + width : xs[i + 1];
+      const gap = next - current - 1;
+      if (gap > bestGap) {
+        bestGap = gap;
+        bestIndex = i;
+      }
+    }
+    const startX = (xs[(bestIndex + 1) % xs.length] + width) % width;
+    let minWrappedX = Infinity;
+    let maxWrappedX = -Infinity;
+    for (const x of xs) {
+      const wrappedX = (x - startX + width) % width;
+      minWrappedX = Math.min(minWrappedX, wrappedX);
+      maxWrappedX = Math.max(maxWrappedX, wrappedX);
+    }
+    return {
+      startX,
+      widthPx: Math.max(1, maxWrappedX - minWrappedX + 1),
+    };
+  }
+
   function createRasterFrozenObjectsFromCanvas(canvas, layerKind, baseMeta = {}) {
     const w = Number(canvas?.width || 0);
     const h = Number(canvas?.height || 0);
@@ -5588,8 +5624,11 @@ async function showEditor(node, type, options = {}) {
     for (let i = 0; i < alpha.length; i += 1) alpha[i] = imageData.data[i * 4 + 3];
     const components = findAlphaConnectedComponents(alpha, w, h, 8);
     return components.map((component, index) => {
-      const cw = component.maxX - component.minX + 1;
+      const window = getWrappedComponentWindow(component, w);
+      if (!window) return null;
+      const cw = Number(window.widthPx || 0);
       const ch = component.maxY - component.minY + 1;
+      const startX = Number(window.startX || 0);
       const out = document.createElement("canvas");
       out.width = cw;
       out.height = ch;
@@ -5598,7 +5637,8 @@ async function showEditor(node, type, options = {}) {
       const outData = outCtx.createImageData(cw, ch);
       component.pixels.forEach(({ x, y }) => {
         const srcIdx = (y * w + x) * 4;
-        const dstIdx = ((y - component.minY) * cw + (x - component.minX)) * 4;
+        const wrappedX = (Number(x || 0) - startX + w) % w;
+        const dstIdx = ((y - component.minY) * cw + wrappedX) * 4;
         outData.data[dstIdx + 0] = imageData.data[srcIdx + 0];
         outData.data[dstIdx + 1] = imageData.data[srcIdx + 1];
         outData.data[dstIdx + 2] = imageData.data[srcIdx + 2];
@@ -5612,14 +5652,14 @@ async function showEditor(node, type, options = {}) {
         z_index: Number(baseMeta?.z_index || 0) + (index * 0.001),
         locked: baseMeta?.locked === true,
         bbox: {
-          u0: component.minX / w,
+          u0: 0,
           v0: component.minY / h,
-          u1: (component.maxX + 1) / w,
+          u1: cw / w,
           v1: (component.maxY + 1) / h,
         },
         rasterDataUrl: out.toDataURL("image/png"),
         transform: {
-          du: 0,
+          du: startX / w,
           dv: 0,
           rot_deg: 0,
           scale: 1,
@@ -5659,14 +5699,18 @@ async function showEditor(node, type, options = {}) {
       : [];
   }
 
-  function projectErpPointsToCurrentView(points) {
+  function projectErpPointsToCurrentView(points, unwrapRefU = null) {
     if (!Array.isArray(points) || points.length < 1) return [];
     if (editor.mode === "unwrap") {
       const r = getUnwrapRect();
-      return points.map((pt) => ({
-        x: r.x + (Number(pt.u || 0) * r.w),
-        y: r.y + (Number(pt.v || 0) * r.h),
-      }));
+      return points.map((pt) => {
+        const u = ((Number(pt.u || 0) % 1) + 1) % 1;
+        const uu = unwrapRefU == null ? u : (Number(unwrapRefU || 0) + shortestWrappedDelta(u, unwrapRefU));
+        return {
+          x: r.x + (uu * r.w),
+          y: r.y + (Number(pt.v || 0) * r.h),
+        };
+      });
     }
     const projected = points.map((pt) => projectDir(erpPointToWorldDir(pt))).filter(Boolean);
     return projected.every((pt) => Number(pt.z || 0) > 0)
@@ -7103,24 +7147,7 @@ async function showEditor(node, type, options = {}) {
   }
 
   function addCutoutFrame() {
-    if (readOnly) return;
-    if (type !== "cutout") return;
-    forceCursorTool();
-    state.shots = [{
-      id: uid("sh"),
-      yaw_deg: editor.viewYaw,
-      pitch_deg: editor.viewPitch,
-      hFOV_deg: 64,
-      vFOV_deg: 40,
-      roll_deg: 0,
-      aspect_id: ratioTextFromPair(64, 40),
-    }];
-    setSelectedItem(state.shots[0]);
-    editor.cutoutAspectOpen = false;
-    pushHistory();
-    commitAndRefreshNode();
-    updateSidePanel();
-    requestDraw({ cause: "cutout_frame" });
+    return;
   }
 
   function clearCutoutFrame() {
@@ -7360,7 +7387,7 @@ async function showEditor(node, type, options = {}) {
       state.stickers = state.stickers.filter((s) => s.id !== selected.id);
       pruneUnusedAssets();
       markObjectVisualsDirty();
-      editor.selectedId = type === "cutout" ? (state.active.selected_shot_id || state.stickers[0]?.id || null) : (state.stickers[0]?.id || null);
+      editor.selectedId = state.stickers[0]?.id || null;
       editor.selectedIds = editor.selectedId ? [editor.selectedId] : [];
       state.active.selected_sticker_id = state.stickers[0]?.id || null;
       pushHistory();
@@ -7587,38 +7614,15 @@ async function showEditor(node, type, options = {}) {
 
   function getActiveCutoutShot() {
     if (type !== "cutout") return null;
-    const shots = Array.isArray(state.shots) ? state.shots : [];
-    const preferredId = String(state.active?.selected_shot_id || "");
-    return shots.find((shot) => String(shot?.id || "") === preferredId) || shots[0] || null;
+    return null;
   }
 
   function getFrameViewRect(shot = getActiveCutoutShot()) {
-    if (!shot) return null;
-    const aspect = Math.max(1e-4, Number(buildCutoutViewParamsFromShot(shot)?.aspect || 1));
-    const pad = 56;
-    const availW = Math.max(80, canvas.width - pad * 2);
-    const availH = Math.max(80, canvas.height - pad * 2);
-    let baseW = availW;
-    let baseH = baseW / aspect;
-    if (baseH > availH) {
-      baseH = availH;
-      baseW = baseH * aspect;
-    }
-    const zoom = Math.max(0.1, Number(editor.frameView?.zoom || 1));
-    const w = baseW * zoom;
-    const h = baseH * zoom;
-    const panX = Number(editor.frameView?.panX || 0);
-    const panY = Number(editor.frameView?.panY || 0);
-    return {
-      x: ((canvas.width - w) * 0.5) + panX,
-      y: ((canvas.height - h) * 0.5) + panY,
-      w,
-      h,
-    };
+    return null;
   }
 
   function supportsFramePainting() {
-    return type === "cutout" && editor.mode === "frame" && !!getActiveCutoutShot();
+    return false;
   }
 
   function screenPosToErpPoint(pos, ts = performance.now()) {
@@ -8232,7 +8236,7 @@ async function showEditor(node, type, options = {}) {
 
     function eraseCanvasAndDetectTouch(sourceCanvas) {
       if (!sourceCanvas) return { touched: false, canvas: null };
-      const working = createRasterSurface(erpDesc.width, erpDesc.height);
+      const working = createRasterSurface(erpDesc.width, erpDesc.height, { readback: true });
       working.ctx.drawImage(sourceCanvas, 0, 0);
       const beforeData = working.ctx.getImageData(0, 0, erpDesc.width, erpDesc.height);
       working.ctx.save();
@@ -9239,7 +9243,7 @@ async function showEditor(node, type, options = {}) {
         })()
         : screenPosToErpPoint(p, performance.now());
       if (!currentUv || !it.startUv) return;
-      const du = Number(currentUv.u || 0) - Number(it.startUv.u || 0);
+      const du = shortestWrappedDelta(Number(currentUv.u || 0), Number(it.startUv.u || 0));
       const dv = Number(currentUv.v || 0) - Number(it.startUv.v || 0);
       if (applyStrokeGroupOffset(it.item?.actionGroupId, du, dv, it.snapshot, it.item?.layerKind, it.frameSnapshot)) {
         markPaintStrokeVisualsDirty({ rebuildPaintEngine: false });
@@ -9256,7 +9260,7 @@ async function showEditor(node, type, options = {}) {
         })()
         : screenPosToErpPoint(p, performance.now());
       if (!currentUv || !it.startUv) return;
-      const du = Number(currentUv.u || 0) - Number(it.startUv.u || 0);
+      const du = shortestWrappedDelta(Number(currentUv.u || 0), Number(it.startUv.u || 0));
       const dv = Number(currentUv.v || 0) - Number(it.startUv.v || 0);
       if (applyRasterObjectOffset(it.item?.rasterObjectId || it.item?.id || "", du, dv, it.snapshot)) {
         markPaintCompositeVisualsDirty();
@@ -9320,7 +9324,7 @@ async function showEditor(node, type, options = {}) {
           : screenPosToErpPoint(targetScreen, performance.now());
         const startUvForGroup = snap.centerUv || null;
         if (currentUv && startUvForGroup) {
-          const du = Number(currentUv.u || 0) - Number(startUvForGroup.u || 0);
+          const du = shortestWrappedDelta(Number(currentUv.u || 0), Number(startUvForGroup.u || 0));
           const dv = Number(currentUv.v || 0) - Number(startUvForGroup.v || 0);
           if (applyStrokeGroupOffset(snap.id, du, dv, snap.snapshot, snap.layerKind, snap.frameSnapshot)) {
             changed = true;
@@ -9341,7 +9345,7 @@ async function showEditor(node, type, options = {}) {
           : screenPosToErpPoint(targetScreen, performance.now());
         const startUvForObject = snap.centerUv || null;
         if (currentUv && startUvForObject) {
-          const du = Number(currentUv.u || 0) - Number(startUvForObject.u || 0);
+          const du = shortestWrappedDelta(Number(currentUv.u || 0), Number(startUvForObject.u || 0));
           const dv = Number(currentUv.v || 0) - Number(startUvForObject.v || 0);
           if (applyRasterObjectOffset(snap.id, du, dv, snap.snapshot)) {
             changed = true;
@@ -9655,7 +9659,7 @@ async function showEditor(node, type, options = {}) {
   if (addBtn) {
     addBtn.onclick = () => {
       if (readOnly) return;
-      (type === "stickers" ? addImageSticker() : addCutoutFrame());
+      ((type === "stickers" || type === "cutout") ? addImageSticker() : addCutoutFrame());
     };
   }
   const clearBtn = root.querySelector("[data-action='clear']");
@@ -9716,24 +9720,7 @@ async function showEditor(node, type, options = {}) {
         else if (action === "clear") clearAll();
         else if (action === "add") addImageSticker();
         else if (action === "add-image") addImageSticker();
-        else if (action === "add-or-look") {
-          const activeShot = getActiveCutoutShot();
-          if ((state.shots || []).length === 0) {
-            addCutoutFrame();
-          } else {
-            const target = activeShot;
-            if (!target) return;
-            editor.selectedId = target.id || null;
-            editor.selectedIds = editor.selectedId ? [editor.selectedId] : [];
-            state.active.selected_shot_id = editor.selectedId;
-            const targetYaw = wrapYaw(Number(target.yaw_deg || 0));
-            const targetPitch = clamp(Number(target.pitch_deg || 0), -89.9, 89.9);
-            startViewTween(targetYaw, targetPitch, editor.viewFov);
-            updateSidePanel();
-            updateSelectionMenu();
-            requestDraw();
-          }
-        }
+        else if (action === "add-or-look") return;
       };
     });
   }
@@ -10050,14 +10037,6 @@ async function showEditor(node, type, options = {}) {
   }
 
   const closeEditor = () => {
-    if (editor.cutoutPreviewSurfaceRaf) {
-      cancelAnimationFrame(editor.cutoutPreviewSurfaceRaf);
-      editor.cutoutPreviewSurfaceRaf = 0;
-    }
-    if (editor.cutoutPreviewSurfaceTimer) {
-      clearTimeout(editor.cutoutPreviewSurfaceTimer);
-      editor.cutoutPreviewSurfaceTimer = 0;
-    }
     _paintLayerSyncRegistry.delete(String(node.id ?? "0"));
     if (!readOnly) {
       syncPaintingLayerAsync();
