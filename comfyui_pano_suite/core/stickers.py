@@ -140,6 +140,25 @@ def _iter_u_ranges(center_u: float, half_u: int, w: int):
         yield (start, end)
 
 
+def _normalize_coverage(value) -> int:
+    try:
+        return 180 if int(value) == 180 else 360
+    except Exception:
+        return 360
+
+
+def _prepare_background_for_coverage(bg_erp: np.ndarray | None, output_w: int, output_h: int, coverage: int) -> np.ndarray | None:
+    if bg_erp is None:
+        return None
+    canvas = np.clip(bg_erp.astype(np.float32), 0.0, 1.0)
+    if canvas.shape[0] != output_h or canvas.shape[1] != output_w:
+        canvas = np.asarray(
+            Image.fromarray((canvas * 255.0).astype(np.uint8)).resize((output_w, output_h), Image.BILINEAR),
+            dtype=np.float32,
+        ) / 255.0
+    return canvas
+
+
 def compose_stickers_to_erp(
     state: dict,
     output_w: int,
@@ -150,13 +169,9 @@ def compose_stickers_to_erp(
     stickers_override: list[dict] | None = None,
     assets_override: dict | None = None,
 ) -> np.ndarray:
+    coverage = _normalize_coverage(state.get("coverage"))
     if bg_erp is not None:
-        canvas = np.clip(bg_erp.astype(np.float32), 0.0, 1.0)
-        if canvas.shape[0] != output_h or canvas.shape[1] != output_w:
-            canvas = np.asarray(
-                Image.fromarray((canvas * 255.0).astype(np.uint8)).resize((output_w, output_h), Image.BILINEAR),
-                dtype=np.float32,
-            ) / 255.0
+        canvas = _prepare_background_for_coverage(bg_erp, output_w, output_h, coverage)
     else:
         bg = _hex_to_rgb01(state.get("bg_color", "#00ff00"))
         canvas = np.ones((output_h, output_w, 3), dtype=np.float32) * bg[None, None, :]
@@ -221,10 +236,11 @@ def compose_stickers_to_erp(
         right, up, fwd = orthonormal_basis_from_forward(cdir)
 
         max_fov = max(h_fov, v_fov)
-        half_u = int(math.ceil(output_w * (max_fov / 360.0) * (1.5 if quality == "preview" else 1.2)))
+        yaw_span = 180.0 if coverage == 180 else 360.0
+        half_u = int(math.ceil(output_w * (max_fov / yaw_span) * (1.5 if quality == "preview" else 1.2)))
         half_v = int(math.ceil(output_h * (max_fov / 180.0) * (1.5 if quality == "preview" else 1.2)))
 
-        center_u = ((yaw / 360.0) + 0.5) * output_w
+        center_u = ((yaw / yaw_span) + 0.5) * output_w
         center_v = (0.5 - (pitch / 180.0)) * output_h
 
         y_min = max(0, int(center_v - half_v))
@@ -235,7 +251,13 @@ def compose_stickers_to_erp(
         xs_lin = np.arange(output_w, dtype=np.float32) + 0.5
         ys_lin = np.arange(y_min, y_max, dtype=np.float32) + 0.5
 
-        for ux0, ux1 in _iter_u_ranges(center_u, half_u, output_w):
+        u_ranges = (
+            _iter_u_ranges(center_u, half_u, output_w)
+            if coverage == 360
+            else [(max(0, int(math.floor(center_u - half_u))), min(output_w, int(math.ceil(center_u + half_u))))]
+        )
+
+        for ux0, ux1 in u_ranges:
             ux0 = max(0, ux0)
             ux1 = min(output_w, ux1)
             if ux1 <= ux0:
@@ -245,7 +267,7 @@ def compose_stickers_to_erp(
             ys = ys_lin
             xg, yg = np.meshgrid(xs, ys)
 
-            lon = (xg / output_w - 0.5) * (2.0 * math.pi)
+            lon = (xg / output_w - 0.5) * ((math.pi) if coverage == 180 else (2.0 * math.pi))
             lat = (0.5 - yg / output_h) * math.pi
             dirs = np.stack([
                 np.cos(lat) * np.sin(lon),

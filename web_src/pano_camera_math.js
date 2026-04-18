@@ -1,7 +1,3 @@
-// Shared preview render-facing primitives.
-// Kept intentionally small in this refactor phase; runtime still hosts the
-// full draw pipeline and can be incrementally migrated here.
-import { getCutoutShotParams } from "./pano_cutout_projection.js";
 import { clamp, wrapYaw, shortestYawDelta } from "./pano_math.js";
 
 export const DEG2RAD = Math.PI / 180;
@@ -59,35 +55,3 @@ export function cameraBasis(yawDeg, pitchDeg, rollDeg = 0) {
   const u2 = add(mul(right, -sr), mul(up0, cr));
   return { fwd, right: norm(r2), up: norm(u2) };
 }
-
-export function parseState(text, bg = "#00ff00") {
-  const base = {
-    version: 1,
-    projection_model: "pinhole_rectilinear",
-    alpha_mode: "straight",
-    bg_color: bg,
-    output_preset: 2048,
-    assets: {},
-    stickers: [],
-    shots: [],
-    active: { selected_sticker_id: null },
-  };
-  const trimmed = String(text || "").trim();
-  if (!trimmed) return base;
-  try {
-    const p = JSON.parse(trimmed);
-    if (!p || typeof p !== "object" || Array.isArray(p)) return base;
-    return {
-      ...base,
-      ...p,
-      assets: p.assets && typeof p.assets === "object" && !Array.isArray(p.assets) ? p.assets : {},
-      stickers: Array.isArray(p.stickers) ? p.stickers : [],
-      shots: Array.isArray(p.shots) ? p.shots : [],
-      active: p.active && typeof p.active === "object" && !Array.isArray(p.active) ? p.active : base.active,
-    };
-  } catch {
-    return base;
-  }
-}
-
-export { getCutoutShotParams };

@@ -29,11 +29,11 @@ function describeTextureSource(source) {
 }
 
 function logTextureUploadIssue(which, phase, source, extra = {}) {
-  if (!panoGlDebugEnabled()) return;
-  console.warn(`[PANO_GL][${which}] ${phase}`, {
-    ...extra,
-    source: describeTextureSource(source),
-  });
+  void which;
+  void phase;
+  void source;
+  void extra;
+  return;
 }
 
 function clamp(value, min, max) {
@@ -165,8 +165,6 @@ in vec2 v_uv;
 out vec4 outColor;
 
 uniform sampler2D u_background;
-uniform sampler2D u_paint;
-uniform sampler2D u_mask;
 uniform int u_mode;
 uniform float u_yaw;
 uniform float u_pitch;
@@ -175,12 +173,7 @@ uniform float u_hfov;
 uniform float u_vfov;
 uniform vec2 u_viewport;
 uniform float u_opacity;
-uniform float u_paintOpacity;
-uniform float u_maskOpacity;
-uniform int u_hasPaint;
-uniform int u_hasMask;
-uniform int u_showMaskTint;
-uniform vec3 u_maskTint;
+uniform int u_coverage;
 
 const float PI = 3.1415926535897932384626433832795;
 const float TWO_PI = 6.283185307179586476925286766559;
@@ -217,28 +210,105 @@ vec2 projectCameraUv(float yaw, float pitch, float roll, float hfov, float vfov)
   vec3 dir = normalize(basis[2] + basis[0] * nx + basis[1] * ny);
   float lon = atan(dir.x, dir.z);
   float lat = asin(clamp(dir.y, -1.0, 1.0));
+  if (u_coverage == 180) {
+    if (abs(lon) > PI * 0.5) return vec2(-1.0, -1.0);
+    float localU = clamp(lon / PI + 0.5, 0.0, 1.0);
+    return vec2(localU, clamp(0.5 - lat / PI, 0.0, 1.0));
+  }
   return vec2(lon / TWO_PI + 0.5, clamp(0.5 - lat / PI, 0.0, 1.0));
 }
 
 void main() {
   vec2 sampleUv = unwrapUv();
+  bool bgVisible = true;
   if (u_mode == 1 || u_mode == 2) {
     sampleUv = projectCameraUv(u_yaw, u_pitch, u_roll, u_hfov, u_vfov);
   }
-  vec4 bg = texture(u_background, sampleUv);
-  vec4 paint = u_hasPaint == 1 ? texture(u_paint, sampleUv) : vec4(0.0);
-  vec4 mask = u_hasMask == 1 ? texture(u_mask, sampleUv) : vec4(0.0);
+  if (sampleUv.x < 0.0 || sampleUv.y < 0.0) {
+    bgVisible = false;
+    sampleUv = vec2(0.5, 0.5);
+  }
+  vec4 bg = bgVisible ? texture(u_background, sampleUv) : vec4(0.0);
 
   float bgAlpha = clamp(bg.a * u_opacity, 0.0, 1.0);
   vec3 premul = bg.rgb * u_opacity;
   float alpha = bgAlpha;
+  outColor = vec4(premul, alpha);
+}`;
+
+const LAYER_FRAGMENT_SHADER = `#version 300 es
+precision highp float;
+in vec2 v_uv;
+out vec4 outColor;
+
+uniform sampler2D u_paint;
+uniform sampler2D u_mask;
+uniform int u_mode;
+uniform float u_yaw;
+uniform float u_pitch;
+uniform float u_roll;
+uniform float u_hfov;
+uniform float u_vfov;
+uniform float u_paintOpacity;
+uniform float u_maskOpacity;
+uniform int u_hasPaint;
+uniform int u_hasMask;
+uniform int u_showMaskTint;
+uniform vec3 u_maskTint;
+
+const float PI = 3.1415926535897932384626433832795;
+const float TWO_PI = 6.283185307179586476925286766559;
+
+vec3 rotateCameraForward(float yaw, float pitch) {
+  float cy = cos(yaw);
+  float sy = sin(yaw);
+  float cp = cos(pitch);
+  float sp = sin(pitch);
+  return vec3(cp * sy, sp, cp * cy);
+}
+
+mat3 cameraBasis(float yaw, float pitch, float roll) {
+  vec3 fwd = normalize(rotateCameraForward(yaw, pitch));
+  vec3 worldUp = vec3(0.0, 1.0, 0.0);
+  if (abs(dot(fwd, worldUp)) > 0.999) worldUp = vec3(0.0, 0.0, 1.0);
+  vec3 right = normalize(cross(worldUp, fwd));
+  vec3 up = normalize(cross(fwd, right));
+  float cr = cos(roll);
+  float sr = sin(roll);
+  vec3 r2 = normalize(right * cr + up * sr);
+  vec3 u2 = normalize(right * (-sr) + up * cr);
+  return mat3(r2, u2, fwd);
+}
+
+vec2 unwrapUv() {
+  return vec2(v_uv.x, clamp(v_uv.y, 0.0, 1.0));
+}
+
+vec2 projectLayerUv(float yaw, float pitch, float roll, float hfov, float vfov) {
+  mat3 basis = cameraBasis(yaw, pitch, roll);
+  float nx = (v_uv.x * 2.0 - 1.0) * tan(hfov * 0.5);
+  float ny = (1.0 - v_uv.y * 2.0) * tan(vfov * 0.5);
+  vec3 dir = normalize(basis[2] + basis[0] * nx + basis[1] * ny);
+  float lon = atan(dir.x, dir.z);
+  float lat = asin(clamp(dir.y, -1.0, 1.0));
+  return vec2(lon / TWO_PI + 0.5, clamp(0.5 - lat / PI, 0.0, 1.0));
+}
+
+void main() {
+  vec2 layerUv = unwrapUv();
+  if (u_mode == 1 || u_mode == 2) {
+    layerUv = projectLayerUv(u_yaw, u_pitch, u_roll, u_hfov, u_vfov);
+  }
+  vec4 paint = u_hasPaint == 1 ? texture(u_paint, layerUv) : vec4(0.0);
+  vec4 mask = u_hasMask == 1 ? texture(u_mask, layerUv) : vec4(0.0);
+  vec3 premul = vec3(0.0);
+  float alpha = 0.0;
   if (u_hasPaint == 1) {
     float paintAlpha = clamp(paint.a * u_paintOpacity, 0.0, 1.0);
     premul = paint.rgb * u_paintOpacity + premul * (1.0 - paintAlpha);
     alpha = paintAlpha + alpha * (1.0 - paintAlpha);
   }
   if (u_hasMask == 1 && u_showMaskTint == 1) {
-    // Mask tint is a viewport-only visualization. Backend materialization keeps mask as a separate grayscale layer.
     float maskAlpha = clamp(mask.a * u_maskOpacity, 0.0, 1.0);
     premul = u_maskTint * maskAlpha + premul * (1.0 - maskAlpha);
     alpha = maskAlpha + alpha * (1.0 - maskAlpha);
@@ -339,6 +409,7 @@ export function createPanoGlRenderer(options = {}) {
   const surface = options?.targetCanvas || document.createElement("canvas");
   let gl = null;
   let backgroundProgram = null;
+  let layerProgram = null;
   let stickerProgram = null;
   let quadBuffer = null;
   let backgroundTexture = null;
@@ -350,10 +421,18 @@ export function createPanoGlRenderer(options = {}) {
   let initialized = false;
   let viewport = deriveViewport(1, 1, 1);
   let backgroundUniforms = null;
+  let layerUniforms = null;
   let stickerUniforms = null;
   let uploadScratchCanvas = null;
   let uploadScratchCtx = null;
   const stickerTextureRegistry = new Map();
+  let currentState = {
+    scene: { stickers: [], selectedId: null, hoveredId: null },
+    textures: [],
+    backgroundOpacity: 1,
+    showMaskTint: false,
+    coverageDeg: 360,
+  };
   let textureMeta = {
     background: { width: 0, height: 0 },
     paint: { width: 0, height: 0 },
@@ -383,6 +462,7 @@ export function createPanoGlRenderer(options = {}) {
       });
       if (!gl) return false;
       backgroundProgram = createProgram(gl, QUAD_VERTEX_SHADER, BACKGROUND_FRAGMENT_SHADER);
+      layerProgram = createProgram(gl, QUAD_VERTEX_SHADER, LAYER_FRAGMENT_SHADER);
       stickerProgram = createProgram(gl, QUAD_VERTEX_SHADER, STICKER_FRAGMENT_SHADER);
       backgroundUniforms = {
         mode: gl.getUniformLocation(backgroundProgram, "u_mode"),
@@ -393,15 +473,24 @@ export function createPanoGlRenderer(options = {}) {
         vFov: gl.getUniformLocation(backgroundProgram, "u_vfov"),
         viewport: gl.getUniformLocation(backgroundProgram, "u_viewport"),
         opacity: gl.getUniformLocation(backgroundProgram, "u_opacity"),
-        paintOpacity: gl.getUniformLocation(backgroundProgram, "u_paintOpacity"),
-        maskOpacity: gl.getUniformLocation(backgroundProgram, "u_maskOpacity"),
-        hasPaint: gl.getUniformLocation(backgroundProgram, "u_hasPaint"),
-        hasMask: gl.getUniformLocation(backgroundProgram, "u_hasMask"),
-        showMaskTint: gl.getUniformLocation(backgroundProgram, "u_showMaskTint"),
-        maskTint: gl.getUniformLocation(backgroundProgram, "u_maskTint"),
+        coverage: gl.getUniformLocation(backgroundProgram, "u_coverage"),
         background: gl.getUniformLocation(backgroundProgram, "u_background"),
-        paint: gl.getUniformLocation(backgroundProgram, "u_paint"),
-        mask: gl.getUniformLocation(backgroundProgram, "u_mask"),
+      };
+      layerUniforms = {
+        mode: gl.getUniformLocation(layerProgram, "u_mode"),
+        yaw: gl.getUniformLocation(layerProgram, "u_yaw"),
+        pitch: gl.getUniformLocation(layerProgram, "u_pitch"),
+        roll: gl.getUniformLocation(layerProgram, "u_roll"),
+        hFov: gl.getUniformLocation(layerProgram, "u_hfov"),
+        vFov: gl.getUniformLocation(layerProgram, "u_vfov"),
+        paintOpacity: gl.getUniformLocation(layerProgram, "u_paintOpacity"),
+        maskOpacity: gl.getUniformLocation(layerProgram, "u_maskOpacity"),
+        hasPaint: gl.getUniformLocation(layerProgram, "u_hasPaint"),
+        hasMask: gl.getUniformLocation(layerProgram, "u_hasMask"),
+        showMaskTint: gl.getUniformLocation(layerProgram, "u_showMaskTint"),
+        maskTint: gl.getUniformLocation(layerProgram, "u_maskTint"),
+        paint: gl.getUniformLocation(layerProgram, "u_paint"),
+        mask: gl.getUniformLocation(layerProgram, "u_mask"),
       };
       stickerUniforms = {
         texture: gl.getUniformLocation(stickerProgram, "u_texture"),
@@ -451,6 +540,7 @@ export function createPanoGlRenderer(options = {}) {
         disposeStickerTextureEntry(entry);
       });
       if (backgroundProgram) gl.deleteProgram(backgroundProgram);
+      if (layerProgram) gl.deleteProgram(layerProgram);
       if (stickerProgram) gl.deleteProgram(stickerProgram);
       gl.getExtension("WEBGL_lose_context")?.loseContext();
     } catch {
@@ -458,6 +548,7 @@ export function createPanoGlRenderer(options = {}) {
     }
     gl = null;
     backgroundProgram = null;
+    layerProgram = null;
     stickerProgram = null;
     quadBuffer = null;
     backgroundTexture = null;
@@ -690,12 +781,6 @@ export function createPanoGlRenderer(options = {}) {
     gl.activeTexture(gl.TEXTURE0);
     gl.bindTexture(gl.TEXTURE_2D, backgroundTexture);
     gl.uniform1i(backgroundUniforms.background, 0);
-    gl.activeTexture(gl.TEXTURE1);
-    gl.bindTexture(gl.TEXTURE_2D, paintTexture);
-    gl.uniform1i(backgroundUniforms.paint, 1);
-    gl.activeTexture(gl.TEXTURE2);
-    gl.bindTexture(gl.TEXTURE_2D, maskTexture);
-    gl.uniform1i(backgroundUniforms.mask, 2);
     gl.uniform2f(backgroundUniforms.viewport, Math.max(1, viewport.width), Math.max(1, viewport.height));
     gl.uniform1i(backgroundUniforms.mode, view?.mode === "unwrap" ? 0 : (view?.mode === "cutout" ? 2 : 1));
     const angles = getViewAngles(view, viewport.width, viewport.height) || {
@@ -711,13 +796,44 @@ export function createPanoGlRenderer(options = {}) {
     gl.uniform1f(backgroundUniforms.hFov, clamp(Number(angles.hFovDeg || 90), 0.1, 179) * DEG2RAD);
     gl.uniform1f(backgroundUniforms.vFov, clamp(Number(angles.vFovDeg || 60), 0.1, 179) * DEG2RAD);
     gl.uniform1f(backgroundUniforms.opacity, clamp(Number(params.backgroundOpacity ?? 1), 0, 1));
-    gl.uniform1f(backgroundUniforms.paintOpacity, clamp(Number(params.paintOpacity ?? 1), 0, 1));
-    gl.uniform1f(backgroundUniforms.maskOpacity, clamp(Number(params.maskOpacity ?? 0.55), 0, 1));
-    gl.uniform1i(backgroundUniforms.hasPaint, paintRevision != null ? 1 : 0);
-    gl.uniform1i(backgroundUniforms.hasMask, maskRevision != null ? 1 : 0);
-    gl.uniform1i(backgroundUniforms.showMaskTint, params.showMaskTint === false ? 0 : 1);
-    gl.uniform3f(backgroundUniforms.maskTint, 34 / 255, 197 / 255, 94 / 255);
+    const coverageDeg = Number(view?.coverageDeg || params?.coverageDeg || 360) === 180 ? 180 : 360;
+    gl.uniform1i(backgroundUniforms.coverage, coverageDeg);
     gl.drawArrays(gl.TRIANGLES, 0, 6);
+    return surface;
+  }
+
+  function drawLayers(view, params = {}) {
+    if (paintRevision == null && maskRevision == null) return null;
+    gl.enable(gl.BLEND);
+    gl.blendFunc(gl.ONE, gl.ONE_MINUS_SRC_ALPHA);
+    bindQuad(layerProgram);
+    gl.activeTexture(gl.TEXTURE0);
+    gl.bindTexture(gl.TEXTURE_2D, paintTexture);
+    gl.uniform1i(layerUniforms.paint, 0);
+    gl.activeTexture(gl.TEXTURE1);
+    gl.bindTexture(gl.TEXTURE_2D, maskTexture);
+    gl.uniform1i(layerUniforms.mask, 1);
+    gl.uniform1i(layerUniforms.mode, view?.mode === "unwrap" ? 0 : (view?.mode === "cutout" ? 2 : 1));
+    const angles = getViewAngles(view, viewport.width, viewport.height) || {
+      yawDeg: 0,
+      pitchDeg: 0,
+      rollDeg: 0,
+      hFovDeg: 90,
+      vFovDeg: 90,
+    };
+    gl.uniform1f(layerUniforms.yaw, Number(angles.yawDeg || 0) * DEG2RAD);
+    gl.uniform1f(layerUniforms.pitch, Number(angles.pitchDeg || 0) * DEG2RAD);
+    gl.uniform1f(layerUniforms.roll, Number(angles.rollDeg || 0) * DEG2RAD);
+    gl.uniform1f(layerUniforms.hFov, clamp(Number(angles.hFovDeg || 90), 0.1, 179) * DEG2RAD);
+    gl.uniform1f(layerUniforms.vFov, clamp(Number(angles.vFovDeg || 60), 0.1, 179) * DEG2RAD);
+    gl.uniform1f(layerUniforms.paintOpacity, clamp(Number(params.paintOpacity ?? 1), 0, 1));
+    gl.uniform1f(layerUniforms.maskOpacity, clamp(Number(params.maskOpacity ?? 0.55), 0, 1));
+    gl.uniform1i(layerUniforms.hasPaint, paintRevision != null ? 1 : 0);
+    gl.uniform1i(layerUniforms.hasMask, maskRevision != null ? 1 : 0);
+    gl.uniform1i(layerUniforms.showMaskTint, params.showMaskTint === false ? 0 : 1);
+    gl.uniform3f(layerUniforms.maskTint, 34 / 255, 197 / 255, 94 / 255);
+    gl.drawArrays(gl.TRIANGLES, 0, 6);
+    gl.disable(gl.BLEND);
     return surface;
   }
 
@@ -808,17 +924,67 @@ export function createPanoGlRenderer(options = {}) {
     if (!init()) return null;
     setViewport(input.width, input.height, input.dpr || 1);
     if (!setupFrame()) return null;
-    if (input.backgroundSource) {
+    const hasBackgroundSource = Object.prototype.hasOwnProperty.call(input, "backgroundSource");
+    const hasPaintSource = Object.prototype.hasOwnProperty.call(input, "paintSource");
+    const hasMaskSource = Object.prototype.hasOwnProperty.call(input, "maskSource");
+    const hasTextures = Object.prototype.hasOwnProperty.call(input, "textures");
+    const hasScene = Object.prototype.hasOwnProperty.call(input, "scene");
+    if (hasBackgroundSource) {
       setBackgroundErp(input.backgroundSource, input.backgroundRevision ?? "");
-      drawBackground(input.view, input);
     }
-    syncStickerTextures(input.textures || []);
+    if (hasPaintSource) {
+      setPaintErp(input.paintSource, input.paintRevision ?? "");
+    }
+    if (hasMaskSource) {
+      setMaskErp(input.maskSource, input.maskRevision ?? "");
+    }
+    if (hasTextures) {
+      syncStickerTextures(input.textures || []);
+      currentState.textures = input.textures || [];
+    }
+    if (hasScene) {
+      currentState.scene = input.scene || { stickers: [], selectedId: null, hoveredId: null };
+    }
+    if (Object.prototype.hasOwnProperty.call(input, "backgroundOpacity")) {
+      currentState.backgroundOpacity = Number(input.backgroundOpacity ?? 1);
+    }
+    if (Object.prototype.hasOwnProperty.call(input, "showMaskTint")) {
+      currentState.showMaskTint = input.showMaskTint === true;
+    }
+    if (Object.prototype.hasOwnProperty.call(input, "coverageDeg")) {
+      currentState.coverageDeg = Number(input.coverageDeg || 360) === 180 ? 180 : 360;
+    }
+    if (backgroundRevision) {
+      drawBackground(input.view, {
+        ...currentState,
+        ...input,
+        backgroundOpacity: Number(input.backgroundOpacity ?? currentState.backgroundOpacity ?? 1),
+        coverageDeg: Number(input.coverageDeg || currentState.coverageDeg || 360) === 180 ? 180 : 360,
+      });
+    }
+    drawLayers(input.view || { mode: "panorama", yawDeg: 0, pitchDeg: 0, fovDeg: 100 }, {
+      ...currentState,
+      ...input,
+      showMaskTint: input.showMaskTint ?? currentState.showMaskTint ?? false,
+    });
     drawStickerScene(
-      input.scene || { stickers: [], selectedId: null, hoveredId: null },
-      input.textures || [],
+      currentState.scene || { stickers: [], selectedId: null, hoveredId: null },
+      currentState.textures || [],
       input.view || { mode: "panorama", yawDeg: 0, pitchDeg: 0, fovDeg: 100 },
     );
     return surface;
+  }
+
+  function syncState(input = {}) {
+    if (!init()) return false;
+    const ok = renderScene({
+      ...input,
+      view: { mode: "panorama", yawDeg: 0, pitchDeg: 0, fovDeg: 100, coverageDeg: Number(input.coverageDeg || 360) === 180 ? 180 : 360 },
+      width: Number(surface.width || 1),
+      height: Number(surface.height || 1),
+      dpr: 1,
+    });
+    return !!ok;
   }
 
   function screenToErpUv(params, x, y) {
@@ -878,6 +1044,7 @@ export function createPanoGlRenderer(options = {}) {
     renderUnwrap,
     renderCutout,
     renderScene,
+    syncState,
     screenToErpUv,
     erpUvToScreen,
     getCanvas() {

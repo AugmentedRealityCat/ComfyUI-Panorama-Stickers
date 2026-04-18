@@ -53,8 +53,9 @@ function panoPaintDebugEnabled() {
 }
 
 function logPaintDebug(phase, payload) {
-  if (!panoPaintDebugEnabled()) return;
-  console.warn(`[PANO_PAINT][${phase}]`, payload);
+  void phase;
+  void payload;
+  return;
 }
 
 function measureAlphaBounds(canvas, threshold = 8) {
@@ -1004,11 +1005,17 @@ export function createPaintEngineManager(options = {}) {
     const orderChanged = !previousOrderedGroupIds
       || previousOrderedGroupIds.length !== orderedGroupIds.length
       || orderedGroupIds.some((gid, index) => gid !== previousOrderedGroupIds[index]);
+    const activePaintStroke = activeLayerKind === "paint"
+      ? ((activeGroupId ? groupTargets.get(activeGroupId) : paintScratchTarget)?.activeStroke || null)
+      : null;
+    const isMaskActive = activeLayerKind === "mask";
+    const maskAs = maskTarget.activeStroke;
     let anyDirty = maskTarget.displayDirty || paintScratchTarget.displayDirty || orderChanged;
     for (const gid of orderedGroupIds) {
       const group = groupTargets.get(gid);
       if (group?.displayDirty) { anyDirty = true; break; }
     }
+    if (activePaintStroke || (isMaskActive && maskAs)) anyDirty = true;
     if (!anyDirty) return;
 
     // Reset dirty flags before drawing.
@@ -1022,9 +1029,6 @@ export function createPaintEngineManager(options = {}) {
 
     const gCtx = globalDisplay.ctx;
     clearSurface(globalDisplay);
-    const activePaintStroke = activeLayerKind === "paint"
-      ? ((activeGroupId ? groupTargets.get(activeGroupId) : paintScratchTarget)?.activeStroke || null)
-      : null;
     const activePaintEraser = !!activePaintStroke?.isEraser;
 
     for (const gid of orderedGroupIds) {
@@ -1056,9 +1060,6 @@ export function createPaintEngineManager(options = {}) {
     }
 
     // Mask overlay: committed mask tint + optional live stroke tint or eraser preview.
-    const isMaskActive = activeLayerKind === "mask";
-    const maskAs = maskTarget.activeStroke;
-
     if (isMaskActive && maskAs?.isEraser) {
       // Mask eraser preview: show committed minus current eraser stroke.
       _eraserTmp = resizeSurface(_eraserTmp, ERP_W, ERP_H);

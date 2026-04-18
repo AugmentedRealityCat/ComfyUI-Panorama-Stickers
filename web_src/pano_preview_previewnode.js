@@ -1,8 +1,9 @@
 import { app } from "../../scripts/app.js";
 import { api } from "../../scripts/api.js";
-import { cameraBasis, DEG2RAD, clamp, wrapYaw } from "./pano_preview_render.js";
+import { cameraBasis, DEG2RAD, clamp, wrapYaw } from "./pano_camera_math.js";
 import { createPanoInteractionController } from "./pano_interaction_controller.js";
-import { renderSceneToContext2D } from "./pano_gl_viewport.js";
+import { createPanoramaRenderCore } from "./pano_render_core.js";
+import { buildStickerRenderDescriptor } from "./pano_render_descriptors.js";
 import { buildPreviewNodeViewParams, buildStickerSceneFromState } from "./pano_gl_scene.js";
 import {
   drawErpBackground,
@@ -178,22 +179,39 @@ function drawPreview(node, ctx, width, height, view, img) {
   }
   const basis = cameraBasis(Number(view.yaw || 0), Number(view.pitch || 0), 0);
   const tanHalfY = Math.tan((Number(view.fov || 100) * DEG2RAD) * 0.5);
-  const drawn = renderSceneToContext2D({
-    owner: node,
-    cacheKey: "standalone_preview_scene",
-    ctx,
-    width,
-    height,
+  const coverageDeg = Number(node?.widgets?.find?.((w) => w?.name === "coverage")?.value || 360) === 180 ? 180 : 360;
+  if (!node.__panoStandaloneCore) node.__panoStandaloneCore = createPanoramaRenderCore();
+  const descriptor = buildStickerRenderDescriptor({
+    stateRevision: [
+      "standalone_preview_scene",
+      String(img.currentSrc || img.src || ""),
+      Number(img.naturalWidth || img.width || 0),
+      Number(img.naturalHeight || img.height || 0),
+      coverageDeg,
+    ].join("|"),
     backgroundSource: img,
     backgroundRevision: [
       String(img.currentSrc || img.src || ""),
       Number(img.naturalWidth || img.width || 0),
       Number(img.naturalHeight || img.height || 0),
     ].join("|"),
-    textures: [],
+    coverageDeg,
     scene: buildStickerSceneFromState(null, {}),
-    view: buildPreviewNodeViewParams(view),
+    textures: [],
+    backgroundOpacity: 1,
+    showMaskTint: false,
   });
+  const drawn = !!node.__panoStandaloneCore.syncState(descriptor)
+    && (() => {
+      const surface = node.__panoStandaloneCore.renderToTarget(
+        "preview_node",
+        buildPreviewNodeViewParams(view, coverageDeg),
+        { width, height, dpr: window.devicePixelRatio || 1 },
+      );
+      if (!surface) return false;
+      ctx.drawImage(surface, 0, 0, width, height);
+      return true;
+    })();
   if (!drawn) {
     drawErpBackground(node, ctx, { x: 0, y: 0, w: width, h: height }, basis, tanHalfY, img, STANDALONE_MESH_LOW);
     drawGrid(ctx, width, height);
@@ -251,6 +269,7 @@ class PreviewNodeRuntime {
       onConnectionsChange: node.onConnectionsChange,
       onResize: node.onResize,
       onRemoved: node.onRemoved,
+      coverageWidgetCallback: null,
     };
     this.legacyDragPointer = false;
     this.tick = this.tick.bind(this);
@@ -287,6 +306,17 @@ class PreviewNodeRuntime {
       self.teardown();
       return out;
     };
+    const coverageWidget = this.node?.widgets?.find?.((widget) => widget?.name === "coverage") || null;
+    if (coverageWidget) {
+      this.orig.coverageWidgetCallback = typeof coverageWidget.callback === "function"
+        ? coverageWidget.callback.bind(coverageWidget)
+        : null;
+      coverageWidget.callback = (...args) => {
+        const out = self.orig.coverageWidgetCallback ? self.orig.coverageWidgetCallback(...args) : undefined;
+        self.requestDraw();
+        return out;
+      };
+    }
   }
 
   installErrorForeground() {
@@ -506,7 +536,7 @@ class PreviewNodeRuntime {
   onResizeDom() {
     if (!this.root || !this.canvas) return;
     const rect = this.root.getBoundingClientRect();
-    const dpr = 1;
+    const dpr = window.devicePixelRatio || 1;
     const width = Math.max(1, Math.round(rect.width * dpr));
     const height = Math.max(1, Math.round(rect.height * dpr));
     if (this.canvas.width !== width || this.canvas.height !== height) {
@@ -615,6 +645,12 @@ class PreviewNodeRuntime {
     this.node.onConnectionsChange = this.orig.onConnectionsChange;
     this.node.onResize = this.orig.onResize;
     this.node.onRemoved = this.orig.onRemoved;
+    const coverageWidget = this.node?.widgets?.find?.((widget) => widget?.name === "coverage") || null;
+    if (coverageWidget) {
+      coverageWidget.callback = this.orig.coverageWidgetCallback;
+    }
+    this.node.__panoStandaloneCore?.dispose?.();
+    this.node.__panoStandaloneCore = null;
     this.node.__panoPreviewNodeRuntime = null;
   }
 }
