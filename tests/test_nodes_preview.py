@@ -360,9 +360,9 @@ class TestNodesPreview(unittest.TestCase):
         assert 'from "./pano_editor_core.js"' not in runtime_js
         assert 'from "./pano_editor_core.js"' not in preview_node_js
 
-    def test_runtime_bundle_is_single_entry(self):
+    def test_runtime_bundle_exists_and_has_content(self):
         bundle_js = self._web_runtime_path("panorama_suite.js").read_text(encoding="utf-8")
-        assert len(bundle_js) > 1000
+        self.assertGreater(len(bundle_js), 1000)
 
 if __name__ == '__main__':
     unittest.main()

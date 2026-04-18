@@ -536,7 +536,7 @@ class PreviewNodeRuntime {
   onResizeDom() {
     if (!this.root || !this.canvas) return;
     const rect = this.root.getBoundingClientRect();
-    const dpr = 1;
+    const dpr = window.devicePixelRatio || 1;
     const width = Math.max(1, Math.round(rect.width * dpr));
     const height = Math.max(1, Math.round(rect.height * dpr));
     if (this.canvas.width !== width || this.canvas.height !== height) {
@@ -649,6 +649,8 @@ class PreviewNodeRuntime {
     if (coverageWidget) {
       coverageWidget.callback = this.orig.coverageWidgetCallback;
     }
+    this.node.__panoStandaloneCore?.dispose?.();
+    this.node.__panoStandaloneCore = null;
     this.node.__panoPreviewNodeRuntime = null;
   }
 }

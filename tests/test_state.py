@@ -66,6 +66,7 @@ def test_normalize_coverage_accepts_only_180_or_360():
     assert normalize_coverage(180) == 180
     assert normalize_coverage("180") == 180
     assert normalize_coverage(360) == 360
+    assert normalize_coverage("360") == 360
     assert normalize_coverage("foo") == 360
 
 

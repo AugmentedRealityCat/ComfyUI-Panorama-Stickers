@@ -1,6 +1,6 @@
-function roundSize(value, fallback = 1) {
+function roundSize(value, fallback = 1, maxSize = 16384) {
   const n = Math.round(Number(value || fallback));
-  return Math.max(1, n);
+  return Math.min(maxSize, Math.max(1, Number.isFinite(n) ? n : 1));
 }
 
 export function createPanoramaTargetPool() {

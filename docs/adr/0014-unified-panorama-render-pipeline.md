@@ -153,14 +153,11 @@ cutout output preview surface は独立した第二 renderer を持たない。
   - video-backed
   - future 3D-rendered-backed
 - object entry
-
-- image-backed
-- raster-backed
-- mask-backed
-- future video-backed
-- future 3D-backed
-
-を区別できるようにする。
+  - image-backed
+  - raster-backed
+  - mask-backed
+  - future video-backed
+  - future 3D-backed
 
 ## Consequences
 

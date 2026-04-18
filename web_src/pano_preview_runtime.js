@@ -3034,6 +3034,7 @@ function drawStandalonePanorama(node, ctx, rect, imageInputName = "erp_image", m
   );
   const bgReady = !!(bgImg && bgImg.complete && (bgImg.naturalWidth || bgImg.width));
   const src = String(bgImg?.src || "");
+  const state = getCachedState(node);
   const coverageDeg = Number(state?.coverage || 360) === 180 ? 180 : 360;
   if (!node.__panoStandaloneRuntimeCore) node.__panoStandaloneRuntimeCore = createPanoramaRenderCore();
   if (bgReady) {
