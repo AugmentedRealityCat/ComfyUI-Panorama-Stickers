@@ -439,6 +439,10 @@ export function createPanoGlRenderer(options = {}) {
     paint: { width: 0, height: 0 },
     mask: { width: 0, height: 0 },
   };
+  let layerDrawFlags = {
+    paint: false,
+    mask: false,
+  };
 
   function createLayerTexture(wrapS = null, wrapT = null) {
     const texture = gl.createTexture();
@@ -564,6 +568,10 @@ export function createPanoGlRenderer(options = {}) {
       paint: { width: 0, height: 0 },
       mask: { width: 0, height: 0 },
     };
+    layerDrawFlags = {
+      paint: false,
+      mask: false,
+    };
     uploadScratchCanvas = null;
     uploadScratchCtx = null;
     initialized = false;
@@ -585,6 +593,17 @@ export function createPanoGlRenderer(options = {}) {
       textureMeta[which].width = 0;
       textureMeta[which].height = 0;
     }
+  }
+
+  function clearLayerDrawFlags() {
+    layerDrawFlags.paint = false;
+    layerDrawFlags.mask = false;
+  }
+
+  function setActiveLayerDrawFlag(which) {
+    clearLayerDrawFlags();
+    if (which === "paint") layerDrawFlags.paint = true;
+    else if (which === "mask") layerDrawFlags.mask = true;
   }
 
   function uploadPartialTexture(texture, source, rects = [], meta = { width: 0, height: 0 }, premultiplyAlpha = false) {
@@ -701,6 +720,14 @@ export function createPanoGlRenderer(options = {}) {
     if (entry?.texture && gl) gl.deleteTexture(entry.texture);
   }
 
+  function pruneStickerTextures(validAssetIds = new Set()) {
+    stickerTextureRegistry.forEach((entry, assetId) => {
+      if (validAssetIds.has(assetId)) return;
+      disposeStickerTextureEntry(entry);
+      stickerTextureRegistry.delete(assetId);
+    });
+  }
+
   function ensureStickerTexture(input) {
     if (!gl || !input?.assetId || !input?.source) return null;
     const assetId = String(input.assetId);
@@ -750,11 +777,7 @@ export function createPanoGlRenderer(options = {}) {
       validAssetIds.add(String(input.assetId));
       ensureStickerTexture(input);
     });
-    stickerTextureRegistry.forEach((entry, assetId) => {
-      if (validAssetIds.has(assetId)) return;
-      disposeStickerTextureEntry(entry);
-      stickerTextureRegistry.delete(assetId);
-    });
+    pruneStickerTextures(validAssetIds);
     return true;
   }
 
@@ -804,7 +827,9 @@ export function createPanoGlRenderer(options = {}) {
   }
 
   function drawLayers(view, params = {}) {
-    if (paintRevision == null && maskRevision == null) return null;
+    const hasPaint = layerDrawFlags.paint && paintRevision != null;
+    const hasMask = layerDrawFlags.mask && maskRevision != null;
+    if (!hasPaint && !hasMask) return null;
     gl.enable(gl.BLEND);
     gl.blendFunc(gl.ONE, gl.ONE_MINUS_SRC_ALPHA);
     bindQuad(layerProgram);
@@ -829,8 +854,8 @@ export function createPanoGlRenderer(options = {}) {
     gl.uniform1f(layerUniforms.vFov, clamp(Number(angles.vFovDeg || 60), 0.1, 179) * DEG2RAD);
     gl.uniform1f(layerUniforms.paintOpacity, clamp(Number(params.paintOpacity ?? 1), 0, 1));
     gl.uniform1f(layerUniforms.maskOpacity, clamp(Number(params.maskOpacity ?? 0.55), 0, 1));
-    gl.uniform1i(layerUniforms.hasPaint, paintRevision != null ? 1 : 0);
-    gl.uniform1i(layerUniforms.hasMask, maskRevision != null ? 1 : 0);
+    gl.uniform1i(layerUniforms.hasPaint, hasPaint ? 1 : 0);
+    gl.uniform1i(layerUniforms.hasMask, hasMask ? 1 : 0);
     gl.uniform1i(layerUniforms.showMaskTint, params.showMaskTint === false ? 0 : 1);
     gl.uniform3f(layerUniforms.maskTint, 34 / 255, 197 / 255, 94 / 255);
     gl.drawArrays(gl.TRIANGLES, 0, 6);
@@ -893,7 +918,11 @@ export function createPanoGlRenderer(options = {}) {
 
   function drawObjectPass(objectPass, view) {
     const objects = Array.isArray(objectPass?.objects) ? objectPass.objects : [];
-    if (!objects.length) return;
+    if (!objects.length) {
+      clearLayerDrawFlags();
+      pruneStickerTextures(new Set());
+      return;
+    }
     const mode = view?.mode === "unwrap" ? 0 : (view?.mode === "cutout" ? 2 : 1);
     const viewAngles = getViewAngles(view, viewport.width, viewport.height) || {
       yawDeg: 0,
@@ -904,11 +933,16 @@ export function createPanoGlRenderer(options = {}) {
     };
     const viewBasis = cameraBasis(viewAngles.yawDeg, viewAngles.pitchDeg, viewAngles.rollDeg);
     const sorted = objects.slice().sort((a, b) => Number(a?.zIndex || 0) - Number(b?.zIndex || 0));
+    const validStickerAssetIds = new Set();
+    clearLayerDrawFlags();
     for (const object of sorted) {
       if (!object || object.visible === false) continue;
       if (object.type === "sticker") {
+        const assetId = String(object?.params?.assetId || object?.id || "");
+        if (!assetId) continue;
+        validStickerAssetIds.add(assetId);
         const texture = ensureStickerTexture({
-          assetId: String(object?.params?.assetId || object?.id || ""),
+          assetId,
           source: object.source,
           revision: object.revision,
         });
@@ -953,7 +987,7 @@ export function createPanoGlRenderer(options = {}) {
       }
       if (object.type === "paint" || object.type === "raster") {
         if (!setPaintErp(object.source, object.revision ?? "")) continue;
-        clearLayerState("mask");
+        setActiveLayerDrawFlag("paint");
         drawLayers(view, {
           paintOpacity: Number(object.opacity ?? 1),
           maskOpacity: 0,
@@ -963,7 +997,7 @@ export function createPanoGlRenderer(options = {}) {
       }
       if (object.type === "mask") {
         if (!setMaskErp(object.source, object.revision ?? "")) continue;
-        clearLayerState("paint");
+        setActiveLayerDrawFlag("mask");
         drawLayers(view, {
           paintOpacity: 0,
           maskOpacity: Number(object.opacity ?? 1),
@@ -971,8 +1005,8 @@ export function createPanoGlRenderer(options = {}) {
         });
       }
     }
-    clearLayerState("paint");
-    clearLayerState("mask");
+    pruneStickerTextures(validStickerAssetIds);
+    clearLayerDrawFlags();
   }
 
   function renderPanorama(params) {
