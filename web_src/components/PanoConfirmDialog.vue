@@ -93,7 +93,7 @@ watch(() => props.model.visible, (visible, wasVisible) => {
     return;
   }
   if (wasVisible) restoreFocus();
-});
+}, { immediate: true });
 
 onBeforeUnmount(() => {
   restoreFocus();

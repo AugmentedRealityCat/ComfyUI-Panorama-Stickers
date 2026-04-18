@@ -85,10 +85,10 @@ This keeps cutout aligned with the shared live-edit path while preserving an idl
 
 Frontend refactor in `web_src/pano_editor.js`:
 
-- introduce `shouldUseDirectCutoutPreview()`
-- cancel pending cutout preview timers/RAFs during interactive cutout preview
-- bypass cached cutout preview surface during interactive cutout preview
-- restore cached-surface usage only when interaction is idle
+- keep cutout frame preview on the shared editor render loop (`tick()` / `requestDraw()`)
+- render frame-view content through `drawFrameViewBackground()`
+- use `runtime.pendingStableLayoutFrames` only as a short layout-settle guard after cutout canvas resize
+- keep cutout preview invalidation tied to the existing `cause === "cutout_frame"` and shared `runtime.dirty` / `runtime.backgroundDirty` flow
 
 ## Follow-up
 

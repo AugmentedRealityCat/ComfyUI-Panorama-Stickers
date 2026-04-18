@@ -21,6 +21,12 @@ const sideTitleHtml = computed(() => (
   `<span class="pano-side-title-icon" aria-hidden="true">${ICON.globe}</span><span>${escapeHtml(props.nodeTitle)}</span>`
 ));
 
+const hasModel = computed(() => {
+  const model = props.model;
+  if (!model || typeof model !== "object") return false;
+  return Object.keys(model).length > 0 && !!model.coverage;
+});
+
 function rangeStyle(param) {
   return { "--v": `${Number(param?.fillPct || 0)}%` };
 }
@@ -37,7 +43,7 @@ function isParamDisabled(param, model) {
       <div class="pano-side-actions" />
     </div>
     <div class="pano-divider" />
-    <div v-if="model" class="pano-side-scroll">
+    <div v-if="hasModel" class="pano-side-scroll">
       <div class="pano-inspector">
         <div class="pano-section-title">
           <span>Scene</span>
@@ -208,7 +214,7 @@ function isParamDisabled(param, model) {
             <div class="pano-ui-row">
               <label for="pano-ui-quality">Render Quality</label>
               <div class="pano-picker pano-ui-picker" data-ui-picker="quality">
-                <button class="pano-picker-trigger" type="button" data-action="toggle-quality-picker">
+                <button id="pano-ui-quality" class="pano-picker-trigger" type="button" data-action="toggle-quality-picker">
                   <span class="pano-picker-label">{{ model.uiSettings.qualityLabel }}</span>
                   <span class="pano-picker-caret">▾</span>
                 </button>
