@@ -25,12 +25,13 @@ export function normalizeBackgroundPassDescriptor(raw = {}) {
   const type = BACKGROUND_TYPES.has(String(raw?.type || ""))
     ? String(raw.type)
     : "erp_image";
+  const rawOpacity = Number(raw?.opacity ?? 1);
   return {
     type,
     source: raw?.source || null,
     revision: String(raw?.revision || ""),
     coverageDeg: Number(raw?.coverageDeg || 360) === 180 ? 180 : 360,
-    opacity: clamp(Number(raw?.opacity ?? 1), 0, 1),
+    opacity: Number.isFinite(rawOpacity) ? clamp(rawOpacity, 0, 1) : 1,
     visible: raw?.visible !== false,
   };
 }
@@ -38,14 +39,16 @@ export function normalizeBackgroundPassDescriptor(raw = {}) {
 export function normalizeRenderObjectDescriptor(raw = {}) {
   const type = String(raw?.type || "");
   if (!OBJECT_TYPES.has(type)) return null;
+  const rawOpacity = Number(raw?.opacity ?? 1);
+  const rawZIndex = Number(raw?.zIndex ?? raw?.z_index ?? 0);
   return {
     id: String(raw?.id || ""),
     type,
     source: raw?.source || null,
     revision: String(raw?.revision || ""),
     visible: raw?.visible !== false,
-    opacity: clamp(Number(raw?.opacity ?? 1), 0, 1),
-    zIndex: Number(raw?.zIndex ?? raw?.z_index ?? 0),
+    opacity: Number.isFinite(rawOpacity) ? clamp(rawOpacity, 0, 1) : 1,
+    zIndex: Number.isFinite(rawZIndex) ? rawZIndex : 0,
     coverageAware: normalizeCoverageAware(type, raw?.coverageAware),
     transform: raw?.transform && typeof raw.transform === "object"
       ? { ...raw.transform }

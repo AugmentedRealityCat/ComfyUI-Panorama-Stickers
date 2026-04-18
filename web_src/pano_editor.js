@@ -3744,7 +3744,8 @@ async function showEditor(node, type, options = {}) {
           _paintLayerSyncRevision = rev;
           commitState();
         }
-      } catch {
+      } catch (err) {
+        throw err;
       } finally {
         _paintLayerSyncPending = false;
       }
@@ -10371,6 +10372,7 @@ function installEditorButton(nodeType, nodeData, matchType, buttonText) {
 
     cleanupPreviewBindings(node);
     if (matchType === "PanoramaStickers") migratePanoramaStickersWidgetOrder(node);
+    syncCoverageWidgetRedraw(node);
     hideWidget(node, STATE_WIDGET);
 
     const sw = getWidget(node, STATE_WIDGET);
