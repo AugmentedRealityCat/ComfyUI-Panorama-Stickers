@@ -4730,13 +4730,17 @@ async function showEditor(node, type, options = {}) {
   function getCutoutSelectableItemsForDisplay() {
     const stickers = [...(Array.isArray(state.stickers) ? state.stickers : [])]
       .sort((a, b) => Number(a.z_index || 0) - Number(b.z_index || 0));
-    return stickers;
+    if (editor.mode === "frame") return stickers;
+    const shots = Array.isArray(state.shots) ? state.shots : [];
+    return [...stickers, ...shots];
   }
 
   function getCutoutSelectableItemsForHit() {
     const stickers = [...(Array.isArray(state.stickers) ? state.stickers : [])]
       .sort((a, b) => Number(b.z_index || 0) - Number(a.z_index || 0));
-    return stickers;
+    if (editor.mode === "frame") return stickers;
+    const shots = Array.isArray(state.shots) ? state.shots : [];
+    return [...stickers, ...shots];
   }
 
   function traceQuad(ctx2d, corners = []) {
@@ -4817,7 +4821,22 @@ async function showEditor(node, type, options = {}) {
     const [usedNu, usedNv] = getMeshDivisions();
     const selectedItems = getSelectedItems();
     const multiSelected = selectedItems.length > 1;
-    const rawList = type === "cutout" ? getCutoutSelectableItemsForDisplay() : getList();
+    const rawList = type === "cutout"
+      ? [
+        ...getOrderedDisplayListObjects(false)
+          .map((entry) => {
+            if (entry.type === "strokeGroup") {
+              return getStrokeGroupItem(makeStrokeGroupSelectionId("paint", entry.actionGroupId || entry.id || ""));
+            }
+            if (entry.type === "rasterObject") {
+              return getRasterObjectItem(makeRasterObjectSelectionId(entry.item?.id || entry.id || ""));
+            }
+            return entry.item;
+          })
+          .filter(Boolean),
+        ...getCutoutSelectableItemsForDisplay().filter((item) => isShotItem(item)),
+      ]
+      : getList();
     const orderKey = rawList.map((item) => `${String(item?.id || "")}:${isShotItem(item) ? "frame" : Number(item?.z_index || 0)}`).join("|");
     if (!editor._sortedItemsCache || editor._sortedItemsCache.src !== rawList || editor._sortedItemsCache.orderKey !== orderKey) {
       editor._sortedItemsCache = {
@@ -4831,15 +4850,13 @@ async function showEditor(node, type, options = {}) {
       const selected = !multiSelected && isItemSelected(item);
       if (editor.mode === "frame" && !selected) continue;
       if (!editor.showObjects && !isShotItem(item)) continue;
-      const itemIsSticker = isStickerItem(item);
-      const itemLocked = isItemLocked(item);
-      if (!itemIsSticker) {
-        continue;
-      }
       const g = objectGeom(item);
       if (type !== "stickers" && !g.visible) {
         continue;
       }
+
+      const itemIsSticker = isStickerItem(item);
+      const itemLocked = isItemLocked(item);
       drawObjectBody(item, g, selected, itemLocked);
 
       if (selected && g.visible) {
