@@ -13,7 +13,7 @@ function normalizeDescriptor(descriptor = {}) {
         .filter((item) => item.type === "sticker")
         .map((item) => ({
           id: item.id,
-          assetId: String(item?.params?.assetId || item?.params?.asset_id || ""),
+          assetId: String(item?.params?.assetId || item?.params?.asset_id || item?.id || ""),
           yawDeg: Number(item?.transform?.yawDeg ?? item?.params?.yawDeg ?? 0),
           pitchDeg: Number(item?.transform?.pitchDeg ?? item?.params?.pitchDeg ?? 0),
           rollDeg: Number(item?.transform?.rollDeg ?? item?.params?.rollDeg ?? 0),

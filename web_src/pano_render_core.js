@@ -21,10 +21,14 @@ export function createPanoramaRenderCore(options = {}) {
   let currentDescriptor = null;
   const state = stateControllerFactory({
     syncState(descriptor = {}) {
-      currentDescriptor = { ...descriptor };
       if (typeof renderer.syncState === "function") {
-        return renderer.syncState(currentDescriptor);
+        const nextDescriptor = { ...descriptor };
+        const synced = renderer.syncState(nextDescriptor);
+        if (!synced) return synced;
+        currentDescriptor = nextDescriptor;
+        return synced;
       }
+      currentDescriptor = { ...descriptor };
       return true;
     },
   });

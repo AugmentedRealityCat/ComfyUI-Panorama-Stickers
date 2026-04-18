@@ -4,13 +4,15 @@ function clamp(value, min, max) {
 
 function normalizeLayerDescriptor(raw = {}, fallbackType = "paint") {
   const type = String(raw?.type || fallbackType);
+  const rawZIndex = Number(raw?.zIndex ?? raw?.z_index ?? 0);
+  const rawOpacity = Number(raw?.opacity ?? 1);
   return {
     id: String(raw?.id || `${type}_layer`),
     type,
     source: raw?.source || null,
     revision: String(raw?.revision || ""),
-    zIndex: Number(raw?.zIndex ?? raw?.z_index ?? 0),
-    opacity: clamp(Number(raw?.opacity ?? 1), 0, 1),
+    zIndex: Number.isFinite(rawZIndex) ? rawZIndex : 0,
+    opacity: Number.isFinite(rawOpacity) ? clamp(rawOpacity, 0, 1) : 1,
     visible: raw?.visible !== false,
     coverageAware: false,
     transform: raw?.transform && typeof raw.transform === "object"

@@ -76,6 +76,7 @@ export function buildPanoramaObjectPassState(options = {}) {
 
 export function buildPanoramaRenderDescriptor(options = {}) {
   return {
+    stateRevision: String(options?.stateRevision || ""),
     background: normalizeBackgroundPassDescriptor(options?.background || {}),
     objectPass: buildPanoramaObjectPassState(options?.objectPass || {}),
     overlay: options?.overlay && typeof options.overlay === "object"

@@ -1135,8 +1135,9 @@ function panoPaintDebugEnabled() {
 }
 
 function logPaintDebug(phase, payload) {
-  if (!panoPaintDebugEnabled()) return;
-  console.warn(`[PANO_PAINT][${phase}]`, payload);
+  void phase;
+  void payload;
+  return;
 }
 
 function getGraphLinkById(graph, linkId) {
@@ -3549,7 +3550,7 @@ async function showEditor(node, type, options = {}) {
         ctx.restore();
         drew = true;
       }
-      const orderedGroupIds = getOrderedPaintGroupIds(false);
+      const orderedGroupIds = getOrderedPaintGroupIds();
       const erpTarget = editor.paintEngine?.getErpTarget?.(orderedGroupIds) || null;
       const paintCanvas = editor.showObjects ? (erpTarget?.displayPaint?.canvas || null) : null;
       const maskCanvas = editor.showMask ? (erpTarget?.committedMask?.canvas || null) : null;
@@ -3583,7 +3584,7 @@ async function showEditor(node, type, options = {}) {
         bgReady ? Number(bgImg.naturalWidth || bgImg.width || 0) : 0,
         bgReady ? Number(bgImg.naturalHeight || bgImg.height || 0) : 0,
         Array.isArray(textures) ? textures.map((item) => `${String(item?.assetId || "")}:${String(item?.revision || "")}`).join(",") : "none",
-        paintSource ? getPaintingCompositeRevisionKey() : "paint:none",
+        paintSource ? getDisplayPaintRevisionKey() : "paint:none",
         maskSource ? `${getPaintingCompositeRevisionKey()}:mask` : "mask:none",
       ].join("|"),
       backgroundSource: bgReady && editor.showPanorama ? bgImg : null,
@@ -3592,7 +3593,7 @@ async function showEditor(node, type, options = {}) {
       scene,
       textures,
       paintSource,
-      paintRevision: paintSource ? getPaintingCompositeRevisionKey() : "",
+      paintRevision: paintSource ? getDisplayPaintRevisionKey() : "",
       maskSource,
       maskRevision: maskSource ? `${getPaintingCompositeRevisionKey()}:mask` : "",
       rasterEntries: [],
@@ -3743,8 +3744,7 @@ async function showEditor(node, type, options = {}) {
           _paintLayerSyncRevision = rev;
           commitState();
         }
-      } catch (e) {
-        console.warn("[pano] paint layer upload failed:", e);
+      } catch {
       } finally {
         _paintLayerSyncPending = false;
       }
@@ -4086,12 +4086,12 @@ async function showEditor(node, type, options = {}) {
   }
 
   function getModalLayerPaintSource() {
-    const orderedGroupIds = getOrderedPaintGroupIds(false);
+    const orderedGroupIds = getOrderedPaintGroupIds();
     return editor.paintEngine?.getErpTarget?.(orderedGroupIds)?.displayPaint?.canvas || null;
   }
 
   function getModalLayerMaskSource() {
-    const orderedGroupIds = getOrderedPaintGroupIds(false);
+    const orderedGroupIds = getOrderedPaintGroupIds();
     return editor.paintEngine?.getErpTarget?.(orderedGroupIds)?.committedMask?.canvas || null;
   }
 
@@ -4116,7 +4116,7 @@ async function showEditor(node, type, options = {}) {
       bgRevision,
       Array.isArray(scene?.stickers) ? scene.stickers.map((item) => String(item?.id || "")).join(",") : "none",
       Array.isArray(textures) ? textures.map((item) => `${String(item?.assetId || "")}:${String(item?.revision || "")}`).join(",") : "none",
-      paintSource ? getPaintingCompositeRevisionKey() : "paint:none",
+      paintSource ? getDisplayPaintRevisionKey() : "paint:none",
       maskSource ? `${getPaintingCompositeRevisionKey()}:mask` : "mask:none",
       editor.showPanorama ? "panorama:1" : "panorama:0",
       editor.showObjects ? "objects:1" : "objects:0",
@@ -4131,7 +4131,7 @@ async function showEditor(node, type, options = {}) {
         scene,
         textures,
         paintSource,
-        paintRevision: paintSource ? getPaintingCompositeRevisionKey() : "",
+        paintRevision: paintSource ? getDisplayPaintRevisionKey() : "",
         maskSource,
         maskRevision: maskSource ? `${getPaintingCompositeRevisionKey()}:mask` : "",
         rasterEntries: [],
@@ -4937,7 +4937,7 @@ async function showEditor(node, type, options = {}) {
     const size = getCutoutPreviewSurfaceSize(shot);
     return [
       String(shot?.id || ""),
-      getPaintingCompositeRevisionKey(),
+      getDisplayPaintRevisionKey(),
       getCutoutPreviewObjectRevision(),
       getLivePaintRevisionSuffix(),
       bgKey,
@@ -5088,7 +5088,7 @@ async function showEditor(node, type, options = {}) {
     if (!targetCtx || !rect || !shot || !img) return false;
     const scene = buildEditorStickerScene();
     const textures = buildEditorStickerTextures(scene);
-    const orderedGroupIds = getOrderedPaintGroupIds(false);
+    const orderedGroupIds = getOrderedPaintGroupIds();
     const erpTarget = editor.paintEngine?.getErpTarget?.(orderedGroupIds) || null;
     const descriptor = buildPanoramaCompositeDescriptor({
       stateRevision: [
@@ -5097,7 +5097,7 @@ async function showEditor(node, type, options = {}) {
         Number(img?.naturalWidth || img?.width || 0),
         Number(img?.naturalHeight || img?.height || 0),
         Array.isArray(textures) ? textures.map((item) => `${String(item?.assetId || "")}:${String(item?.revision || "")}`).join(",") : "",
-        getPaintingCompositeRevisionKey(),
+        getDisplayPaintRevisionKey(),
       ].join("|"),
       backgroundSource: img,
       backgroundRevision: String(options.cachePrefix || "modal_cutout_output_preview"),
@@ -5105,7 +5105,7 @@ async function showEditor(node, type, options = {}) {
       scene,
       textures,
       paintSource: erpTarget?.displayPaint?.canvas || null,
-      paintRevision: getPaintingCompositeRevisionKey(),
+      paintRevision: getDisplayPaintRevisionKey(),
       maskSource: erpTarget?.committedMask?.canvas || null,
       maskRevision: getPaintingCompositeRevisionKey(),
       backgroundOpacity: 1,
@@ -5135,7 +5135,7 @@ async function showEditor(node, type, options = {}) {
     if (!shot || !img || !(Number(size?.width || 0) > 0) || !(Number(size?.height || 0) > 0)) return null;
     const scene = buildEditorStickerScene();
     const textures = buildEditorStickerTextures(scene);
-    const orderedGroupIds = getOrderedPaintGroupIds(false);
+    const orderedGroupIds = getOrderedPaintGroupIds();
     const erpTarget = editor.paintEngine?.getErpTarget?.(orderedGroupIds) || null;
     const descriptor = buildPanoramaCompositeDescriptor({
       stateRevision: [
@@ -5144,7 +5144,7 @@ async function showEditor(node, type, options = {}) {
         Number(img?.naturalWidth || img?.width || 0),
         Number(img?.naturalHeight || img?.height || 0),
         Array.isArray(textures) ? textures.map((item) => `${String(item?.assetId || "")}:${String(item?.revision || "")}`).join(",") : "",
-        getPaintingCompositeRevisionKey(),
+        getDisplayPaintRevisionKey(),
       ].join("|"),
       backgroundSource: img,
       backgroundRevision: String(options.cachePrefix || "modal_cutout_output_preview"),
@@ -5152,7 +5152,7 @@ async function showEditor(node, type, options = {}) {
       scene,
       textures,
       paintSource: erpTarget?.displayPaint?.canvas || null,
-      paintRevision: getPaintingCompositeRevisionKey(),
+      paintRevision: getDisplayPaintRevisionKey(),
       maskSource: erpTarget?.committedMask?.canvas || null,
       maskRevision: getPaintingCompositeRevisionKey(),
       backgroundOpacity: 1,
@@ -5386,6 +5386,12 @@ async function showEditor(node, type, options = {}) {
   function getPaintingCompositeRevisionKey() {
     const descriptor = getDesiredPaintTargetDescriptor();
     return `${String(editor.paintStrokeRevision)}:${String(editor.paintCompositeRevision)}:${descriptor.width}x${descriptor.height}`;
+  }
+
+  function getDisplayPaintRevisionKey() {
+    const liveSuffix = getLivePaintRevisionSuffix();
+    const base = getPaintingCompositeRevisionKey();
+    return liveSuffix ? `${base}:${liveSuffix}` : base;
   }
 
   function bumpPaintingStrokeRevision() {
@@ -6080,7 +6086,7 @@ async function showEditor(node, type, options = {}) {
     }
     let livePaint = null;
     try {
-      const orderedGroupIds = getOrderedPaintGroupIds(false);
+      const orderedGroupIds = getOrderedPaintGroupIds();
       const interactionCompositeActive = isPaintCompositeInteraction();
       const displayPaint = editor.paintEngine?.getErpTarget?.(orderedGroupIds)?.displayPaint?.canvas || null;
       const source = displayPaint;
@@ -6112,6 +6118,7 @@ async function showEditor(node, type, options = {}) {
     if (backgroundShouldRedraw) runtime.backgroundDirty = true;
     if (localOnly && isPaintCompositeInteraction()) {
       editor.livePaintInteractionRevision += 1;
+      runtime.backgroundDirty = true;
     }
     const shouldSyncUi = !localOnly
       || cause === "selection"
@@ -7112,8 +7119,7 @@ async function showEditor(node, type, options = {}) {
       } finally {
         _stickerAssetUploadRegistry.delete(aid);
       }
-    } catch (err) {
-      console.error("[PanoramaSuite] failed to add sticker asset", err);
+    } catch {
       delete state.assets[aid];
       imageCache.delete(aid);
       const liveStickers = Array.isArray(state.stickers) ? state.stickers : [];
@@ -7208,8 +7214,7 @@ async function showEditor(node, type, options = {}) {
       } finally {
         _stickerAssetUploadRegistry.delete(nextAssetId);
       }
-    } catch (err) {
-      console.error("[PanoramaSuite] failed to replace sticker asset", err);
+    } catch {
       delete state.assets[nextAssetId];
       imageCache.delete(nextAssetId);
       const liveSelected = (Array.isArray(state.stickers) ? state.stickers : [])
@@ -7263,8 +7268,7 @@ async function showEditor(node, type, options = {}) {
           h: Number(asset?.h || 0),
         };
         changed = true;
-      } catch (err) {
-        console.error("[PanoramaSuite] failed to migrate embedded sticker asset", { assetId, err });
+      } catch {
       }
     }
     if (changed) {

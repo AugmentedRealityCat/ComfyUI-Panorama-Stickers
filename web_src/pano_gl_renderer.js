@@ -29,11 +29,11 @@ function describeTextureSource(source) {
 }
 
 function logTextureUploadIssue(which, phase, source, extra = {}) {
-  if (!panoGlDebugEnabled()) return;
-  console.warn(`[PANO_GL][${which}] ${phase}`, {
-    ...extra,
-    source: describeTextureSource(source),
-  });
+  void which;
+  void phase;
+  void source;
+  void extra;
+  return;
 }
 
 function clamp(value, min, max) {

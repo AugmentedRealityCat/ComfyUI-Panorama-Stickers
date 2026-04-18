@@ -6,8 +6,12 @@ function roundSize(value, fallback = 1) {
 export function createPanoramaTargetPool() {
   const targets = new Map();
 
+  function targetKey(targetId) {
+    return targetId != null ? String(targetId) : "default";
+  }
+
   function ensureTarget(targetId, width, height) {
-    const key = String(targetId || "default");
+    const key = targetKey(targetId);
     let entry = targets.get(key) || null;
     if (!entry) {
       const canvas = document.createElement("canvas");
@@ -36,7 +40,7 @@ export function createPanoramaTargetPool() {
   }
 
   function getTarget(targetId) {
-    return targets.get(String(targetId || "default")) || null;
+    return targets.get(targetKey(targetId)) || null;
   }
 
   function clearTarget(targetId) {

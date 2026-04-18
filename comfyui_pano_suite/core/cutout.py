@@ -52,8 +52,7 @@ def cutout_from_erp(
         u = np.clip(u, 0.0, max(erp_rgb.shape[1] - 1.0, 0.0))
         v = np.clip(v, 0.0, max(erp_rgb.shape[0] - 1.0, 0.0))
         sampled = sample_erp_bilinear(erp_rgb, u, v).astype(np.float32)
-        if sampled.ndim == 3:
-            sampled[~valid] = 0.0
+        sampled[~valid] = 0.0
         return sampled
 
     u, v = lon_lat_to_erp(lon, lat, erp_rgb.shape[1], erp_rgb.shape[0])

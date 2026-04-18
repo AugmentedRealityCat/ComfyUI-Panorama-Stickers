@@ -3,15 +3,13 @@ export function patchNodeLifecycle(nodeType, key, applyToNode) {
   const marker = `__panoLifecyclePatched_${String(key || "default")}`;
   if (nodeType[marker]) return;
   nodeType[marker] = true;
-  const logPrefix = `[PanoramaPreview:${String(key || "default")}]`;
 
   const onNodeCreatedPrev = nodeType.prototype.onNodeCreated;
   nodeType.prototype.onNodeCreated = function () {
     const r = onNodeCreatedPrev ? onNodeCreatedPrev.apply(this, arguments) : undefined;
     try {
       applyToNode(this);
-    } catch (err) {
-      try { console.warn(logPrefix, "onNodeCreated wiring skipped:", err); } catch { }
+    } catch {
     }
     return r;
   };
@@ -21,8 +19,7 @@ export function patchNodeLifecycle(nodeType, key, applyToNode) {
     const r = onConfigurePrev ? onConfigurePrev.apply(this, arguments) : undefined;
     try {
       applyToNode(this);
-    } catch (err) {
-      try { console.warn(logPrefix, "onConfigure wiring skipped:", err); } catch { }
+    } catch {
     }
     return r;
   };
@@ -32,8 +29,7 @@ export function patchNodeLifecycle(nodeType, key, applyToNode) {
     const r = onAddedPrev ? onAddedPrev.apply(this, arguments) : undefined;
     try {
       applyToNode(this);
-    } catch (err) {
-      try { console.warn(logPrefix, "onAdded wiring skipped:", err); } catch { }
+    } catch {
     }
     return r;
   };

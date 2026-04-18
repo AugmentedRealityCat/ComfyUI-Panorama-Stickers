@@ -94,13 +94,10 @@ function panoPreviewVerboseEnabled() {
 }
 
 function panoPreviewLog(node, tag, payload = null) {
-  if (!panoPreviewDebugEnabled()) return;
-  const nodeId = node?.id ?? "?";
-  if (payload == null) {
-    console.info(`[PANO_PREVIEW][${tag}] node=${nodeId}`);
-    return;
-  }
-  console.info(`[PANO_PREVIEW][${tag}] node=${nodeId}`, payload);
+  void node;
+  void tag;
+  void payload;
+  return;
 }
 
 function previewElementSnapshot(el) {
@@ -1859,22 +1856,24 @@ function drawPanoramaPreview(node, ctx, interaction = null) {
   ctx.restore();
 }
 
-function buildStickerPreviewDescriptor(bgImg, state, scene, textures, keyPrefix = "preview_scene") {
-  return buildStickerRenderDescriptor({
-    stateRevision: [
-      keyPrefix,
+function buildStickerPreviewDescriptor(bgImg, state, scene, textures, keyPrefix = "preview_scene", bgRevision = "") {
+  const resolvedBgRevision = String(
+    bgRevision
+    || [
       String(bgImg?.currentSrc || bgImg?.src || ""),
       Number(bgImg?.naturalWidth || bgImg?.width || 0),
       Number(bgImg?.naturalHeight || bgImg?.height || 0),
+    ].join("|")
+  );
+  return buildStickerRenderDescriptor({
+    stateRevision: [
+      keyPrefix,
+      resolvedBgRevision,
       Number(state?.coverage || 360) === 180 ? 180 : 360,
       Array.isArray(textures) ? textures.map((item) => `${String(item?.assetId || "")}:${String(item?.revision || "")}`).join(",") : "",
     ].join("|"),
     backgroundSource: bgImg,
-    backgroundRevision: [
-      String(bgImg?.currentSrc || bgImg?.src || ""),
-      Number(bgImg?.naturalWidth || bgImg?.width || 0),
-      Number(bgImg?.naturalHeight || bgImg?.height || 0),
-    ].join("|"),
+    backgroundRevision: resolvedBgRevision,
     coverageDeg: Number(state?.coverage || 360) === 180 ? 180 : 360,
     scene,
     textures,
@@ -2509,7 +2508,7 @@ function drawCanvas(node, canvas, fovBtn, interaction = null) {
     let drawn = false;
     if (bgReady) {
       const synced = node.__panoDomRuntimeCore.syncState(
-        buildStickerPreviewDescriptor(bgSource, state, scene, textures, "runtime_dom_scene"),
+        buildStickerPreviewDescriptor(bgSource, state, scene, textures, "runtime_dom_scene", bgRevision),
       );
       const surface = synced
         ? node.__panoDomRuntimeCore.renderToTarget("runtime_preview", view, {
@@ -3060,7 +3059,7 @@ function drawStandalonePanorama(node, ctx, rect, imageInputName = "erp_image", m
     });
     const synced = node.__panoStandaloneRuntimeCore.syncState(descriptor);
     const surface = synced
-      ? node.__panoStandaloneRuntimeCore.renderToTarget("preview_node", buildPreviewNodeViewParams(view), {
+      ? node.__panoStandaloneRuntimeCore.renderToTarget("preview_node", buildPreviewNodeViewParams(view, coverageDeg), {
         width: rect.w,
         height: rect.h,
         dpr: window.devicePixelRatio || 1,

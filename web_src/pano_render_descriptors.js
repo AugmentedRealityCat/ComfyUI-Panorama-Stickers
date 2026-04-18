@@ -17,6 +17,7 @@ export function buildStickerObjectDescriptors(scene, textures) {
         revision: texture.revision,
         zIndex: Number(item?.zIndex || 0),
         opacity: Number(item?.opacity ?? 1),
+        visible: item?.visible !== false,
         transform: {
           yawDeg: Number(item?.yawDeg || 0),
           pitchDeg: Number(item?.pitchDeg || 0),
