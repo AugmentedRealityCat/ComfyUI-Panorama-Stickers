@@ -21,6 +21,7 @@ import {
   buildStickerSceneFromState,
   buildStickerTexturesFromState,
 } from "./pano_gl_scene.js";
+import { drawCutoutProjectionPreview } from "./pano_cutout_projection.js";
 import { buildPanoramaCompositeDescriptor } from "./pano_render_descriptors.js";
 import PanoModal from "./components/PanoModal.vue";
 import { buildModalShellPreset } from "./modal_shell_presets.js";
@@ -1700,7 +1701,6 @@ async function showEditor(node, type, options = {}) {
   stageWrap?.appendChild(paintSizePreviewEl);
   const ctx = canvas.getContext("2d");
   const modalPanoCore = createPanoramaRenderCore();
-  const cutoutPreviewCore = createPanoramaRenderCore();
   const side = root.querySelector("[data-side]");
   const viewBtns = root.querySelectorAll("[data-view]");
   const viewToggle = root.querySelector(".pano-view-toggle");
@@ -2193,9 +2193,39 @@ async function showEditor(node, type, options = {}) {
 
   function getCutoutPreviewUpdateMinDelay(interaction = editor.interaction) {
     if (!isCutoutPreviewInteraction(interaction)) return 0;
-    const kind = String(interaction?.kind || "");
-    if (kind === "paint_stroke" || kind === "paint_lasso_fill") return 120;
-    return 33;
+    return 0;
+  }
+
+  function cancelScheduledCutoutPreviewSurfaceUpdate() {
+    if (editor.cutoutPreviewSurfaceRaf) {
+      cancelAnimationFrame(editor.cutoutPreviewSurfaceRaf);
+      editor.cutoutPreviewSurfaceRaf = 0;
+    }
+    if (editor.cutoutPreviewSurfaceTimer) {
+      clearTimeout(editor.cutoutPreviewSurfaceTimer);
+      editor.cutoutPreviewSurfaceTimer = 0;
+    }
+  }
+
+  function getSharedLivePaintSurface() {
+    let livePaint = null;
+    try {
+      const orderedGroupIds = getOrderedPaintGroupIds();
+      const displayPaint = editor.paintEngine?.getErpTarget?.(orderedGroupIds)?.displayPaint?.canvas || null;
+      if (displayPaint) {
+        livePaint = {
+          source: displayPaint,
+          revision: `${getPaintingCompositeRevisionKey()}:${getLivePaintRevisionSuffix()}`,
+        };
+      }
+    } catch {
+      livePaint = null;
+    }
+    return livePaint;
+  }
+
+  function shouldSchedulePassiveCutoutPreviewUpdate(options = {}) {
+    return false;
   }
 
   function getLivePaintRevisionSuffix() {
@@ -3600,7 +3630,7 @@ async function showEditor(node, type, options = {}) {
       backgroundOpacity: 1,
       showMaskTint: false,
     });
-    const core = mode === "cutout" ? cutoutPreviewCore : modalPanoCore;
+    const core = modalPanoCore;
     const synced = core.syncState(descriptor);
     if (!synced) return false;
     const surface = core.renderToTarget(`${cachePrefix}_direct`, view, {
@@ -4558,7 +4588,10 @@ async function showEditor(node, type, options = {}) {
     const ih = img.naturalHeight || img.height;
     const [Nu, Nv] = getMeshDivisions();
     const centerDir = yawPitchToDir(Number(item.yaw_deg || 0), Number(item.pitch_deg || 0));
-    const centerProj = editor.mode === "unwrap" ? projectDirUnwrap(centerDir) : null;
+    const frameShot = editor.mode === "frame" ? getActiveCutoutShot() : null;
+    const frameRect = frameShot ? getFrameViewRect(frameShot) : null;
+    const centerProj = projectSceneItemDir(centerDir, null, frameShot, frameRect);
+    const refX = editor.mode === "unwrap" ? centerProj?.x ?? null : null;
 
     const verts = [];
     for (let j = 0; j <= Nv; j += 1) {
@@ -4570,7 +4603,7 @@ async function showEditor(node, type, options = {}) {
         const su = (sx0 + (sx1 - sx0) * u) * iw;
         const sv = (sy0 + (sy1 - sy0) * v) * ih;
         const d = stickerSampleDir(item, wu, wv);
-        const p = editor.mode === "unwrap" ? projectDirUnwrap(d, centerProj?.x ?? null) : projectDir(d);
+        const p = projectSceneItemDir(d, refX, frameShot, frameRect);
         verts.push({ p, s: { x: su, y: sv } });
       }
     }
@@ -4951,260 +4984,30 @@ async function showEditor(node, type, options = {}) {
   }
 
   function ensureNodeCutoutPreviewSurface(options = {}) {
-    if (type !== "cutout") return null;
-    const shot = options.shot || getActiveCutoutShot();
-    if (!shot) {
-      node.__panoCutoutPreviewSurface = null;
-      return null;
-    }
-    const size = getCutoutPreviewSurfaceSize(shot);
-    const revision = getCutoutPreviewSurfaceRevision(shot, options);
-    if (!options.forceRedraw && node.__panoCutoutPreviewSurface?.revision === revision) {
-      return node.__panoCutoutPreviewSurface;
-    }
-    const previewCanvas = renderCutoutPreviewToTarget(shot, size, {
-      cachePrefix: "shared_cutout_preview_surface",
-      quality: String(options.quality || "balanced"),
-    });
-    if (!previewCanvas) {
-      return node.__panoCutoutPreviewSurface || null;
-    }
-    node.__panoCutoutPreviewSurface = {
-      source: previewCanvas,
-      revision,
-    };
-    return node.__panoCutoutPreviewSurface;
+    node.__panoCutoutPreviewSurface = null;
+    return null;
   }
 
   function drawCutoutOutputPreview() {
-    if (type !== "cutout") return;
-    const shot = getActiveCutoutShot();
-    if (!shot) {
-      editor.outputPreviewRect = null;
-      if (outputPreviewToggleBtn) outputPreviewToggleBtn.style.display = "none";
-      return;
-    }
-
-    const margin = 14;
-    const mix = clamp(Number(editor.outputPreviewAnim ?? (editor.outputPreviewExpanded ? 1 : 0)), 0, 1);
-    const maxWCollapsed = Math.max(120, Math.min(250, canvas.width * 0.28));
-    const maxWExpanded = Math.max(260, Math.min(560, canvas.width * 0.62));
-    const maxHCollapsed = Math.max(76, Math.min(150, canvas.height * 0.22));
-    const maxHExpanded = Math.max(160, Math.min(340, canvas.height * 0.48));
-    const maxW = lerp(maxWCollapsed, maxWExpanded, mix);
-    const maxH = lerp(maxHCollapsed, maxHExpanded, mix);
-    const cutoutView = buildCutoutViewParamsFromShot(shot);
-    const aspect = Number(cutoutView?.aspect || 1);
-    let pw = maxW;
-    let ph = pw / aspect;
-    if (ph > maxH) {
-      ph = maxH;
-      pw = ph * aspect;
-    }
-    const px = canvas.width - margin - pw;
-    const py = margin;
-    const radius = 12;
-    editor.outputPreviewRect = { x: px, y: py, w: pw, h: ph };
-    const placeOutputPreviewToggle = () => {
-      if (!outputPreviewToggleBtn) return;
-      const left = `${Math.round(px + pw - 8 - 24)}px`;
-      const top = `${Math.round(py + 8)}px`;
-      outputPreviewToggleBtn.style.display = "inline-flex";
-      if (outputPreviewToggleBtn.style.left !== left) outputPreviewToggleBtn.style.left = left;
-      if (outputPreviewToggleBtn.style.top !== top) outputPreviewToggleBtn.style.top = top;
-    };
-
-    const roundedRect = (x, y, w, h, r) => {
-      const rr = Math.max(0, Math.min(r, Math.min(w, h) * 0.5));
-      ctx.beginPath();
-      if (typeof ctx.roundRect === "function") {
-        ctx.roundRect(x, y, w, h, rr);
-      } else {
-        ctx.moveTo(x + rr, y);
-        ctx.arcTo(x + w, y, x + w, y + h, rr);
-        ctx.arcTo(x + w, y + h, x, y + h, rr);
-        ctx.arcTo(x, y + h, x, y, rr);
-        ctx.arcTo(x, y, x + w, y, rr);
-      }
-      ctx.closePath();
-    };
-
-    ctx.save();
-    ctx.shadowColor = "rgba(0, 0, 0, 0.45)";
-    ctx.shadowBlur = 22;
-    ctx.shadowOffsetX = 0;
-    ctx.shadowOffsetY = 8;
-    ctx.fillStyle = "rgba(10, 10, 10, 0.72)";
-    roundedRect(px, py, pw, ph, radius);
-    ctx.fill();
-    ctx.restore();
-
-    ctx.save();
-    roundedRect(px, py, pw, ph, radius);
-    ctx.clip();
-
-    const expectedRevision = getCutoutPreviewSurfaceRevision(shot, { quality: "balanced" });
-    let previewSurface = node.__panoCutoutPreviewSurface;
-    const liveFramePreview = isCutoutTransformInteractionActive();
-    if (liveFramePreview) {
-      previewSurface = ensureNodeCutoutPreviewSurface({
-        shot,
-        quality: "balanced",
-        forceRedraw: true,
-      });
-    }
-    if ((!previewSurface || previewSurface.revision !== expectedRevision)
-      && !liveFramePreview
-      && !editor.interaction
-      && !editor.cutoutPreviewSurfaceRaf
-      && !editor.cutoutPreviewSurfaceTimer) {
-      previewSurface = ensureNodeCutoutPreviewSurface({ shot, quality: "balanced" });
-    }
-    const previewCanvas = previewSurface?.source || null;
-    const previewReady = !!(previewCanvas
-      && Number(previewCanvas.width || 0) > 1
-      && Number(previewCanvas.height || 0) > 1);
-    if (previewSurface?.revision !== expectedRevision) {
-      scheduleNodeCutoutPreviewSurfaceUpdate();
-    }
-    if (!previewReady) {
-      ctx.fillStyle = "rgba(255, 255, 255, 0.06)";
-      ctx.fillRect(px, py, pw, ph);
-      ctx.strokeStyle = "rgba(255, 255, 255, 0.12)";
-      ctx.lineWidth = 1;
-      ctx.strokeRect(px + 0.5, py + 0.5, pw - 1, ph - 1);
-      scheduleNodeCutoutPreviewSurfaceUpdate();
-      ctx.restore();
-      placeOutputPreviewToggle();
-      return;
-    }
-
-    ctx.drawImage(previewCanvas, px, py, pw, ph);
-    ctx.restore();
-    placeOutputPreviewToggle();
+    editor.outputPreviewRect = null;
+    if (outputPreviewToggleBtn) outputPreviewToggleBtn.style.display = "none";
   }
 
   function renderCutoutPreviewToContext(targetCtx, rect, shot, options = {}) {
-    const img = getConnectedErpImage();
-    if (!targetCtx || !rect || !shot || !img) return false;
-    const scene = buildEditorStickerScene();
-    const textures = buildEditorStickerTextures(scene);
-    const orderedGroupIds = getOrderedPaintGroupIds();
-    const erpTarget = editor.paintEngine?.getErpTarget?.(orderedGroupIds) || null;
-    const descriptor = buildPanoramaCompositeDescriptor({
-      stateRevision: [
-        "cutout_preview",
-        String(img?.currentSrc || img?.src || ""),
-        Number(img?.naturalWidth || img?.width || 0),
-        Number(img?.naturalHeight || img?.height || 0),
-        Array.isArray(textures) ? textures.map((item) => `${String(item?.assetId || "")}:${String(item?.revision || "")}`).join(",") : "",
-        getDisplayPaintRevisionKey(),
-      ].join("|"),
-      backgroundSource: img,
-      backgroundRevision: String(options.cachePrefix || "modal_cutout_output_preview"),
-      coverageDeg: normalizeCoverageValue(state.coverage),
-      scene,
-      textures,
-      paintSource: erpTarget?.displayPaint?.canvas || null,
-      paintRevision: getDisplayPaintRevisionKey(),
-      maskSource: erpTarget?.committedMask?.canvas || null,
-      maskRevision: getPaintingCompositeRevisionKey(),
-      backgroundOpacity: 1,
-      showMaskTint: false,
-    });
-    const cutoutView = buildCutoutViewParamsFromShot(shot);
-    const synced = cutoutPreviewCore.syncState(descriptor);
-    if (!synced) return false;
-    const surface = cutoutPreviewCore.renderToTarget(
-      "cutout_preview",
-      cutoutView,
-      {
-        width: rect.w,
-        height: rect.h,
-        dpr: window.devicePixelRatio || 1,
-        backgroundOpacity: 1,
-        showMaskTint: false,
-      },
-    );
-    if (!surface) return false;
-    targetCtx.drawImage(surface, rect.x, rect.y, rect.w, rect.h);
     return true;
   }
 
   function renderCutoutPreviewToTarget(shot, size, options = {}) {
-    const img = getConnectedErpImage();
-    if (!shot || !img || !(Number(size?.width || 0) > 0) || !(Number(size?.height || 0) > 0)) return null;
-    const scene = buildEditorStickerScene();
-    const textures = buildEditorStickerTextures(scene);
-    const orderedGroupIds = getOrderedPaintGroupIds();
-    const erpTarget = editor.paintEngine?.getErpTarget?.(orderedGroupIds) || null;
-    const descriptor = buildPanoramaCompositeDescriptor({
-      stateRevision: [
-        "cutout_preview_target",
-        String(img?.currentSrc || img?.src || ""),
-        Number(img?.naturalWidth || img?.width || 0),
-        Number(img?.naturalHeight || img?.height || 0),
-        Array.isArray(textures) ? textures.map((item) => `${String(item?.assetId || "")}:${String(item?.revision || "")}`).join(",") : "",
-        getDisplayPaintRevisionKey(),
-      ].join("|"),
-      backgroundSource: img,
-      backgroundRevision: String(options.cachePrefix || "modal_cutout_output_preview"),
-      coverageDeg: normalizeCoverageValue(state.coverage),
-      scene,
-      textures,
-      paintSource: erpTarget?.displayPaint?.canvas || null,
-      paintRevision: getDisplayPaintRevisionKey(),
-      maskSource: erpTarget?.committedMask?.canvas || null,
-      maskRevision: getPaintingCompositeRevisionKey(),
-      backgroundOpacity: 1,
-      showMaskTint: false,
-    });
-    const cutoutView = buildCutoutViewParamsFromShot(shot);
-    const synced = cutoutPreviewCore.syncState(descriptor);
-    if (!synced) return null;
-    return cutoutPreviewCore.renderToTarget(
-      "cutout_preview",
-      cutoutView,
-      {
-        width: size.width,
-        height: size.height,
-        dpr: window.devicePixelRatio || 1,
-        backgroundOpacity: 1,
-        showMaskTint: false,
-      },
-    );
+    return null;
   }
 
   function syncNodeCutoutPreviewSurface() {
-    ensureNodeCutoutPreviewSurface();
+    node.__panoCutoutPreviewSurface = null;
   }
 
   function scheduleNodeCutoutPreviewSurfaceUpdate() {
-    if (type !== "cutout") return;
-    const now = performance.now();
-    const minDelay = getCutoutPreviewUpdateMinDelay();
-    const elapsed = now - Number(editor.cutoutPreviewSurfaceLastTs || 0);
-    if (editor.cutoutPreviewSurfaceRaf || editor.cutoutPreviewSurfaceTimer) return;
-    const queue = () => {
-      editor.cutoutPreviewSurfaceRaf = requestAnimationFrame(() => {
-        editor.cutoutPreviewSurfaceRaf = 0;
-        editor.cutoutPreviewSurfaceLastTs = performance.now();
-        syncNodeCutoutPreviewSurface();
-        runtime.dirty = true;
-        node.__panoDomPreview?.requestDraw?.();
-        node.setDirtyCanvas?.(true, false);
-        node.graph?.setDirtyCanvas?.(true, true);
-        app?.canvas?.setDirty?.(true, true);
-      });
-    };
-    if (elapsed >= minDelay) {
-      queue();
-      return;
-    }
-    editor.cutoutPreviewSurfaceTimer = window.setTimeout(() => {
-      editor.cutoutPreviewSurfaceTimer = 0;
-      if (!editor.cutoutPreviewSurfaceRaf) queue();
-    }, Math.max(0, Math.ceil(minDelay - elapsed)));
+    cancelScheduledCutoutPreviewSurfaceUpdate();
+    node.__panoCutoutPreviewSurface = null;
   }
 
   function projectErpStrokeToCurrentView(stroke) {
@@ -5962,17 +5765,69 @@ async function showEditor(node, type, options = {}) {
     ctx.rect(rect.x, rect.y, rect.w, rect.h);
     ctx.clip();
     if (img && (img.complete || img.naturalWidth || img.width) && Number(img.naturalWidth || img.width || 0) > 1 && Number(img.naturalHeight || img.height || 0) > 1) {
-      const view = buildCutoutViewParamsFromShot(shot);
-      const glDrawn = drawOrderedDisplayListInView(ctx, rect, view, img, `modal_frame_${String(shot.id || "")}`);
-      if (!glDrawn) {
-        drawCutoutProjectionPreview(
-          ctx,
-          node,
-          img,
-          rect,
-          shot,
-          String(state.ui_settings?.preview_quality || "balanced"),
-        );
+      const previewQuality = editor.interaction ? "draft" : String(state.ui_settings?.preview_quality || "balanced");
+      let drew = false;
+      if (editor.showPanorama) {
+        drew = drawCutoutProjectionPreview(ctx, node, img, rect, shot, previewQuality) || drew;
+      }
+      const orderedGroupIds = getOrderedPaintGroupIds();
+      const erpTarget = editor.paintEngine?.getErpTarget?.(orderedGroupIds) || null;
+      if (editor.showObjects) {
+        const stickers = [...(Array.isArray(state.stickers) ? state.stickers : [])]
+          .filter((item) => item?.visible !== false)
+          .sort((a, b) => Number(a?.z_index || 0) - Number(b?.z_index || 0));
+        for (const item of stickers) {
+          const stickerImg = getStickerImage(item);
+          if (stickerImg && (stickerImg.complete || stickerImg.width)) {
+            const geom = objectGeom(item);
+            const corners = Array.isArray(geom?.corners) ? geom.corners : [];
+            if (corners.length < 4) continue;
+            const crop = item?.crop && typeof item.crop === "object" ? item.crop : {};
+            const iw = Number(stickerImg.naturalWidth || stickerImg.width || 0);
+            const ih = Number(stickerImg.naturalHeight || stickerImg.height || 0);
+            if (iw <= 1 || ih <= 1) continue;
+            const sx0 = clamp(Math.min(Number(crop.x0 ?? 0), Number(crop.x1 ?? 1)), 0, 1) * iw;
+            const sy0 = clamp(Math.min(Number(crop.y0 ?? 0), Number(crop.y1 ?? 1)), 0, 1) * ih;
+            const sx1 = clamp(Math.max(Number(crop.x0 ?? 0), Number(crop.x1 ?? 1)), 0, 1) * iw;
+            const sy1 = clamp(Math.max(Number(crop.y0 ?? 0), Number(crop.y1 ?? 1)), 0, 1) * ih;
+            const prevAlpha = ctx.globalAlpha;
+            ctx.globalAlpha = getStickerDisplayAlpha(item);
+            drawImageTri(
+              stickerImg,
+              { x: sx0, y: sy0 },
+              { x: sx1, y: sy0 },
+              { x: sx1, y: sy1 },
+              corners[0],
+              corners[1],
+              corners[2],
+            );
+            drawImageTri(
+              stickerImg,
+              { x: sx0, y: sy0 },
+              { x: sx1, y: sy1 },
+              { x: sx0, y: sy1 },
+              corners[0],
+              corners[2],
+              corners[3],
+            );
+            ctx.globalAlpha = prevAlpha;
+            drew = true;
+          }
+        }
+        const paintCanvas = erpTarget?.displayPaint?.canvas || null;
+        if (paintCanvas) {
+          drew = drawCutoutProjectionPreview(ctx, node, paintCanvas, rect, shot, previewQuality) || drew;
+        }
+      }
+      if (editor.showMask) {
+        const maskCanvas = erpTarget?.committedMask?.canvas || null;
+        if (maskCanvas) {
+          drew = drawCutoutProjectionPreview(ctx, node, maskCanvas, rect, shot, previewQuality) || drew;
+        }
+      }
+      if (!drew) {
+        ctx.fillStyle = "rgba(255, 255, 255, 0.03)";
+        ctx.fillRect(rect.x, rect.y, rect.w, rect.h);
       }
     } else {
       ctx.fillStyle = "rgba(255, 255, 255, 0.03)";
@@ -6041,7 +5896,6 @@ async function showEditor(node, type, options = {}) {
     else if (editor.mode === "unwrap") drawGridUnwrap(false);
     else drawGridPano(false);
     drawObjects();
-    if (editor.mode !== "frame") drawCutoutOutputPreview();
     drawLassoOutlineOverlay();
     if (fovValueEl) fovValueEl.textContent = `${Math.round(editor.viewFov)}°`;
     updateSelectionMenu();
@@ -6077,30 +5931,9 @@ async function showEditor(node, type, options = {}) {
     return false;
   }
 
-  function syncNodeLivePreviewSources(options = {}) {
-    const updateCutoutPreview = options.updateCutoutPreview !== false;
+  function syncNodeLivePreviewSources() {
     node.__panoLiveStateOverride = state;
-    if (type === "cutout") {
-      node.__panoLivePaintSurface = null;
-      if (updateCutoutPreview) scheduleNodeCutoutPreviewSurfaceUpdate();
-      return;
-    }
-    let livePaint = null;
-    try {
-      const orderedGroupIds = getOrderedPaintGroupIds();
-      const interactionCompositeActive = isPaintCompositeInteraction();
-      const displayPaint = editor.paintEngine?.getErpTarget?.(orderedGroupIds)?.displayPaint?.canvas || null;
-      const source = displayPaint;
-      if (source) {
-        livePaint = {
-          source,
-          revision: `${getPaintingCompositeRevisionKey()}:${getLivePaintRevisionSuffix()}`,
-        };
-      }
-    } catch {
-      livePaint = null;
-    }
-    node.__panoLivePaintSurface = livePaint;
+    node.__panoLivePaintSurface = getSharedLivePaintSurface();
   }
 
   function requestDraw(options = {}) {
@@ -6129,17 +5962,8 @@ async function showEditor(node, type, options = {}) {
       syncLookAtFrameButtonState();
       syncViewToggleState();
     }
-    const shouldUpdateCutoutPreview = type === "cutout" && (
-      !localOnly
-      || cause === "paint"
-      || cause === "cutout_frame"
-      || cause === "frame_transform"
-      || cause === "frame_view"
-      || isCutoutPreviewInteraction()
-      || isCutoutTransformInteractionActive()
-    );
-    syncNodeLivePreviewSources({ updateCutoutPreview: shouldUpdateCutoutPreview });
-    if (externalSync && (shouldUpdateCutoutPreview || !localOnly || type !== "cutout")) {
+    syncNodeLivePreviewSources();
+    if (externalSync) {
       node.__panoDomPreview?.requestDraw?.();
       node.setDirtyCanvas?.(true, false);
     }
@@ -9418,7 +9242,7 @@ async function showEditor(node, type, options = {}) {
       const du = Number(currentUv.u || 0) - Number(it.startUv.u || 0);
       const dv = Number(currentUv.v || 0) - Number(it.startUv.v || 0);
       if (applyStrokeGroupOffset(it.item?.actionGroupId, du, dv, it.snapshot, it.item?.layerKind, it.frameSnapshot)) {
-        markPaintStrokeVisualsDirty({ rebuildPaintEngine: true });
+        markPaintStrokeVisualsDirty({ rebuildPaintEngine: false });
         requestDraw({ localOnly: true });
       }
       return;
@@ -9527,7 +9351,7 @@ async function showEditor(node, type, options = {}) {
       }
       if (changed) {
         if (paintStrokeChanged) {
-          markPaintStrokeVisualsDirty({ rebuildPaintEngine: true });
+          markPaintStrokeVisualsDirty({ rebuildPaintEngine: false });
         } else if (rasterChanged) {
           markPaintCompositeVisualsDirty();
         } else {
@@ -9542,7 +9366,7 @@ async function showEditor(node, type, options = {}) {
       const d = Math.max(1, Math.hypot(p.x - it.center.x, p.y - it.center.y));
       const ratio = d / Math.max(1, Number(it.startDist || 1));
       if (applyStrokeGroupTransform(it.item?.actionGroupId, ratio, 0, it.snapshot, it.item?.layerKind, it.frameSnapshot)) {
-        markPaintStrokeVisualsDirty({ rebuildPaintEngine: true });
+        markPaintStrokeVisualsDirty({ rebuildPaintEngine: false });
         requestDraw({ localOnly: true });
       }
       return;
@@ -9552,7 +9376,7 @@ async function showEditor(node, type, options = {}) {
       let delta = (Math.atan2(p.y - it.center.y, p.x - it.center.x) - Number(it.startAng || 0)) * RAD2DEG;
       if (e.shiftKey) delta = Math.round(delta / 45) * 45;
       if (applyStrokeGroupTransform(it.item?.actionGroupId, 1, delta, it.snapshot, it.item?.layerKind, it.frameSnapshot)) {
-        markPaintStrokeVisualsDirty({ rebuildPaintEngine: true });
+        markPaintStrokeVisualsDirty({ rebuildPaintEngine: false });
         requestDraw({ localOnly: true });
       }
       return;
@@ -9667,7 +9491,14 @@ async function showEditor(node, type, options = {}) {
         compositeChanged = true;
       }
       if (compositeChanged) {
-        markPaintCompositeVisualsDirty();
+        const strokeDragKinds = ["move_stroke_group", "scale_stroke_group", "rotate_stroke_group"];
+        const isStrokeDrag = strokeDragKinds.includes(editor.interaction.kind)
+          || (editor.interaction.kind === "move_multi" && Array.isArray(editor.interaction.strokeSnapshots) && editor.interaction.strokeSnapshots.length);
+        if (isStrokeDrag) {
+          markPaintStrokeVisualsDirty({ rebuildPaintEngine: true });
+        } else {
+          markPaintCompositeVisualsDirty();
+        }
       }
       pushHistory();
       commitState();
@@ -10243,7 +10074,6 @@ async function showEditor(node, type, options = {}) {
     hideTooltip();
     stopRenderLoop();
     modalPanoCore?.dispose?.();
-    cutoutPreviewCore?.dispose?.();
     setDropCue(false);
     window.removeEventListener("keydown", onEscClose, true);
     window.removeEventListener("keydown", onDeleteKey, true);

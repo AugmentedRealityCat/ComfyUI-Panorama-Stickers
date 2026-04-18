@@ -1581,7 +1581,10 @@ function getNodePreviewImage(node, assetId, asset) {
   if (cached && cached.src === src) return cached.img;
   const img = new Image();
   img.src = src;
-  img.onload = () => node.setDirtyCanvas?.(true, true);
+  img.onload = () => {
+    node.__panoDomPreview?.requestDraw?.();
+    node.setDirtyCanvas?.(true, true);
+  };
   window.__panoSharedImageCache.set(src, { img });
   node.__panoPreviewImageCache.set(key, { src, img });
   return img;
@@ -1789,7 +1792,7 @@ function drawPanoramaPreview(node, ctx, interaction = null) {
   const bgImg = getLinkedInputImageForPreview(
     node,
     preferredImageInputsForNode(node, ["erp_image", "bg_erp"]),
-    () => node.setDirtyCanvas?.(true, false)
+    () => { node.__panoDomPreview?.requestDraw?.(); node.setDirtyCanvas?.(true, false); }
   );
   const bgReady = !!(bgImg && bgImg.complete && (bgImg.naturalWidth || bgImg.width));
 
@@ -2406,17 +2409,6 @@ function drawCanvas(node, canvas, fovBtn, interaction = null) {
     ctx.fillStyle = "#070707";
     ctx.fillRect(0, 0, surfW, surfH);
 
-    const liveSurface = node?.__panoCutoutPreviewSurface;
-    const liveCanvas = liveSurface?.source || null;
-    const liveReady = !!(liveCanvas
-      && Number(liveCanvas.width || 0) > 1
-      && Number(liveCanvas.height || 0) > 1);
-    if (liveReady) {
-      ctx.drawImage(liveCanvas, contain.x, contain.y, contain.w, contain.h);
-      setCutoutEmptyHint(node, false);
-      setRenderLoading(node, false, "");
-      return;
-    }
     let statusType = "none";
     let hintText = "Open editor and add frame";
     let loadingSrc = "";
