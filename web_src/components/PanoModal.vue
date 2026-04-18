@@ -2,8 +2,11 @@
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import { ICON } from "../icons.js";
 import PanoFloatingRight from "./PanoFloatingRight.vue";
+import PanoConfirmDialog from "./PanoConfirmDialog.vue";
 import PanoPaintDock from "./PanoPaintDock.vue";
+import PanoSelectionMenu from "./PanoSelectionMenu.vue";
 import PanoSidePanel from "./PanoSidePanel.vue";
+import PanoTooltip from "./PanoTooltip.vue";
 import PanoToolRail from "./PanoToolRail.vue";
 import PanoViewToggle from "./PanoViewToggle.vue";
 import { buildModalShellPreset } from "../modal_shell_presets.js";
@@ -16,6 +19,7 @@ const props = defineProps({
   nodeTitle: { type: String, default: "Panorama Stickers" },
   paintSwatches: { type: Array, default: () => [] },
   shellPreset: { type: Object, default: null },
+  uiState: { type: Object, default: () => ({}) },
 });
 
 const emit = defineEmits(["close"]);
@@ -145,20 +149,32 @@ watch(() => props.open, (nextOpen) => {
         </div>
 
         <template v-if="!previewMode">
-          <PanoToolRail :buttons="shellPreset.toolButtons || []" />
-          <PanoPaintDock :paint-swatches="paintSwatches" :panes="shellPreset.paintPanes || []" />
+          <PanoToolRail :buttons="uiState.toolButtons || shellPreset.toolButtons || []" />
+          <PanoPaintDock
+            :paint-swatches="paintSwatches"
+            :panes="shellPreset.paintPanes || []"
+            :state="uiState.paintDock || {}"
+          />
         </template>
 
-        <PanoViewToggle :buttons="shellPreset.viewButtons || []" />
+        <PanoViewToggle :buttons="uiState.viewButtons || shellPreset.viewButtons || []" />
 
-        <PanoFloatingRight :buttons="floatingButtons" />
+        <PanoFloatingRight :buttons="uiState.floatingButtons || floatingButtons" :fov-value="uiState.fovValue || '100°'" />
 
-        <div class="pano-selection-menu" data-selection-menu />
-        <button class="pano-btn pano-btn-icon pano-output-preview-toggle" data-action="toggle-output-preview-size" aria-label="Expand Preview" data-tip="Expand preview" style="display:none" v-html="ICON.fullscreen" />
-        <div class="pano-tooltip" data-tooltip />
+        <PanoSelectionMenu :model="uiState.selectionMenu || {}" />
+        <button
+          class="pano-btn pano-btn-icon pano-output-preview-toggle"
+          data-action="toggle-output-preview-size"
+          :aria-label="uiState.outputPreviewToggle?.label || 'Expand Preview'"
+          :data-tip="uiState.outputPreviewToggle?.tip || 'Expand preview'"
+          :style="{ display: uiState.outputPreviewToggle?.visible ? '' : 'none' }"
+          v-html="uiState.outputPreviewToggle?.icon || ICON.fullscreen"
+        />
+        <PanoTooltip :model="uiState.tooltip || {}" />
+        <PanoConfirmDialog :model="uiState.confirmDialog || {}" />
       </div>
 
-      <PanoSidePanel v-if="!hideSidebar" :node-title="nodeTitle" />
+      <PanoSidePanel v-if="!hideSidebar" :node-title="nodeTitle" :model="uiState.sidePanel || {}" />
     </section>
   </div>
 </template>

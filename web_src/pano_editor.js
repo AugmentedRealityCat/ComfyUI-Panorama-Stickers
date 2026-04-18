@@ -1,6 +1,6 @@
 import { app } from "../../scripts/app.js";
 import { api } from "../../scripts/api.js";
-import { createApp } from "vue";
+import { createApp, reactive } from "vue";
 import {
   attachCutoutPreview,
   attachPreviewNode,
@@ -23,6 +23,14 @@ import {
 } from "./pano_gl_scene.js";
 import { drawCutoutProjectionPreview } from "./pano_cutout_projection.js";
 import { buildPanoramaCompositeDescriptor } from "./pano_render_descriptors.js";
+import {
+  buildEditorSidePanelModel,
+  buildPaintDockModel,
+  buildPreviewSidePanelModel,
+  buildSelectionMenuModel,
+  buildUiSettingsModel,
+  patchUiButton,
+} from "./pano_editor_ui_state.js";
 import PanoModal from "./components/PanoModal.vue";
 import { buildModalShellPreset } from "./modal_shell_presets.js";
 
@@ -1644,6 +1652,54 @@ async function showEditor(node, type, options = {}) {
       state.active.selected_shot_id = null;
     }
   }
+  const shellPreset = buildModalShellPreset(type);
+  const uiState = reactive({
+    viewButtons: (shellPreset.viewButtons || []).map((button) => ({ ...button, visible: true, disabled: false })),
+    toolButtons: (shellPreset.toolButtons || []).map((button) => ({ ...button, disabled: false })),
+    floatingButtons: [
+      ...(shellPreset.floatingButtons || []).map((button) => ({ ...button, disabled: false })),
+      ...(previewMode ? [{ action: "toggle-fullscreen", label: "Fullscreen", tip: "Fullscreen", pressed: null, icon: ICON.fullscreen, disabled: false }] : []),
+    ],
+    fovValue: "100°",
+    outputPreviewToggle: {
+      visible: false,
+      icon: ICON.fullscreen,
+      label: "Expand Preview",
+      tip: "Expand preview",
+    },
+    paintDock: {
+      visible: false,
+      activePane: "",
+      showColorRow: true,
+      colorEnabled: true,
+      activeSwatchId: "green",
+      customColorActive: false,
+      customColorCss: colorToCss({ r: 0, g: 1, b: 0, a: 1 }, 1),
+      colorPopOpen: false,
+      pickerHueColor: colorToCss({ r: 1, g: 0, b: 0, a: 1 }, 1),
+      pickerSat: "100%",
+      pickerVal: "0%",
+      pickerHue: "0%",
+      pickerSvLeft: "100%",
+      pickerSvTop: "0%",
+      pickerHueLeft: "0%",
+      alphaValue: 100,
+      alphaText: "100%",
+      historyVisible: true,
+      historyEntries: Array.from({ length: 8 }, (_, index) => ({ index, color: null })),
+      sizeValue: 10,
+      sizeText: "10",
+      sizeFill: "7.56%",
+      sizeDisabled: false,
+      showSizeRow: true,
+      clearVisible: { paint: true, mask: true },
+      activeTools: { paint: "pen", mask: "pen" },
+    },
+    sidePanel: {},
+    selectionMenu: { visible: false, left: 0, top: 0, items: [] },
+    tooltip: { visible: false, text: "", left: 0, top: 0, variant: "" },
+    confirmDialog: { visible: false, title: "", text: "", confirmLabel: "Confirm", resolve: null },
+  });
   const mountHost = document.createElement("div");
   document.body.appendChild(mountHost);
   const vueApp = createApp(PanoModal, {
@@ -1652,12 +1708,13 @@ async function showEditor(node, type, options = {}) {
     readOnly,
     hideSidebar,
     nodeTitle,
-    shellPreset: buildModalShellPreset(type),
+    shellPreset,
     paintSwatches: PAINT_COLOR_SWATCHES.map((swatch) => ({
       id: swatch.id,
       label: swatch.label,
       cssColor: colorToCss(swatch.color, 1),
     })),
+    uiState,
     onClose: () => closeEditor(),
   });
   try {
@@ -1701,38 +1758,19 @@ async function showEditor(node, type, options = {}) {
   stageWrap?.appendChild(paintSizePreviewEl);
   const ctx = canvas.getContext("2d");
   const modalPanoCore = createPanoramaRenderCore();
+  // Vue owns modal DOM structure. The references below are bridge-only:
+  // canvas mounting, geometry measurement, low-level pointer wiring, and fullscreen integration.
   const side = root.querySelector("[data-side]");
-  const viewBtns = root.querySelectorAll("[data-view]");
-  const viewToggle = root.querySelector(".pano-view-toggle");
-  const fovValueEl = root.querySelector("[data-fov-value]");
   const selectionMenu = root.querySelector("[data-selection-menu]");
-  const outputPreviewToggleBtn = root.querySelector("[data-action='toggle-output-preview-size']");
-  const addOrLookBtn = root.querySelector("[data-tool-ui-action='add-or-look']");
-  const frameViewBtn = root.querySelector("[data-view='frame']");
-  const fullscreenBtn = root.querySelector("[data-action='toggle-fullscreen']");
   const tooltipEl = root.querySelector("[data-tooltip]");
-  const toolRail = root.querySelector("[data-tool-rail]");
-  const paintDock = root.querySelector("[data-paint-dock]");
-  const paintPanes = Array.from(root.querySelectorAll("[data-paint-pane]"));
   const paintColorRow = root.querySelector("[data-paint-color-row]");
   const paintColorPop = root.querySelector("[data-paint-color-pop]");
-  const paintColorPreview = root.querySelector("[data-paint-color-preview]");
   const paintColorSv = root.querySelector("[data-paint-color-sv]");
   const paintColorSvCursor = root.querySelector("[data-paint-color-sv-cursor]");
   const paintHueStrip = root.querySelector("[data-paint-hue-strip]");
   const paintHueHandle = root.querySelector("[data-paint-hue-handle]");
-  const paintAlphaSlider = root.querySelector("[data-paint-alpha-slider]");
-  const paintAlphaValue = root.querySelector("[data-paint-alpha-value]");
-  const paintColorHistoryWrap = root.querySelector("[data-paint-color-history-wrap]");
-  const paintColorHistory = root.querySelector("[data-paint-color-history]");
-  const paintSizeRows = Array.from(root.querySelectorAll("[data-paint-size-row]"));
-  const paintClearRows = Array.from(root.querySelectorAll("[data-paint-clear-row]"));
-  const paintLayerClearCurrentBtns = Array.from(root.querySelectorAll("[data-paint-layer-clear-current]"));
-  const paintSizeSliders = Array.from(root.querySelectorAll("[data-paint-size-slider]"));
-  const paintSizeValues = Array.from(root.querySelectorAll("[data-paint-size-value]"));
   let paintSizePreviewTimer = 0;
   let paintPaneFadeTimer = 0;
-  let visiblePaintPaneMode = "";
   stageWrap?.removeAttribute("data-stage-ready");
   stageWrap?.setAttribute("data-stage-loading-kind", "boot");
   canvas.style.opacity = "1";
@@ -1741,11 +1779,6 @@ async function showEditor(node, type, options = {}) {
     side?.remove();
     root.classList.add("pano-modal-readonly");
   }
-  function setPaintDockVisible(visible) {
-    if (!paintDock) return;
-    paintDock.classList.toggle("is-hidden", !visible);
-  }
-
   const commitCustomPaintHistory = () => {
     if (!editor.customPaintSessionStart) return;
     if (colorsApproximatelyEqual(editor.customPaintSessionStart, editor.customPaintColor)) {
@@ -1768,11 +1801,13 @@ async function showEditor(node, type, options = {}) {
     if (commitHistory) commitCustomPaintHistory();
     else editor.customPaintSessionStart = null;
     paintColorPop.hidden = true;
+    uiState.paintDock.colorPopOpen = false;
   };
   const openPaintColorPop = () => {
     if (!paintColorPop) return;
     if (paintColorPop.hidden) editor.customPaintSessionStart = cloneColor(editor.customPaintColor);
     paintColorPop.hidden = false;
+    uiState.paintDock.colorPopOpen = true;
   };
   root.addEventListener("pointerdown", (ev) => {
     hideTooltip();
@@ -1876,6 +1911,22 @@ async function showEditor(node, type, options = {}) {
     active: false,
     depth: 0,
   };
+
+  function syncToolButtonModels() {
+    uiState.toolButtons.forEach((button) => {
+      const isPrimaryTool = button.attr === "data-tool-mode";
+      const isPaintTool = button.attr === "data-paint-tool";
+      const isMaskTool = button.attr === "data-mask-tool";
+      button.active = isPrimaryTool
+        ? button.value === editor.primaryTool
+        : isPaintTool
+          ? button.key === editor.paintTool
+          : isMaskTool
+            ? button.key === editor.maskTool
+            : false;
+      button.pressed = button.active ? "true" : (button.pressed == null ? null : "false");
+    });
+  }
 
   function dragHasImageFiles(e) {
     const dt = e?.dataTransfer;
@@ -3093,24 +3144,19 @@ async function showEditor(node, type, options = {}) {
     if (type !== "cutout") return;
   }
   function syncLookAtFrameButtonState() {
-    if (!addOrLookBtn) return;
-    addOrLookBtn.style.display = "none";
+    patchUiButton(uiState.toolButtons, "value", "add-or-look", { visible: false });
   }
 
   function syncViewToggleState() {
     if (editor.mode === "frame") editor.mode = "pano";
     editor.outputPreviewRect = null;
-    if (frameViewBtn) {
-      frameViewBtn.disabled = true;
-      frameViewBtn.setAttribute("aria-disabled", "true");
-      frameViewBtn.style.display = "none";
-    }
-    if (outputPreviewToggleBtn) outputPreviewToggleBtn.style.display = "none";
-    viewBtns.forEach((btn) => {
-      const active = btn.dataset.view === editor.mode;
-      btn.setAttribute("aria-pressed", active ? "true" : "false");
+    uiState.viewButtons.forEach((button) => {
+      const active = button.key === editor.mode;
+      button.pressed = active ? "true" : "false";
+      button.visible = button.key !== "frame";
+      button.disabled = button.key === "frame";
     });
-    if (viewToggle) viewToggle.setAttribute("data-selected", editor.mode);
+    uiState.outputPreviewToggle.visible = false;
     if (isPaintCursorEnabled()) updateCursor(editor.pointerPos);
     else canvas.style.cursor = editor.mode === "pano" ? "grab" : "default";
   }
@@ -5012,7 +5058,7 @@ async function showEditor(node, type, options = {}) {
 
   function drawCutoutOutputPreview() {
     editor.outputPreviewRect = null;
-    if (outputPreviewToggleBtn) outputPreviewToggleBtn.style.display = "none";
+    uiState.outputPreviewToggle.visible = false;
   }
 
   function renderCutoutPreviewToContext(targetCtx, rect, shot, options = {}) {
@@ -5975,7 +6021,7 @@ async function showEditor(node, type, options = {}) {
     else drawGridPano(false);
     drawObjects();
     drawLassoOutlineOverlay();
-    if (fovValueEl) fovValueEl.textContent = `${Math.round(editor.viewFov)}°`;
+    uiState.fovValue = `${Math.round(editor.viewFov)}°`;
     updateSelectionMenu();
     if (!runtime.hasPresentedFrame) {
       runtime.hasPresentedFrame = true;
@@ -6173,161 +6219,50 @@ async function showEditor(node, type, options = {}) {
   }
 
   function syncPaintUi() {
-    toolRail?.querySelectorAll("[data-tool-mode]").forEach((btn) => {
-      const active = btn.getAttribute("data-tool-mode") === editor.primaryTool;
-      btn.classList.toggle("active", active);
-      btn.setAttribute("aria-pressed", active ? "true" : "false");
+    // Keep derived paint UI state in the dedicated builder module so this file stays bridge-focused.
+    syncToolButtonModels();
+    const nextPaintDock = buildPaintDockModel({
+      editor,
+      swatches: PAINT_COLOR_SWATCHES,
+      paintColorPopOpen: paintColorPop ? !paintColorPop.hidden : false,
+      colorToCss,
+      colorsApproximatelyEqual,
+      rgb01ToHsv,
+      hsv01ToRgb,
+      getBrushPresetIdForTool,
+      isActiveLassoTool,
     });
-    const showFooter = editor.primaryTool === "paint" || editor.primaryTool === "mask";
-    if (paintDock) {
-      setPaintDockVisible(showFooter);
-    }
-    if (!showFooter) {
-      paintPanes.forEach((pane) => {
-        pane.classList.remove("is-active");
-      });
+    Object.assign(uiState.paintDock, nextPaintDock);
+    if (!nextPaintDock.visible) {
       if (paintColorPop) paintColorPop.hidden = true;
-      visiblePaintPaneMode = "";
       return;
     }
-    const nextMode = editor.primaryTool;
-    const nextPane = paintPanes.find((pane) => String(pane.getAttribute("data-paint-pane") || "") === nextMode) || null;
-    paintPanes.forEach((pane) => {
-      pane.classList.toggle("is-active", pane === nextPane);
-    });
-    visiblePaintPaneMode = nextMode;
-    paintSizeRows.forEach((row) => {
-      row.hidden = false;
-    });
-    paintClearRows.forEach((row) => {
-      row.hidden = false;
-    });
     if (paintPaneFadeTimer) {
       clearTimeout(paintPaneFadeTimer);
       paintPaneFadeTimer = 0;
     }
-    root.querySelectorAll("[data-paint-tool]").forEach((btn) => {
-      btn.classList.toggle("active", btn.getAttribute("data-paint-tool") === editor.paintTool);
-    });
-    root.querySelectorAll("[data-mask-tool]").forEach((btn) => {
-      btn.classList.toggle("active", btn.getAttribute("data-mask-tool") === editor.maskTool);
-    });
     if (paintColorRow) {
-      const colorEnabled = editor.paintTool !== "eraser";
-      paintColorRow.hidden = false;
-      paintColorRow.classList.toggle("disabled", !colorEnabled);
-      if (!colorEnabled && paintColorPop && !paintColorPop.hidden) {
+      if (!nextPaintDock.colorEnabled && paintColorPop && !paintColorPop.hidden) {
         paintPaneFadeTimer = window.setTimeout(() => {
           paintColorPop.hidden = true;
+          uiState.paintDock.colorPopOpen = false;
           paintPaneFadeTimer = 0;
         }, 170);
       }
-      const matchedSwatchId = PAINT_COLOR_SWATCHES.find((swatch) => colorsApproximatelyEqual(editor.paintColor, swatch.color))?.id || "";
-      paintColorRow.querySelectorAll("[data-paint-color-swatch]").forEach((btn) => {
-        const active = btn.getAttribute("data-paint-color-swatch") === matchedSwatchId;
-        btn.classList.toggle("active", active);
-        btn.setAttribute("aria-pressed", active ? "true" : "false");
-        btn.disabled = !colorEnabled;
-      });
-      const customBtn = paintColorRow.querySelector("[data-paint-color-custom]");
-      if (customBtn) {
-        const customActive = !matchedSwatchId;
-        customBtn.classList.toggle("active", customActive);
-        customBtn.style.setProperty("--custom-color", colorToCss(editor.customPaintColor, 1));
-        customBtn.setAttribute("aria-pressed", customActive ? "true" : "false");
-        customBtn.disabled = !colorEnabled;
-      }
-      if (paintAlphaSlider) paintAlphaSlider.value = String(Math.round(clamp(Number(editor.customPaintColor?.a ?? 1), 0, 1) * 100));
-      if (paintAlphaValue) paintAlphaValue.textContent = `${Math.round(clamp(Number(editor.customPaintColor?.a ?? 1), 0, 1) * 100)}%`;
-      if (paintColorPreview) paintColorPreview.style.background = colorToCss(editor.customPaintColor);
       if (paintColorPop) {
-        const hsv = rgb01ToHsv(editor.customPaintColor);
-        paintColorPop.style.setProperty("--picker-hue-color", colorToCss({ ...hsv01ToRgb(hsv.h, 1, 1), a: 1 }, 1));
-        paintColorPop.style.setProperty("--picker-sat", `${clamp(hsv.s, 0, 1) * 100}%`);
-        paintColorPop.style.setProperty("--picker-val", `${(1 - clamp(hsv.v, 0, 1)) * 100}%`);
-        paintColorPop.style.setProperty("--picker-hue", `${clamp(hsv.h, 0, 1) * 100}%`);
+        paintColorPop.style.setProperty("--picker-hue-color", nextPaintDock.pickerHueColor);
+        paintColorPop.style.setProperty("--picker-sat", nextPaintDock.pickerSat);
+        paintColorPop.style.setProperty("--picker-val", nextPaintDock.pickerVal);
+        paintColorPop.style.setProperty("--picker-hue", nextPaintDock.pickerHue);
       }
       if (paintColorSvCursor) {
-        const hsv = rgb01ToHsv(editor.customPaintColor);
-        paintColorSvCursor.style.left = `${clamp(hsv.s, 0, 1) * 100}%`;
-        paintColorSvCursor.style.top = `${(1 - clamp(hsv.v, 0, 1)) * 100}%`;
+        paintColorSvCursor.style.left = nextPaintDock.pickerSvLeft;
+        paintColorSvCursor.style.top = nextPaintDock.pickerSvTop;
       }
       if (paintHueHandle) {
-        const hsv = rgb01ToHsv(editor.customPaintColor);
-        paintHueHandle.style.left = `${clamp(hsv.h, 0, 1) * 100}%`;
-      }
-      if (paintColorHistoryWrap && paintColorHistory) {
-        const slots = Array.from({ length: 8 }, (_, index) => editor.customPaintHistory[index] || null);
-        paintColorHistory.innerHTML = slots.map((color, index) => `
-          <button class="pano-paint-color-history-dot${color ? "" : " empty"}" type="button" data-paint-history-index="${index}" ${color ? `style="--swatch:${colorToCss(color, 1)}"` : ""} aria-label="Recent color ${index + 1}" ${color ? "" : "disabled"}></button>
-        `).join("");
-        paintColorHistory.querySelectorAll("[data-paint-history-index]").forEach((btn) => {
-          btn.onclick = () => {
-            const idx = Number(btn.getAttribute("data-paint-history-index"));
-            const color = editor.customPaintHistory[idx];
-            if (!color) return;
-            editor.customPaintColor = cloneColor(color);
-            editor.paintColor = cloneColor(color);
-            syncPaintUi();
-          };
-        });
+        paintHueHandle.style.left = nextPaintDock.pickerHueLeft;
       }
     }
-    const sizePresetId = getBrushPresetIdForTool(editor.primaryTool === "paint" ? editor.paintTool : editor.maskTool);
-    const currentSize = editor.brushSizes[sizePresetId] ?? 10;
-    const lassoToolActive = isActiveLassoTool();
-    paintSizeRows.forEach((row) => {
-      row.classList.toggle("disabled", lassoToolActive);
-    });
-    paintSizeSliders.forEach((slider) => {
-      slider.value = String(currentSize);
-      const pct = ((currentSize - 1) / 119) * 100;
-      slider.style.setProperty("--v", `${clamp(pct, 0, 100)}%`);
-      slider.disabled = lassoToolActive;
-    });
-    paintSizeValues.forEach((valueEl) => {
-      valueEl.textContent = String(currentSize);
-    });
-  }
-
-  function addParamRow(container, selected, key, label, min, max, step, enabled = true) {
-    const row = document.createElement("div");
-    row.dataset.key = key;
-    row.dataset.min = String(min);
-    row.dataset.max = String(max);
-    row.className = "pano-field";
-    row.innerHTML = `<label>${label}</label><input type='range' min='${min}' max='${max}' step='${step}' value='${Number(selected[key] || 0)}'><input type='number' min='${min}' max='${max}' step='${step}' value='${formatParamValue(selected[key] || 0)}'>`;
-    const [rng, num] = row.querySelectorAll("input");
-    const setRangeFill = () => {
-      const nMin = Number(min);
-      const nMax = Number(max);
-      const nVal = Number(rng.value);
-      const pct = ((nVal - nMin) / Math.max(1e-6, nMax - nMin)) * 100;
-      rng.style.setProperty("--v", `${clamp(pct, 0, 100)}%`);
-    };
-    rng.disabled = !enabled;
-    num.disabled = !enabled;
-    const setVal = (v) => {
-      if (!enabled) return;
-      let out = Number(v);
-      if (Number.isNaN(out)) out = 0;
-      out = clamp(out, min, max);
-      if (key === "yaw_deg") out = wrapYaw(out);
-      selected[key] = out;
-      if (type === "cutout" && (key === "hFOV_deg" || key === "vFOV_deg")) {
-        selected.aspect_id = deriveCutoutAspectLabelFromFov(selected);
-      }
-      rng.value = String(out);
-      num.value = formatParamValue(out);
-      setRangeFill();
-      requestDraw();
-    };
-    rng.oninput = () => setVal(rng.value);
-    num.oninput = () => setVal(num.value);
-    rng.onchange = () => pushHistory();
-    num.onchange = () => pushHistory();
-    setRangeFill();
-    container.appendChild(row);
   }
 
   function syncSidePanelControls() {
@@ -6342,231 +6277,20 @@ async function showEditor(node, type, options = {}) {
       roll_deg: Number(selected.roll_deg || 0),
       aspect_id: getCutoutAspectLabel(selected),
     };
-    const rows = side.querySelectorAll(".pano-field[data-key]");
-    rows.forEach((row) => {
-      const key = row.dataset.key;
-      if (!key) return;
-      if (!(key in selected)) return;
-      const rng = row.querySelector("input[type='range']");
-      const num = row.querySelector("input[type='number']");
-      if (!rng || !num) return;
-      const min = Number(row.dataset.min ?? rng.min ?? 0);
-      const max = Number(row.dataset.max ?? rng.max ?? 0);
-      let out = Number(selected[key] || 0);
-      if (Number.isNaN(out)) out = 0;
-      out = clamp(out, min, max);
-      const s = String(out);
-      if (rng.value !== s) rng.value = s;
-      const t = formatParamValue(out);
-      if (num.value !== t) num.value = t;
-      const pct = ((out - min) / Math.max(1e-6, max - min)) * 100;
-      rng.style.setProperty("--v", `${clamp(pct, 0, 100)}%`);
-    });
-    const resolvedAspect = getCutoutAspectLabel(selected);
-    const aspectLabel = side.querySelector(".pano-cutout-aspect-label span");
-    if (aspectLabel) aspectLabel.textContent = resolvedAspect;
-    const presetBtns = side.querySelectorAll(".pano-cutout-aspect-pop [data-aspect]");
-    presetBtns.forEach((btn) => {
-      btn.classList.toggle("active", String(btn.getAttribute("data-aspect")) === resolvedAspect);
-    });
-  }
-
-  function createCoverageInspectorSection({ disabled = false, onChange }) {
-    const currentCoverage = normalizeCoverageValue(state.coverage);
-    const section = document.createElement("div");
-    section.innerHTML = `
-      <div class="pano-section-title">
-        <span>Scene</span>
-      </div>
-      <div class="pano-ui-row pano-coverage-row">
-        <label>Coverage</label>
-        <div class="pano-segment" data-setting="coverage" data-selected="${currentCoverage === 180 ? "1" : "0"}">
-          <button class="pano-segment-btn" type="button" data-value="360" aria-pressed="${currentCoverage === 360 ? "true" : "false"}">360</button>
-          <button class="pano-segment-btn" type="button" data-value="180" aria-pressed="${currentCoverage === 180 ? "true" : "false"}">180</button>
-        </div>
-      </div>
-    `;
-    const segment = section.querySelector("[data-setting='coverage']");
-    const setSegmentValue = (coverage) => {
-      const nextCoverage = normalizeCoverageValue(coverage);
-      segment.setAttribute("data-selected", nextCoverage === 180 ? "1" : "0");
-      segment.querySelectorAll(".pano-segment-btn").forEach((btn) => {
-        btn.setAttribute("aria-pressed", normalizeCoverageValue(btn.getAttribute("data-value")) === nextCoverage ? "true" : "false");
-        btn.disabled = !!disabled;
-      });
-    };
-    segment.querySelectorAll(".pano-segment-btn").forEach((btn) => {
-      btn.onclick = () => {
-        if (disabled) return;
-        const nextCoverage = normalizeCoverageValue(btn.getAttribute("data-value"));
-        if (nextCoverage === normalizeCoverageValue(state.coverage)) return;
-        onChange?.(nextCoverage);
-        setSegmentValue(nextCoverage);
-      };
-    });
-    setSegmentValue(currentCoverage);
-    return section;
+    updateSidePanel();
   }
 
   function updateSidePanel() {
     if (hideSidebar) return;
-    const staticNodes = [...side.children].slice(0, 2);
-    side.innerHTML = "";
-    staticNodes.forEach((n) => side.appendChild(n));
-
-    const sideActions = side.querySelector(".pano-side-actions");
-    if (sideActions) {
-      sideActions.innerHTML = "";
-    }
+    state.ui_settings = state.ui_settings || {};
+    // Inspector content is derived data for Vue, not imperative DOM construction.
+    const uiSettingsModel = buildUiSettingsModel(state.ui_settings);
     if (previewMode) {
-      const inspector = document.createElement("div");
-      inspector.className = "pano-inspector";
-      inspector.appendChild(createCoverageInspectorSection({
-        onChange: (nextCoverage) => {
-          state.coverage = nextCoverage;
-          editor.coverage = nextCoverage;
-          if (coverageWidget) {
-            coverageWidget.value = String(nextCoverage);
-            coverageWidget.callback?.(coverageWidget.value);
-          }
-          runtime.backgroundDirty = true;
-          requestDraw();
-          updateSidePanel();
-        },
-      }));
-      const uiDetails = document.createElement("details");
-      uiDetails.className = "pano-ui-settings";
-      uiDetails.open = false;
-      uiDetails.innerHTML = `
-      <summary>
-        <span class="pano-ui-summary-label">UI Settings</span>
-        <span class="pano-ui-caret" aria-hidden="true">${ICON.chevron}</span>
-      </summary>
-      <div class="pano-ui-settings-body">
-        <div class="pano-ui-row">
-          <label>Drag X</label>
-          <div class="pano-segment" data-setting="invert-x" data-selected="${state.ui_settings?.invert_view_x ? "1" : "0"}">
-            <button class="pano-segment-btn" type="button" data-value="0" aria-pressed="${state.ui_settings?.invert_view_x ? "false" : "true"}">Normal</button>
-            <button class="pano-segment-btn" type="button" data-value="1" aria-pressed="${state.ui_settings?.invert_view_x ? "true" : "false"}">Inverted</button>
-          </div>
-        </div>
-        <div class="pano-ui-row">
-          <label>Drag Y</label>
-          <div class="pano-segment" data-setting="invert-y" data-selected="${state.ui_settings?.invert_view_y ? "1" : "0"}">
-            <button class="pano-segment-btn" type="button" data-value="0" aria-pressed="${state.ui_settings?.invert_view_y ? "false" : "true"}">Normal</button>
-            <button class="pano-segment-btn" type="button" data-value="1" aria-pressed="${state.ui_settings?.invert_view_y ? "true" : "false"}">Inverted</button>
-          </div>
-        </div>
-        <div class="pano-ui-row">
-          <label for="pano-ui-quality">Render Quality</label>
-          <div class="pano-picker pano-ui-picker" data-ui-picker="quality">
-            <button class="pano-picker-trigger" type="button">
-              <span class="pano-picker-label"></span>
-              <span class="pano-picker-caret">▾</span>
-            </button>
-            <div class="pano-picker-pop" hidden></div>
-          </div>
-        </div>
-        <div class="pano-ui-row">
-          <span></span>
-          <button class="pano-btn subtle" type="button" data-action="ui-reset-defaults">Reset Defaults</button>
-        </div>
-      </div>
-    `;
-      const segX = uiDetails.querySelector("[data-setting='invert-x']");
-      const segY = uiDetails.querySelector("[data-setting='invert-y']");
-      const qualityPicker = uiDetails.querySelector("[data-ui-picker='quality']");
-      const resetUi = uiDetails.querySelector("[data-action='ui-reset-defaults']");
-      const setupUiPicker = (pickerEl, options, getValue, setValue) => {
-        const trigger = pickerEl.querySelector(".pano-picker-trigger");
-        const label = pickerEl.querySelector(".pano-picker-label");
-        const pop = pickerEl.querySelector(".pano-picker-pop");
-        const refresh = () => {
-          const cur = String(getValue());
-          const found = options.find((o) => String(o.value) === cur) || options[0];
-          label.textContent = found.label;
-          pop.innerHTML = "";
-          options.forEach((o) => {
-            const b = document.createElement("button");
-            b.type = "button";
-            b.className = `pano-picker-item${String(o.value) === cur ? " active" : ""}`;
-            b.textContent = o.label;
-            b.onclick = () => {
-              setValue(o.value);
-              pop.hidden = true;
-              refresh();
-              persistUiSettings();
-              requestDraw();
-            };
-            pop.appendChild(b);
-          });
-        };
-        trigger.onclick = (ev) => {
-          ev.stopPropagation();
-          uiDetails.querySelectorAll(".pano-ui-picker .pano-picker-pop").forEach((el) => {
-            if (el !== pop) el.hidden = true;
-          });
-          pop.hidden = !pop.hidden;
-        };
-        refresh();
-        return refresh;
-      };
-      const setSegmentValue = (seg, on) => {
-        seg.setAttribute("data-selected", on ? "1" : "0");
-        seg.querySelectorAll(".pano-segment-btn").forEach((b) => {
-          b.setAttribute("aria-pressed", b.getAttribute("data-value") === (on ? "1" : "0") ? "true" : "false");
-        });
-      };
-      segX.querySelectorAll(".pano-segment-btn").forEach((btn) => {
-        btn.onclick = () => {
-          const on = btn.getAttribute("data-value") === "1";
-          state.ui_settings.invert_view_x = on;
-          setSegmentValue(segX, on);
-          persistUiSettings();
-          requestDraw();
-        };
+      uiState.sidePanel = buildPreviewSidePanelModel({
+        coverage: state.coverage,
+        uiSettings: uiSettingsModel,
+        normalizeCoverageValue,
       });
-      segY.querySelectorAll(".pano-segment-btn").forEach((btn) => {
-        btn.onclick = () => {
-          const on = btn.getAttribute("data-value") === "1";
-          state.ui_settings.invert_view_y = on;
-          setSegmentValue(segY, on);
-          persistUiSettings();
-          requestDraw();
-        };
-      });
-      const refreshQuality = setupUiPicker(
-        qualityPicker,
-        [
-          { value: "draft", label: "Draft" },
-          { value: "balanced", label: "Balanced" },
-          { value: "high", label: "High" },
-        ],
-        () => String(state.ui_settings.preview_quality || "balanced"),
-        (v) => {
-          const q = String(v || "balanced");
-          state.ui_settings.preview_quality = (q === "draft" || q === "high") ? q : "balanced";
-        },
-      );
-      resetUi.onclick = () => {
-        state.ui_settings.invert_view_x = false;
-        state.ui_settings.invert_view_y = false;
-        state.ui_settings.preview_quality = "balanced";
-        setSegmentValue(segX, false);
-        setSegmentValue(segY, false);
-        refreshQuality();
-        persistUiSettings();
-        requestDraw();
-      };
-      inspector.appendChild(uiDetails);
-      side.appendChild(inspector);
-
-      const footer = document.createElement("div");
-      footer.className = "pano-side-footer";
-      footer.innerHTML = `<button class="pano-btn pano-btn-primary" data-action="close-preview">Close</button>`;
-      footer.querySelector("[data-action='close-preview']").onclick = () => closeEditor();
-      side.appendChild(footer);
-      installTooltipHandlers(inspector);
       return;
     }
 
@@ -6576,18 +6300,16 @@ async function showEditor(node, type, options = {}) {
     if (selectedItems.length > 1) {
       editor.panelLastValues = editor.panelLastValues || { yaw_deg: 0, pitch_deg: 0, hFOV_deg: 30, vFOV_deg: 30, rot_deg: 0 };
     }
-    if (selected) {
-      if (selectedKind !== "stroke") {
-        editor.panelLastValues = {
-          yaw_deg: Number(selected.yaw_deg || 0),
-          pitch_deg: Number(selected.pitch_deg || 0),
-          hFOV_deg: Number(selected.hFOV_deg || (selectedKind === "image" ? 30 : 90)),
-          vFOV_deg: Number(selected.vFOV_deg || (selectedKind === "image" ? 30 : 60)),
-          rot_deg: Number(selected.rot_deg || 0),
-          roll_deg: Number(selected.roll_deg || 0),
-          aspect_id: getCutoutAspectLabel(selected),
-        };
-      }
+    if (selected && selectedKind !== "stroke") {
+      editor.panelLastValues = {
+        yaw_deg: Number(selected.yaw_deg || 0),
+        pitch_deg: Number(selected.pitch_deg || 0),
+        hFOV_deg: Number(selected.hFOV_deg || (selectedKind === "image" ? 30 : 90)),
+        vFOV_deg: Number(selected.vFOV_deg || (selectedKind === "image" ? 30 : 60)),
+        rot_deg: Number(selected.rot_deg || 0),
+        roll_deg: Number(selected.roll_deg || 0),
+        aspect_id: getCutoutAspectLabel(selected),
+      };
     }
     const fallback = editor.panelLastValues || ((type === "stickers" || selectedKind === "image")
       ? { yaw_deg: 0, pitch_deg: 0, hFOV_deg: 30, vFOV_deg: 30, rot_deg: 0 }
@@ -6595,374 +6317,97 @@ async function showEditor(node, type, options = {}) {
     const inspectorSelected = selectedKind === "stroke" ? null : selected;
     const effective = inspectorSelected || fallback;
     const enabled = !!inspectorSelected;
+    editor.panelWasEnabled = enabled;
+    syncLookAtFrameButtonState();
 
-    const inspector = document.createElement("div");
-    inspector.className = "pano-inspector";
-    inspector.appendChild(createCoverageInspectorSection({
-      disabled: readOnly,
-      onChange: (nextCoverage) => {
-        state.coverage = nextCoverage;
-        editor.coverage = nextCoverage;
-        if (coverageWidget) {
-          coverageWidget.value = String(nextCoverage);
-          coverageWidget.callback?.(coverageWidget.value);
-        }
-        commitAndRefreshNode();
-        node.setDirtyCanvas?.(true, true);
-        updateSidePanel();
-        updateSelectionMenu();
-        requestDraw();
-      },
-    }));
-
-    const summary = document.createElement("div");
-    summary.innerHTML = `
-      <div class="pano-section-title">
-        <span>Transform</span>
-      </div>
-    `;
-    while (summary.firstChild) inspector.appendChild(summary.firstChild);
-    side.appendChild(inspector);
-
+    let selectionPicker = null;
     if (type === "stickers" || type === "cutout") {
-      const targetRow = document.createElement("div");
-      targetRow.className = "pano-field-wide pano-target-row";
-      const rowLabel = type === "stickers" ? "Selection" : "Selection";
-      targetRow.innerHTML = `
-        <label>${rowLabel}</label>
-        <div class="pano-picker">
-          <button class="pano-picker-trigger" type="button">
-            <span class="pano-picker-label"></span>
-            <span class="pano-picker-caret">▾</span>
-          </button>
-          <div class="pano-picker-pop" hidden></div>
-        </div>
-      `;
-      const trigger = targetRow.querySelector(".pano-picker-trigger");
-      const labelEl = targetRow.querySelector(".pano-picker-label");
-      const pop = targetRow.querySelector(".pano-picker-pop");
-      const items = [{ id: "", label: type === "stickers" ? "No image" : "Nothing selected", item: null }];
+      const items = [{ id: "", labelHtml: escapeHtml(type === "stickers" ? "No image" : "Nothing selected"), item: null }];
       if (type === "stickers") {
         getList().forEach((item, i) => {
           const baseLabel = isExternalSticker(item)
             ? String(item.id || EXTERNAL_STICKER_ID)
             : String(state.assets?.[item.asset_id]?.name || item.asset_id || item.id);
           const label = `${i + 1}. ${baseLabel}${isExternalSticker(item) && isStickerHidden(item) ? " (hidden)" : ""}`;
-          items.push({ id: item.id, label, item, kind: "image" });
+          items.push({ id: item.id, labelHtml: getSelectionItemLabelHtml({ item, label, kind: "image" }), item, kind: "image" });
         });
       } else {
         getCutoutInspectorItems().forEach((entry) => {
-          items.push({ id: entry.item.id, label: entry.label, item: entry.item, kind: entry.kind });
+          items.push({ id: entry.item.id, labelHtml: getSelectionItemLabelHtml(entry), item: entry.item, kind: entry.kind });
         });
       }
       const currentId = inspectorSelected?.id || "";
-      const currentItem = items.find((it) => it.id === currentId) || items[0];
-      labelEl.innerHTML = currentItem.item ? getSelectionItemLabelHtml(currentItem) : escapeHtml(String(currentItem.label || ""));
-      pop.innerHTML = "";
-      items.forEach((it) => {
-        const btn = document.createElement("button");
-        btn.type = "button";
-        btn.className = `pano-picker-item${it.id === currentId ? " active" : ""}`;
-        btn.innerHTML = it.item ? getSelectionItemLabelHtml(it) : escapeHtml(String(it.label || ""));
-        btn.onclick = () => {
-          pop.hidden = true;
-          setSelectedItem(it.item || null);
-          const selectedNow = it.item || null;
-          if (selectedNow && !isStrokeGroupItem(selectedNow)) {
-            const targetYaw = wrapYaw(Number(selectedNow.yaw_deg || 0));
-            const targetPitch = clamp(Number(selectedNow.pitch_deg || 0), -89.9, 89.9);
-            startViewTween(targetYaw, targetPitch, editor.viewFov);
-          }
-          updateSidePanel();
-          updateSelectionMenu();
-          requestDraw();
-        };
-        pop.appendChild(btn);
-      });
-      trigger.disabled = items.length <= 1;
-      trigger.onclick = (ev) => {
-        ev.stopPropagation();
-        if (trigger.disabled) return;
-        pop.hidden = !pop.hidden;
+      const currentItem = items.find((item) => item.id === currentId) || items[0];
+      selectionPicker = {
+        label: "Selection",
+        open: false,
+        disabled: items.length <= 1,
+        currentLabelHtml: currentItem.labelHtml,
+        items: items.map((item) => ({ id: item.id, labelHtml: item.labelHtml, active: item.id === currentId })),
       };
-      inspector.appendChild(targetRow);
     }
 
-    const toolsRow = document.createElement("div");
-    toolsRow.className = "pano-state-actions";
-    toolsRow.innerHTML = `<button class="pano-btn subtle pano-btn-tight pano-btn-copy" data-action="copy-state-inline">${ICON.copy}<span>Copy State</span></button>`;
-    const copyInline = toolsRow.querySelector("[data-action='copy-state-inline']");
-    copyInline.disabled = !enabled || selectedKind === "stroke" || selectedItems.length > 1;
-    copyInline.onclick = async () => {
-      if (!enabled || selectedKind === "stroke" || selectedItems.length > 1) return;
-      const text = JSON.stringify(type === "cutout" && selectedKind !== "image"
-        ? buildCanonicalCutoutStickerState(effective)
-        : buildCanonicalSelectedStickerState(selected));
-      try {
-        await navigator.clipboard.writeText(text);
-        const label = copyInline.querySelector("span");
-        if (label) {
-          label.textContent = "Copied";
-          window.setTimeout(() => {
-            label.textContent = "Copy State";
-          }, 900);
-        }
-      } catch {
-        // no-op fallback for environments without clipboard permission
-      }
+    const params = [];
+    const pushParam = (key, label, min, max, step) => {
+      const value = clamp(Number(effective[key] || 0), min, max);
+      params.push({
+        key,
+        label,
+        min,
+        max,
+        step,
+        value,
+        displayValue: formatParamValue(value),
+        fillPct: clamp(((value - min) / Math.max(1e-6, max - min)) * 100, 0, 100),
+        enabled: enabled && !readOnly,
+      });
     };
-    inspector.appendChild(toolsRow);
-
-    const paramsWrap = document.createElement("div");
-    paramsWrap.className = `pano-params${editor.panelWasEnabled ? "" : " disabled"}`;
-    inspector.appendChild(paramsWrap);
-
+    const notes = [];
     if (selectedItems.length > 1) {
-      paramsWrap.innerHTML = `
-        <div class="pano-param-note">Selected objects: ${selectedItems.length}</div>
-        <div class="pano-param-note">Multi-selection supports z-order and delete.</div>
-      `;
-      paramsWrap.classList.toggle("disabled", !enabled);
-      editor.panelWasEnabled = enabled;
-      syncLookAtFrameButtonState();
+      notes.push(`Selected objects: ${selectedItems.length}`);
+      notes.push("Multi-selection supports z-order and delete.");
     } else {
-
-      addParamRow(paramsWrap, effective, "yaw_deg", "Yaw", -180, 180, 0.1, enabled && !readOnly);
-      addParamRow(paramsWrap, effective, "pitch_deg", "Pitch", -90, 90, 0.1, enabled && !readOnly);
-      addParamRow(paramsWrap, effective, "hFOV_deg", "H FOV", 1, 179, 0.1, enabled && !readOnly);
-      addParamRow(paramsWrap, effective, "vFOV_deg", "V FOV", 1, 179, 0.1, enabled && !readOnly);
-      if (type === "stickers" || selectedKind === "image") {
-        addParamRow(paramsWrap, effective, "rot_deg", "Rotation", -180, 180, 0.1, enabled && !readOnly);
-      } else {
-        addParamRow(paramsWrap, effective, "roll_deg", "Roll", -180, 180, 0.1, enabled && !readOnly);
-      }
-
-    if (enabled !== editor.panelWasEnabled) {
-        requestAnimationFrame(() => {
-          paramsWrap.classList.toggle("disabled", !enabled);
-        });
-      } else {
-        paramsWrap.classList.toggle("disabled", !enabled);
-      }
-      editor.panelWasEnabled = enabled;
-      syncLookAtFrameButtonState();
+      pushParam("yaw_deg", "Yaw", -180, 180, 0.1);
+      pushParam("pitch_deg", "Pitch", -90, 90, 0.1);
+      pushParam("hFOV_deg", "H FOV", 1, 179, 0.1);
+      pushParam("vFOV_deg", "V FOV", 1, 179, 0.1);
+      if (type === "stickers" || selectedKind === "image") pushParam("rot_deg", "Rotation", -180, 180, 0.1);
+      else pushParam("roll_deg", "Roll", -180, 180, 0.1);
     }
 
-    const visibilitySection = document.createElement("div");
-    visibilitySection.className = "pano-visibility-section";
-    visibilitySection.innerHTML = `
-      <div class="pano-section-title">
-        <span>Layers</span>
-      </div>
-      <div class="pano-visibility-stack">
-        <div class="pano-visibility-row" data-visibility-row="mask">
-          <span class="pano-visibility-name"><span class="pano-visibility-name-icon" aria-hidden="true">${ICON.circle_dashed_tool}</span><span>Mask</span></span>
-          <button class="pano-visibility-toggle" type="button" data-visibility="mask" aria-label="Toggle mask"></button>
-        </div>
-        <div class="pano-visibility-row" data-visibility-row="objects">
-          <span class="pano-visibility-name"><span class="pano-visibility-name-icon" aria-hidden="true">${ICON.image}</span><span>Paint / Images</span></span>
-          <button class="pano-visibility-toggle" type="button" data-visibility="objects" aria-label="Toggle paint and images"></button>
-        </div>
-        <div class="pano-visibility-row" data-visibility-row="panorama">
-          <span class="pano-visibility-name"><span class="pano-visibility-name-icon" aria-hidden="true">${ICON.globe}</span><span>Panorama</span></span>
-          <button class="pano-visibility-toggle" type="button" data-visibility="panorama" aria-label="Toggle panorama"></button>
-        </div>
-      </div>
-    `;
     const paintStrokeCount = Array.isArray(state?.painting?.paint?.strokes) ? state.painting.paint.strokes.length : 0;
     const maskStrokeCount = Array.isArray(state?.painting?.mask?.strokes) ? state.painting.mask.strokes.length : 0;
-    const panoramaInputNames = Array.isArray(node?.inputs)
-      ? node.inputs.map((entry) => String(entry?.name || ""))
-      : [];
+    const panoramaInputNames = Array.isArray(node?.inputs) ? node.inputs.map((entry) => String(entry?.name || "")) : [];
     const linkedPanoramaSource = findPreferredExactLinkedImageSource(
       node,
       panoramaInputNames.includes("erp_image") ? ["erp_image", "bg_erp"] : ["bg_erp", "erp_image"],
     );
-    const hasPanoramaLayer = !!String(linkedPanoramaSource?.src || "").trim()
-      || getNodeUiList("pano_input_images").length > 0;
+    const hasPanoramaLayer = !!String(linkedPanoramaSource?.src || "").trim() || getNodeUiList("pano_input_images").length > 0;
     const hasObjectLayer = (Array.isArray(getList()) && getList().length > 0) || paintStrokeCount > 0;
     const hasMaskLayer = maskStrokeCount > 0;
-    const isVisibilityEnabled = (key) => {
-      if (key === "panorama") return hasPanoramaLayer;
-      if (key === "objects") return hasObjectLayer;
-      return hasMaskLayer;
-    };
-    const syncVisibilityButton = (btn, visible) => {
-      const row = btn.closest("[data-visibility-row]");
-      const enabled = isVisibilityEnabled(String(btn.getAttribute("data-visibility") || ""));
-      btn.innerHTML = visible ? ICON.eye : ICON.eye_dashed;
-      btn.setAttribute("aria-pressed", visible ? "true" : "false");
-      btn.setAttribute("data-tip", visible ? "Hide" : "Show");
-      btn.disabled = !enabled;
-      btn.classList.toggle("active", !!visible);
-      row?.classList.toggle("is-hidden", !visible);
-      row?.classList.toggle("is-disabled", !enabled);
-    };
-    visibilitySection.querySelectorAll("[data-visibility]").forEach((btn) => {
-      const key = String(btn.getAttribute("data-visibility") || "");
-      const readValue = () => {
-        if (key === "panorama") return !!editor.showPanorama;
-        if (key === "objects") return !!editor.showObjects;
-        return !!editor.showMask;
-      };
-      syncVisibilityButton(btn, readValue());
-      btn.onclick = () => {
-        if (!isVisibilityEnabled(key)) return;
-        if (key === "panorama") editor.showPanorama = !editor.showPanorama;
-        else if (key === "objects") editor.showObjects = !editor.showObjects;
-        else editor.showMask = !editor.showMask;
-        syncVisibilityButton(btn, readValue());
-        requestDraw();
-      };
+    const visibilityRows = [
+      { key: "mask", label: "Mask", icon: ICON.circle_dashed_tool, visible: !!editor.showMask, enabled: hasMaskLayer },
+      { key: "objects", label: "Paint / Images", icon: ICON.image, visible: !!editor.showObjects, enabled: hasObjectLayer },
+      { key: "panorama", label: "Panorama", icon: ICON.globe, visible: !!editor.showPanorama, enabled: hasPanoramaLayer },
+    ].map((row) => ({
+      ...row,
+      ariaLabel: `Toggle ${row.label.toLowerCase()}`,
+      tip: row.visible ? "Hide" : "Show",
+    }));
+
+    uiState.sidePanel = buildEditorSidePanelModel({
+      coverage: state.coverage,
+      readOnly,
+      selectionPicker,
+      enabled,
+      selectedKind,
+      selectedItems,
+      params,
+      notes,
+      visibilityRows,
+      uiSettings: uiSettingsModel,
+      normalizeCoverageValue,
     });
-    inspector.appendChild(Object.assign(document.createElement("div"), { className: "pano-divider" }));
-    inspector.appendChild(visibilitySection);
-
-    if (!readOnly) {
-      const uiDetails = document.createElement("details");
-      uiDetails.className = "pano-ui-settings";
-      uiDetails.open = false;
-      uiDetails.innerHTML = `
-      <summary>
-        <span class="pano-ui-summary-label">UI Settings</span>
-        <span class="pano-ui-caret" aria-hidden="true">${ICON.chevron}</span>
-      </summary>
-      <div class="pano-ui-settings-body">
-        <div class="pano-ui-row">
-          <label>Drag X</label>
-          <div class="pano-segment" data-setting="invert-x" data-selected="${state.ui_settings?.invert_view_x ? "1" : "0"}">
-            <button class="pano-segment-btn" type="button" data-value="0" aria-pressed="${state.ui_settings?.invert_view_x ? "false" : "true"}">Normal</button>
-            <button class="pano-segment-btn" type="button" data-value="1" aria-pressed="${state.ui_settings?.invert_view_x ? "true" : "false"}">Inverted</button>
-          </div>
-        </div>
-        <div class="pano-ui-row">
-          <label>Drag Y</label>
-          <div class="pano-segment" data-setting="invert-y" data-selected="${state.ui_settings?.invert_view_y ? "1" : "0"}">
-            <button class="pano-segment-btn" type="button" data-value="0" aria-pressed="${state.ui_settings?.invert_view_y ? "false" : "true"}">Normal</button>
-            <button class="pano-segment-btn" type="button" data-value="1" aria-pressed="${state.ui_settings?.invert_view_y ? "true" : "false"}">Inverted</button>
-          </div>
-        </div>
-        <div class="pano-ui-row">
-          <label for="pano-ui-quality">Render Quality</label>
-          <div class="pano-picker pano-ui-picker" data-ui-picker="quality">
-            <button class="pano-picker-trigger" type="button">
-              <span class="pano-picker-label"></span>
-              <span class="pano-picker-caret">▾</span>
-            </button>
-            <div class="pano-picker-pop" hidden></div>
-          </div>
-        </div>
-        <div class="pano-ui-row">
-          <span></span>
-          <button class="pano-btn subtle" type="button" data-action="ui-reset-defaults">Reset Defaults</button>
-        </div>
-      </div>
-    `;
-      const segX = uiDetails.querySelector("[data-setting='invert-x']");
-      const segY = uiDetails.querySelector("[data-setting='invert-y']");
-      const qualityPicker = uiDetails.querySelector("[data-ui-picker='quality']");
-      const resetUi = uiDetails.querySelector("[data-action='ui-reset-defaults']");
-      const setupUiPicker = (pickerEl, options, getValue, setValue) => {
-        const trigger = pickerEl.querySelector(".pano-picker-trigger");
-        const label = pickerEl.querySelector(".pano-picker-label");
-        const pop = pickerEl.querySelector(".pano-picker-pop");
-        const refresh = () => {
-          const cur = String(getValue());
-          const found = options.find((o) => String(o.value) === cur) || options[0];
-          label.textContent = found.label;
-          pop.innerHTML = "";
-          options.forEach((o) => {
-            const b = document.createElement("button");
-            b.type = "button";
-            b.className = `pano-picker-item${String(o.value) === cur ? " active" : ""}`;
-            b.textContent = o.label;
-            b.onclick = () => {
-              setValue(o.value);
-              pop.hidden = true;
-              refresh();
-              persistUiSettings();
-              node.setDirtyCanvas(true, true);
-              requestDraw();
-            };
-            pop.appendChild(b);
-          });
-        };
-        trigger.onclick = (ev) => {
-          ev.stopPropagation();
-          uiDetails.querySelectorAll(".pano-ui-picker .pano-picker-pop").forEach((el) => {
-            if (el !== pop) el.hidden = true;
-          });
-          pop.hidden = !pop.hidden;
-        };
-        refresh();
-        return refresh;
-      };
-      const setSegmentValue = (seg, on) => {
-        seg.setAttribute("data-selected", on ? "1" : "0");
-        seg.querySelectorAll(".pano-segment-btn").forEach((b) => {
-          b.setAttribute("aria-pressed", b.getAttribute("data-value") === (on ? "1" : "0") ? "true" : "false");
-        });
-      };
-      segX.querySelectorAll(".pano-segment-btn").forEach((btn) => {
-        btn.onclick = () => {
-          const on = btn.getAttribute("data-value") === "1";
-          state.ui_settings.invert_view_x = on;
-          setSegmentValue(segX, on);
-          persistUiSettings();
-          node.setDirtyCanvas(true, true);
-          requestDraw();
-        };
-      });
-      segY.querySelectorAll(".pano-segment-btn").forEach((btn) => {
-        btn.onclick = () => {
-          const on = btn.getAttribute("data-value") === "1";
-          state.ui_settings.invert_view_y = on;
-          setSegmentValue(segY, on);
-          persistUiSettings();
-          node.setDirtyCanvas(true, true);
-          requestDraw();
-        };
-      });
-      const refreshQuality = setupUiPicker(
-        qualityPicker,
-        [
-          { value: "draft", label: "Draft" },
-          { value: "balanced", label: "Balanced" },
-          { value: "high", label: "High" },
-        ],
-        () => String(state.ui_settings.preview_quality || "balanced"),
-        (v) => {
-          const q = String(v || "balanced");
-          state.ui_settings.preview_quality = (q === "draft" || q === "high") ? q : "balanced";
-        },
-      );
-      resetUi.onclick = () => {
-        state.ui_settings.invert_view_x = false;
-        state.ui_settings.invert_view_y = false;
-        state.ui_settings.preview_quality = "balanced";
-        setSegmentValue(segX, false);
-        setSegmentValue(segY, false);
-        refreshQuality();
-        persistUiSettings();
-        node.setDirtyCanvas(true, true);
-        requestDraw();
-      };
-      inspector.appendChild(uiDetails);
-    }
-
-    const footer = document.createElement("div");
-    footer.className = "pano-side-footer";
-    footer.innerHTML = `
-      <button class="pano-btn" data-action="cancel-close">Cancel</button>
-      <button class="pano-btn pano-btn-primary" data-action="save-close">Save</button>
-    `;
-    footer.querySelector("[data-action='cancel-close']").onclick = () => closeEditor();
-    footer.querySelector("[data-action='save-close']").onclick = () => {
-      apply();
-      closeEditor();
-    };
-    side.appendChild(footer);
-    installTooltipHandlers(inspector);
   }
 
   function isImageFile(file) {
@@ -7212,31 +6657,13 @@ async function showEditor(node, type, options = {}) {
 
   function showCanvasConfirm(title, text, confirmLabel = "Clear") {
     return new Promise((resolve) => {
-      const layer = document.createElement("div");
-      layer.className = "pano-canvas-confirm";
-      layer.innerHTML = `
-        <div class="pano-canvas-confirm-card" role="dialog" aria-modal="true" aria-label="${title}">
-          <div class="pano-canvas-confirm-title">${title}</div>
-          <div class="pano-canvas-confirm-text">${text}</div>
-          <div class="pano-canvas-confirm-actions">
-            <button class="pano-btn" data-action="cancel">Cancel</button>
-            <button class="pano-btn pano-btn-primary" data-action="confirm">${confirmLabel}</button>
-          </div>
-        </div>
-      `;
-      const close = (ok) => {
-        layer.remove();
-        resolve(!!ok);
+      uiState.confirmDialog = {
+        visible: true,
+        title: String(title || ""),
+        text: String(text || ""),
+        confirmLabel: String(confirmLabel || "Confirm"),
+        resolve,
       };
-      layer.addEventListener("pointerdown", (ev) => {
-        if (ev.target === layer) close(false);
-      });
-      const cancelBtn = layer.querySelector("[data-action='cancel']");
-      const confirmBtn = layer.querySelector("[data-action='confirm']");
-      cancelBtn.onclick = () => close(false);
-      confirmBtn.onclick = () => close(true);
-      stageWrap.appendChild(layer);
-      confirmBtn.focus();
     });
   }
 
@@ -8622,193 +8049,69 @@ async function showEditor(node, type, options = {}) {
     const selected = getSelected();
     const selectedItems = getSelectedItems();
     if ((!selected && selectedItems.length === 0) || editor.interaction) {
-      selectionMenu.style.display = "none";
-      return;
-    }
-    if (selectedItems.length > 1) {
-      const menuMode = "multi";
-      const allLocked = areAllSelectedItemsLocked(selectedItems);
-      if (editor.menuMode !== menuMode) {
-        selectionMenu.innerHTML = `
-          <button class="pano-btn pano-btn-icon" data-action="bring-front" aria-label="Bring to Front" data-tip="Bring to front">${ICON.bring_front}</button>
-          <button class="pano-btn pano-btn-icon" data-action="send-back" aria-label="Send to Back" data-tip="Send to back">${ICON.send_back}</button>
-          <button class="pano-btn pano-btn-icon" data-action="toggle-lock" aria-label="${allLocked ? "Unlock" : "Lock"}" data-tip="${allLocked ? "Unlock" : "Lock"}">${allLocked ? ICON.lock_open : ICON.lock_closed}</button>
-          <button class="pano-btn pano-btn-icon" data-action="delete" aria-label="Delete" data-tip="Delete">${ICON.delete}</button>
-        `;
-        editor.menuMode = menuMode;
-        editor.menuSize.measured = false;
-        installTooltipHandlers(selectionMenu);
-      } else {
-        const lockBtn = selectionMenu.querySelector("[data-action='toggle-lock']");
-        if (lockBtn) {
-          lockBtn.innerHTML = allLocked ? ICON.lock_open : ICON.lock_closed;
-          lockBtn.setAttribute("aria-label", allLocked ? "Unlock" : "Lock");
-          lockBtn.setAttribute("data-tip", allLocked ? "Unlock" : "Lock");
-        }
-      }
-      const multiGeom = getMultiSelectionGeom(selectedItems);
-      if (!multiGeom?.visible) {
-        selectionMenu.style.display = "none";
-        return;
-      }
-      const xs = multiGeom.corners.map((p) => p.x);
-      const ys = multiGeom.corners.map((p) => p.y);
-      const minX = Math.min(...xs);
-      const maxX = Math.max(...xs);
-      const maxY = Math.max(...ys);
-      const prevDisplay = selectionMenu.style.display;
-      const prevVisibility = selectionMenu.style.visibility;
-      selectionMenu.style.display = "flex";
-      selectionMenu.style.visibility = "hidden";
-      const rect = selectionMenu.getBoundingClientRect();
-      const measuredW = Math.round(Number(rect?.width || 0)) || selectionMenu.offsetWidth || editor.menuSize.w || 220;
-      const measuredH = Math.round(Number(rect?.height || 0)) || selectionMenu.offsetHeight || editor.menuSize.h || 40;
-      editor.menuSize.w = Number.isFinite(measuredW) && measuredW > 0 ? measuredW : 220;
-      editor.menuSize.h = Number.isFinite(measuredH) && measuredH > 0 ? measuredH : 40;
-      selectionMenu.style.display = prevDisplay;
-      selectionMenu.style.visibility = prevVisibility;
-      editor.menuSize.measured = true;
-      const menuW = editor.menuSize.w;
-      const menuH = editor.menuSize.h;
-      const pad = 14;
-      selectionMenu.style.display = "flex";
-      let x = (minX + maxX) * 0.5 - menuW * 0.5;
-      let y = maxY + 18;
-      x = clamp(x, pad, canvas.width - menuW - pad);
-      if (y + menuH > canvas.height - pad) {
-        selectionMenu.style.display = "none";
-        return;
-      }
-      selectionMenu.style.left = `${x}px`;
-      selectionMenu.style.top = `${y}px`;
+      uiState.selectionMenu = { visible: false, left: 0, top: 0, items: [] };
       return;
     }
     const selectedKind = getSelectedKind();
-    const selectedLocked = isItemLocked(selected);
-    const menuMode = selectedKind === "stroke"
-      ? "stroke:paint"
-      : (type === "stickers" || selectedKind === "image")
-      ? `stickers:${isExternalSticker(selected) ? "external" : "normal"}`
-      : `cutout:${editor.cutoutAspectOpen ? "open" : "closed"}`;
-    if (editor.menuMode !== menuMode) {
-      if (selectedKind === "stroke") {
-        selectionMenu.innerHTML = `
-          <button class="pano-btn pano-btn-icon" data-action="bring-front" aria-label="Bring to Front" data-tip="Bring to front">${ICON.bring_front}</button>
-          <button class="pano-btn pano-btn-icon" data-action="send-back" aria-label="Send to Back" data-tip="Send to back">${ICON.send_back}</button>
-          <button class="pano-btn pano-btn-icon" data-action="toggle-lock" aria-label="${selectedLocked ? "Unlock" : "Lock"}" data-tip="${selectedLocked ? "Unlock" : "Lock"}">${selectedLocked ? ICON.lock_open : ICON.lock_closed}</button>
-          <button class="pano-btn pano-btn-icon" data-action="delete" aria-label="Delete" data-tip="Delete">${ICON.delete}</button>
-        `;
-      } else if (type === "stickers" || selectedKind === "image") {
-        selectionMenu.innerHTML = `
-          <button class="pano-btn pano-btn-icon" data-action="bring-front" aria-label="Bring to Front" data-tip="Bring to front">${ICON.bring_front}</button>
-          <button class="pano-btn pano-btn-icon" data-action="send-back" aria-label="Send to Back" data-tip="Send to back">${ICON.send_back}</button>
-          ${isExternalSticker(selected) ? "" : `<button class="pano-btn pano-btn-icon" data-action="duplicate" aria-label="Duplicate" data-tip="Duplicate">${ICON.duplicate}</button><button class="pano-btn pano-btn-icon" data-action="replace-image" aria-label="Replace Image" data-tip="Replace image">${ICON.replace_image}</button>`}
-          ${isExternalSticker(selected) ? `<button class="pano-btn pano-btn-icon" data-action="back-initial" aria-label="Back to Initial" data-tip="Back to initial position">${ICON.back_initial}</button>` : ""}
-          <button class="pano-btn pano-btn-icon" data-action="toggle-lock" aria-label="${selectedLocked ? "Unlock" : "Lock"}" data-tip="${selectedLocked ? "Unlock" : "Lock"}">${selectedLocked ? ICON.lock_open : ICON.lock_closed}</button>
-          ${isExternalSticker(selected)
-            ? `<button class="pano-btn pano-btn-icon" data-action="toggle-visible" aria-label="Hide" data-tip="Hide input image">${ICON.eye_dashed}</button>`
-            : `<button class="pano-btn pano-btn-icon" data-action="delete" aria-label="Delete" data-tip="Delete">${ICON.delete}</button>`}
-        `;
-      } else {
-        const activeAspect = getCutoutAspectLabel(selected);
-        selectionMenu.innerHTML = `
-          <div class="pano-cutout-menu">
-            <button class="pano-btn pano-btn-icon" data-action="aspect" aria-label="Aspect Ratio" data-tip="Aspect ratio">${ICON.aspect}</button>
-            <div class="pano-aspect-popover${editor.cutoutAspectOpen ? " open" : ""}" role="dialog" aria-label="Aspect Ratio">
-              <button class="pano-btn pano-aspect-choice${activeAspect === "1:1" ? " active" : ""}" data-action="aspect-set" data-aspect="1:1">1:1</button>
-              <button class="pano-btn pano-aspect-choice${activeAspect === "4:3" ? " active" : ""}" data-action="aspect-set" data-aspect="4:3">4:3</button>
-              <button class="pano-btn pano-aspect-choice${activeAspect === "3:2" ? " active" : ""}" data-action="aspect-set" data-aspect="3:2">3:2</button>
-              <button class="pano-btn pano-aspect-choice${activeAspect === "16:9" ? " active" : ""}" data-action="aspect-set" data-aspect="16:9">16:9</button>
-            </div>
-          </div>
-          <button class="pano-btn pano-btn-icon" data-action="rotate-90" aria-label="Rotate 90°" data-tip="Rotate 90°">${ICON.rotate_90}</button>
-          <button class="pano-btn pano-btn-icon" data-action="toggle-lock" aria-label="${selectedLocked ? "Unlock" : "Lock"}" data-tip="${selectedLocked ? "Unlock" : "Lock"}">${selectedLocked ? ICON.lock_open : ICON.lock_closed}</button>
-          <button class="pano-btn pano-btn-icon" data-action="delete" aria-label="Delete" data-tip="Delete">${ICON.delete}</button>
-        `;
-      }
-      editor.menuMode = menuMode;
-      editor.menuSize.measured = false;
-      installTooltipHandlers(selectionMenu);
-    }
-    if ((type === "stickers" || selectedKind === "image") && isExternalSticker(selected)) {
-      const backBtn = selectionMenu.querySelector("[data-action='back-initial']");
-      if (backBtn) {
-        const enabled = canRestoreSelectedToInitial();
-        backBtn.disabled = !enabled;
-        backBtn.setAttribute("aria-disabled", enabled ? "false" : "true");
-        backBtn.setAttribute("data-tip", enabled ? "Back to initial position" : "Already at initial position");
-      }
-      const toggleBtn = selectionMenu.querySelector("[data-action='toggle-visible']");
-      if (toggleBtn) {
-        const hidden = isStickerHidden(selected);
-        toggleBtn.innerHTML = hidden ? ICON.eye : ICON.eye_dashed;
-        toggleBtn.setAttribute("aria-label", hidden ? "Show" : "Hide");
-        toggleBtn.setAttribute("data-tip", hidden ? "Show input image" : "Hide input image");
-      }
-    }
-    const lockBtn = selectionMenu.querySelector("[data-action='toggle-lock']");
-    if (lockBtn) {
-      lockBtn.innerHTML = selectedLocked ? ICON.lock_open : ICON.lock_closed;
-      lockBtn.setAttribute("aria-label", selectedLocked ? "Unlock" : "Lock");
-      lockBtn.setAttribute("data-tip", selectedLocked ? "Unlock" : "Lock");
-    }
-    const geom = objectGeom(selected);
-    if (!geom?.visible) {
-      selectionMenu.style.display = "none";
+    const model = buildSelectionMenuModel({
+      type,
+      selected,
+      selectedItems,
+      selectedKind,
+      geom: selectedItems.length > 1 ? getMultiSelectionGeom(selectedItems) : objectGeom(selected),
+      allLocked: areAllSelectedItemsLocked(selectedItems),
+      selectedLocked: isItemLocked(selected),
+      activeAspect: getCutoutAspectLabel(selected),
+      cutoutAspectOpen: editor.cutoutAspectOpen,
+      isExternalSticker,
+      isStickerHidden,
+      canRestoreSelectedToInitial,
+      iconSet: ICON,
+    });
+
+    if (!model.visible) {
+      uiState.selectionMenu = { visible: false, left: 0, top: 0, items: [] };
       return;
     }
-    const poly = geom.corners;
-    const xs = poly.map((p) => p.x);
-    const ys = poly.map((p) => p.y);
-    const minX = Math.min(...xs);
-    const maxX = Math.max(...xs);
-    const maxY = Math.max(...ys);
-    const prevDisplay = selectionMenu.style.display;
-    const prevVisibility = selectionMenu.style.visibility;
-    selectionMenu.style.display = "flex";
-    selectionMenu.style.visibility = "hidden";
-    const rect = selectionMenu.getBoundingClientRect();
-    const measuredW = Math.round(Number(rect?.width || 0)) || selectionMenu.offsetWidth || editor.menuSize.w || 220;
-    const measuredH = Math.round(Number(rect?.height || 0)) || selectionMenu.offsetHeight || editor.menuSize.h || 40;
-    editor.menuSize.w = Number.isFinite(measuredW) && measuredW > 0 ? measuredW : 220;
-    editor.menuSize.h = Number.isFinite(measuredH) && measuredH > 0 ? measuredH : 40;
-    selectionMenu.style.display = prevDisplay;
-    selectionMenu.style.visibility = prevVisibility;
-    editor.menuSize.measured = true;
-    const menuW = editor.menuSize.w;
-    const menuH = editor.menuSize.h;
-    const pad = 14;
-    selectionMenu.style.display = "flex";
-    let x = (minX + maxX) * 0.5 - menuW * 0.5;
-    let y = maxY + 18;
-    if (!Number.isFinite(x) || !Number.isFinite(y)) {
-      selectionMenu.style.display = "none";
-      return;
-    }
-    x = clamp(x, pad, canvas.width - menuW - pad);
-    if (y + menuH > canvas.height - pad) {
-      selectionMenu.style.display = "none";
-      return;
-    }
-    selectionMenu.style.left = `${x}px`;
-    selectionMenu.style.top = `${y}px`;
+    uiState.selectionMenu = {
+      visible: true,
+      left: model.left,
+      top: model.top,
+      items: model.items,
+    };
+    requestAnimationFrame(() => {
+      if (!selectionMenu || uiState.selectionMenu.visible !== true) return;
+      const rect = selectionMenu.getBoundingClientRect();
+      const menuW = Math.round(Number(rect?.width || 0)) || 220;
+      const menuH = Math.round(Number(rect?.height || 0)) || 40;
+      const pad = 14;
+      let x = clamp((Number(model.anchor?.minX || 0) + Number(model.anchor?.maxX || 0)) * 0.5 - menuW * 0.5, pad, canvas.width - menuW - pad);
+      let y = Number(model.anchor?.maxY || 0) + 18;
+      if (!Number.isFinite(x) || !Number.isFinite(y) || y + menuH > canvas.height - pad) {
+        uiState.selectionMenu.visible = false;
+        return;
+      }
+      uiState.selectionMenu.left = x;
+      uiState.selectionMenu.top = y;
+    });
   }
 
   function hideTooltip() {
-    if (!tooltipEl) return;
     if (tooltip.timer) {
       clearTimeout(tooltip.timer);
       tooltip.timer = 0;
     }
     tooltip.target = null;
-    tooltipEl.classList.remove("show", "pano-tooltip-footer", "pano-tooltip-tool-rail");
+    uiState.tooltip.visible = false;
+    uiState.tooltip.text = "";
+    uiState.tooltip.variant = "";
   }
 
   function showTooltipFor(el) {
     if (!tooltipEl || !el || !el.isConnected) return;
     const text = String(el.getAttribute("data-tip") || "").trim();
     if (!text) return;
-    tooltipEl.textContent = text;
+    uiState.tooltip.text = text;
     const hostRect = stageWrap.getBoundingClientRect();
     const rect = el.getBoundingClientRect();
     const pad = 8;
@@ -8816,17 +8119,17 @@ async function showEditor(node, type, options = {}) {
     const mh = tooltipEl.offsetHeight || 24;
     const inToolRail = !!el.closest(".pano-floating-left");
     const inFooter = !!el.closest(".pano-paint-footer") || !!el.closest(".pano-paint-color-float");
-    tooltipEl.classList.remove("pano-tooltip-footer", "pano-tooltip-tool-rail");
+    let variant = "";
     let x = rect.left - hostRect.left + rect.width * 0.5 - mw * 0.5;
     let y = rect.top - hostRect.top - mh - 8;
     if (inToolRail) {
-      tooltipEl.classList.add("pano-tooltip-tool-rail");
+      variant = "tool-rail";
       x = rect.right - hostRect.left + 10;
       y = rect.top - hostRect.top + rect.height * 0.5 - mh * 0.5;
       x = clamp(x, pad, Math.max(pad, hostRect.width - mw - pad));
       y = clamp(y, pad, Math.max(pad, hostRect.height - mh - pad));
     } else if (inFooter) {
-      tooltipEl.classList.add("pano-tooltip-footer");
+      variant = "footer";
       const footerHost = el.closest(".pano-paint-footer");
       const footerRect = footerHost ? footerHost.getBoundingClientRect() : rect;
       x = footerRect.left - hostRect.left + footerRect.width * 0.5 - mw * 0.5;
@@ -8836,28 +8139,10 @@ async function showEditor(node, type, options = {}) {
     }
     x = clamp(x, pad, Math.max(pad, hostRect.width - mw - pad));
     y = Math.max(pad, y);
-    tooltipEl.style.left = `${x}px`;
-    tooltipEl.style.top = `${y}px`;
-    tooltipEl.classList.add("show");
-  }
-
-  function installTooltipHandlers(scope) {
-    scope.querySelectorAll("[data-tip]").forEach((el) => {
-      if (el.__panoTipBound) return;
-      el.__panoTipBound = true;
-      el.addEventListener("pointerenter", () => {
-        tooltip.target = el;
-        if (tooltip.timer) clearTimeout(tooltip.timer);
-        tooltip.timer = window.setTimeout(() => {
-          if (tooltip.target === el) showTooltipFor(el);
-        }, 220);
-      });
-      el.addEventListener("pointerleave", () => {
-        if (tooltip.target === el) tooltip.target = null;
-        hideTooltip();
-      });
-      el.addEventListener("pointerdown", hideTooltip);
-    });
+    uiState.tooltip.left = x;
+    uiState.tooltip.top = y;
+    uiState.tooltip.variant = variant;
+    uiState.tooltip.visible = true;
   }
 
   const viewController = createPanoInteractionController({
@@ -9677,10 +8962,190 @@ async function showEditor(node, type, options = {}) {
   window.addEventListener("dragleave", onWindowDragLeave, true);
   window.addEventListener("drop", onWindowDrop, true);
 
-  viewBtns.forEach((btn) => {
-    btn.onclick = () => {
-      if (btn.disabled) return;
-      editor.mode = btn.dataset.view;
+  function syncUndoRedoButtons() {
+    const { canUndo, canRedo } = getHistoryCapabilities();
+    patchUiButton(uiState.toolButtons, "value", "undo", { disabled: !canUndo });
+    patchUiButton(uiState.toolButtons, "value", "redo", { disabled: !canRedo });
+  };
+  const applySidePanelParam = (key, rawValue, commit = false) => {
+    const selected = getSelected();
+    const selectedKind = getSelectedKind();
+    if (!selected || selectedKind === "stroke") return;
+    const param = (uiState.sidePanel?.params || []).find((item) => item.key === key);
+    if (!param || param.enabled === false) return;
+    let out = Number(rawValue);
+    if (Number.isNaN(out)) out = 0;
+    out = clamp(out, Number(param.min), Number(param.max));
+    if (key === "yaw_deg") out = wrapYaw(out);
+    selected[key] = out;
+    if (type === "cutout" && (key === "hFOV_deg" || key === "vFOV_deg")) {
+      selected.aspect_id = deriveCutoutAspectLabelFromFov(selected);
+    }
+    updateSidePanel();
+    requestDraw();
+    if (commit) pushHistory();
+  };
+  side?.addEventListener("click", async (ev) => {
+    const target = ev.target.closest("[data-action]");
+    if (!target) return;
+    const action = String(target.getAttribute("data-action") || "");
+    if (action === "coverage-set") {
+      const nextCoverage = normalizeCoverageValue(target.getAttribute("data-coverage"));
+      if (nextCoverage === normalizeCoverageValue(state.coverage)) return;
+      state.coverage = nextCoverage;
+      editor.coverage = nextCoverage;
+      if (coverageWidget) {
+        coverageWidget.value = String(nextCoverage);
+        coverageWidget.callback?.(coverageWidget.value);
+      }
+      if (previewMode) runtime.backgroundDirty = true;
+      else {
+        commitAndRefreshNode();
+        node.setDirtyCanvas?.(true, true);
+      }
+      updateSidePanel();
+      updateSelectionMenu();
+      requestDraw();
+      return;
+    }
+    if (action === "toggle-selection-picker") {
+      if (uiState.sidePanel?.selectionPicker?.disabled) return;
+      uiState.sidePanel.selectionPicker.open = !uiState.sidePanel.selectionPicker.open;
+      return;
+    }
+    if (action === "select-picker-item") {
+      uiState.sidePanel.selectionPicker.open = false;
+      const selectedId = String(target.getAttribute("data-selection-id") || "");
+      let nextItem = null;
+      if (selectedId) {
+        if (type === "stickers") nextItem = getList().find((item) => String(item?.id || "") === selectedId) || null;
+        else nextItem = getCutoutInspectorItems().find((entry) => String(entry?.item?.id || "") === selectedId)?.item || null;
+      }
+      setSelectedItem(nextItem || null);
+      if (nextItem && !isStrokeGroupItem(nextItem)) {
+        startViewTween(
+          wrapYaw(Number(nextItem.yaw_deg || 0)),
+          clamp(Number(nextItem.pitch_deg || 0), -89.9, 89.9),
+          editor.viewFov,
+        );
+      }
+      updateSidePanel();
+      updateSelectionMenu();
+      requestDraw();
+      return;
+    }
+    if (action === "copy-state-inline") {
+      const selected = getSelected();
+      const selectedKind = getSelectedKind();
+      if (!selected || selectedKind === "stroke" || getSelectedItems().length > 1) return;
+      const text = JSON.stringify(type === "cutout" && selectedKind !== "image"
+        ? buildCanonicalCutoutStickerState(selected)
+        : buildCanonicalSelectedStickerState(selected));
+      try {
+        await navigator.clipboard.writeText(text);
+        if (uiState.sidePanel?.copyStateButton) {
+          uiState.sidePanel.copyStateButton.label = "Copied";
+          window.setTimeout(() => {
+            if (uiState.sidePanel?.copyStateButton) uiState.sidePanel.copyStateButton.label = "Copy State";
+          }, 900);
+        }
+      } catch {
+        // ignore clipboard failures
+      }
+      return;
+    }
+    if (action === "toggle-visibility") {
+      const key = String(target.getAttribute("data-visibility") || "");
+      if (key === "panorama") editor.showPanorama = !editor.showPanorama;
+      else if (key === "objects") editor.showObjects = !editor.showObjects;
+      else if (key === "mask") editor.showMask = !editor.showMask;
+      updateSidePanel();
+      requestDraw();
+      return;
+    }
+    if (action === "set-invert-x") {
+      state.ui_settings.invert_view_x = target.getAttribute("data-value") === "1";
+      persistUiSettings();
+      updateSidePanel();
+      node.setDirtyCanvas?.(true, true);
+      requestDraw();
+      return;
+    }
+    if (action === "set-invert-y") {
+      state.ui_settings.invert_view_y = target.getAttribute("data-value") === "1";
+      persistUiSettings();
+      updateSidePanel();
+      node.setDirtyCanvas?.(true, true);
+      requestDraw();
+      return;
+    }
+    if (action === "toggle-quality-picker") {
+      if (uiState.sidePanel?.uiSettings) uiState.sidePanel.uiSettings.qualityOpen = !uiState.sidePanel.uiSettings.qualityOpen;
+      return;
+    }
+    if (action === "set-quality") {
+      const q = String(target.getAttribute("data-quality") || "balanced");
+      state.ui_settings.preview_quality = (q === "draft" || q === "high") ? q : "balanced";
+      persistUiSettings();
+      updateSidePanel();
+      node.setDirtyCanvas?.(true, true);
+      requestDraw();
+      return;
+    }
+    if (action === "ui-reset-defaults") {
+      state.ui_settings.invert_view_x = false;
+      state.ui_settings.invert_view_y = false;
+      state.ui_settings.preview_quality = "balanced";
+      persistUiSettings();
+      updateSidePanel();
+      node.setDirtyCanvas?.(true, true);
+      requestDraw();
+      return;
+    }
+    if (action === "close-preview") {
+      closeEditor();
+      return;
+    }
+    if (action === "cancel-close") {
+      closeEditor();
+      return;
+    }
+    if (action === "save-close") {
+      apply();
+      closeEditor();
+    }
+  });
+  side?.addEventListener("input", (ev) => {
+    const target = ev.target.closest("[data-action='param-input']");
+    if (!target) return;
+    applySidePanelParam(String(target.getAttribute("data-param-key") || ""), target.value, false);
+  });
+  side?.addEventListener("change", (ev) => {
+    const target = ev.target.closest("[data-action='param-input']");
+    if (!target) return;
+    applySidePanelParam(String(target.getAttribute("data-param-key") || ""), target.value, true);
+  });
+  const syncGridToggleButton = () => {
+    const visible = !!editor.showGrid;
+    patchUiButton(uiState.floatingButtons, "action", "toggle-grid", {
+      icon: visible ? ICON.eye : ICON.eye_dashed,
+      pressed: visible ? "true" : "false",
+      label: visible ? "Hide Grid" : "Show Grid",
+      tip: visible ? "Hide grid" : "Show grid",
+    });
+  };
+  syncGridToggleButton();
+  root.addEventListener("click", (ev) => {
+    if (ev.target?.matches?.("[data-confirm-overlay]")) {
+      const resolver = uiState.confirmDialog?.resolve;
+      uiState.confirmDialog = { visible: false, title: "", text: "", confirmLabel: "Confirm", resolve: null };
+      resolver?.(false);
+      return;
+    }
+    const viewTarget = ev.target.closest("[data-view]");
+    if (viewTarget) {
+      if (viewTarget.disabled) return;
+      editor.mode = String(viewTarget.getAttribute("data-view") || "pano");
       if (type === "cutout" && editor.mode === "frame" && getSelected() && isShotItem(getSelected())) {
         clearSelection({ preservePanelValues: true });
         updateSidePanel();
@@ -9689,174 +9154,231 @@ async function showEditor(node, type, options = {}) {
       forceCursorTool();
       syncViewToggleState();
       requestDraw();
-    };
-  });
-
-  function syncUndoRedoButtons() {
-    const { canUndo, canRedo } = getHistoryCapabilities();
-    root.querySelectorAll("[data-action='undo'], [data-tool-ui-action='undo']").forEach((btn) => {
-      btn.disabled = !canUndo;
-    });
-    root.querySelectorAll("[data-action='redo'], [data-tool-ui-action='redo']").forEach((btn) => {
-      btn.disabled = !canRedo;
-    });
-  }
-
-  const undoBtn = root.querySelector("[data-action='undo']");
-  if (undoBtn) {
-    undoBtn.onclick = () => {
-      if (readOnly || undoBtn.disabled) return;
-      restoreHistory(-1);
-    };
-  }
-  const redoBtn = root.querySelector("[data-action='redo']");
-  if (redoBtn) {
-    redoBtn.onclick = () => {
-      if (readOnly || redoBtn.disabled) return;
-      restoreHistory(1);
-    };
-  }
-  const addBtn = root.querySelector("[data-action='add']");
-  if (addBtn) {
-    addBtn.onclick = () => {
-      if (readOnly) return;
-      ((type === "stickers" || type === "cutout") ? addImageSticker() : addCutoutFrame());
-    };
-  }
-  const clearBtn = root.querySelector("[data-action='clear']");
-  if (clearBtn) {
-    clearBtn.onclick = () => {
-      if (readOnly) return;
-      clearAll();
-    };
-  }
-  const applyBtn = root.querySelector("[data-action='save']");
-  if (applyBtn) applyBtn.onclick = () => {
-    if (readOnly) return;
-    apply();
-  };
-  root.querySelector("[data-action='reset-view']").onclick = () => {
-    startViewTween(0, 0, 100, 180, 680);
-  };
-  const gridBtn = root.querySelector("[data-action='toggle-grid']");
-  const syncGridToggleButton = () => {
-    if (!gridBtn) return;
-    const visible = !!editor.showGrid;
-    gridBtn.innerHTML = visible ? ICON.eye : ICON.eye_dashed;
-    gridBtn.setAttribute("aria-pressed", visible ? "true" : "false");
-    gridBtn.setAttribute("aria-label", visible ? "Hide Grid" : "Show Grid");
-    gridBtn.setAttribute("data-tip", visible ? "Hide grid" : "Show grid");
-  };
-  if (gridBtn) {
-    syncGridToggleButton();
-    gridBtn.onclick = () => {
-      editor.showGrid = !editor.showGrid;
-      setNodeGridVisibility(node?.id, editor.showGrid);
-      syncGridToggleButton();
-      requestDraw();
-    };
-  }
-  if (toolRail) {
-    toolRail.querySelectorAll("[data-tool-mode]").forEach((btn) => {
-      btn.onclick = () => {
-        if (readOnly) return;
-        const newTool = String(btn.getAttribute("data-tool-mode") || "cursor");
+      return;
+    }
+    const actionTarget = ev.target.closest("[data-action], [data-tool-ui-action], [data-tool-mode], [data-paint-tool], [data-mask-tool], [data-paint-layer-clear-current], [data-paint-color-swatch], [data-paint-color-custom]");
+    if (actionTarget && !readOnly) {
+      if (actionTarget.matches("[data-tool-mode]")) {
+        const newTool = String(actionTarget.getAttribute("data-tool-mode") || "cursor");
         editor.primaryTool = newTool;
-        if (newTool === "paint" || newTool === "mask") {
-          clearSelection({ preservePanelValues: true });
-        }
+        if (newTool === "paint" || newTool === "mask") clearSelection({ preservePanelValues: true });
         syncPaintUi();
         updateSidePanel();
         updateSelectionMenu();
         requestDraw();
-      };
-    });
-    toolRail.querySelectorAll("[data-tool-ui-action]").forEach((btn) => {
-      btn.onclick = () => {
-        if (readOnly) return;
-        const action = String(btn.getAttribute("data-tool-ui-action") || "");
-        if ((action === "undo" || action === "redo") && btn.disabled) return;
+        return;
+      }
+      if (actionTarget.matches("[data-tool-ui-action]")) {
+        const action = String(actionTarget.getAttribute("data-tool-ui-action") || "");
+        if ((action === "undo" || action === "redo") && actionTarget.disabled) return;
         if (action === "undo") restoreHistory(-1);
         else if (action === "redo") restoreHistory(1);
         else if (action === "clear") clearAll();
-        else if (action === "add") addImageSticker();
-        else if (action === "add-image") addImageSticker();
-        else if (action === "add-or-look") return;
-      };
-    });
-  }
-  root.querySelectorAll("[data-paint-tool]").forEach((btn) => {
-    btn.onclick = () => {
-      editor.primaryTool = "paint";
-      const tool = String(btn.getAttribute("data-paint-tool") || "pen");
-      editor.paintTool = tool;
-      clearSelection({ preservePanelValues: true });
-      if (BRUSH_PRESETS[tool]) editor.activeBrushPresetId = tool;
-      syncPaintUi();
-      updateSidePanel();
-      updateSelectionMenu();
-      requestDraw();
-    };
-  });
-  root.querySelectorAll("[data-mask-tool]").forEach((btn) => {
-    btn.onclick = () => {
-      editor.primaryTool = "mask";
-      editor.maskTool = String(btn.getAttribute("data-mask-tool") || "pen");
-      clearSelection({ preservePanelValues: true });
-      syncPaintUi();
-      updateSidePanel();
-      updateSelectionMenu();
-      requestDraw();
-    };
-  });
-  paintLayerClearCurrentBtns.forEach((btn) => {
-    btn.onclick = () => {
-      const layerKind = String(btn.getAttribute("data-paint-layer-clear-current") || "paint") === "mask" ? "mask" : "paint";
-      clearPaintingLayer(layerKind);
-    };
-  });
-  paintSizeSliders.forEach((slider) => {
-    slider.oninput = () => {
-      if (slider.disabled) return;
-      const v = Math.max(1, Math.min(120, Math.round(Number(slider.value))));
-      const sizePresetId = getBrushPresetIdForTool(editor.primaryTool === "paint" ? editor.paintTool : editor.maskTool);
-      editor.brushSizes[sizePresetId] = v;
-      const pct = ((v - 1) / 119) * 100;
-      paintSizeSliders.forEach((otherSlider) => {
-        otherSlider.value = String(v);
-        otherSlider.style.setProperty("--v", `${clamp(pct, 0, 100)}%`);
-      });
-      paintSizeValues.forEach((valueEl) => {
-        valueEl.textContent = String(v);
-      });
-      showPaintSizePreview();
-    };
-    slider.onchange = () => hidePaintSizePreview();
-    slider.addEventListener("pointerup", hidePaintSizePreview);
-    slider.addEventListener("pointercancel", hidePaintSizePreview);
-    slider.addEventListener("blur", hidePaintSizePreview);
-  });
-  if (paintColorRow) {
-    paintColorRow.querySelectorAll("[data-paint-color-swatch]").forEach((btn) => {
-      btn.onclick = () => {
-        const swatch = PAINT_COLOR_SWATCHES.find((item) => item.id === btn.getAttribute("data-paint-color-swatch"));
+        else if (action === "add" || action === "add-image") addImageSticker();
+        return;
+      }
+      if (actionTarget.matches("[data-paint-tool]")) {
+        editor.primaryTool = "paint";
+        const tool = String(actionTarget.getAttribute("data-paint-tool") || "pen");
+        editor.paintTool = tool;
+        clearSelection({ preservePanelValues: true });
+        if (BRUSH_PRESETS[tool]) editor.activeBrushPresetId = tool;
+        syncPaintUi();
+        updateSidePanel();
+        updateSelectionMenu();
+        requestDraw();
+        return;
+      }
+      if (actionTarget.matches("[data-mask-tool]")) {
+        editor.primaryTool = "mask";
+        editor.maskTool = String(actionTarget.getAttribute("data-mask-tool") || "pen");
+        clearSelection({ preservePanelValues: true });
+        syncPaintUi();
+        updateSidePanel();
+        updateSelectionMenu();
+        requestDraw();
+        return;
+      }
+      if (actionTarget.matches("[data-paint-layer-clear-current]")) {
+        const layerKind = String(actionTarget.getAttribute("data-paint-layer-clear-current") || "paint") === "mask" ? "mask" : "paint";
+        clearPaintingLayer(layerKind);
+        return;
+      }
+      if (actionTarget.matches("[data-paint-color-swatch]")) {
+        const swatch = PAINT_COLOR_SWATCHES.find((item) => item.id === actionTarget.getAttribute("data-paint-color-swatch"));
         if (!swatch) return;
         editor.paintColor = cloneColor(swatch.color);
         closePaintColorPop(true);
         syncPaintUi();
-      };
-    });
-    const customBtn = paintColorRow.querySelector("[data-paint-color-custom]");
-    if (customBtn) {
-      customBtn.onclick = (ev) => {
+        return;
+      }
+      if (actionTarget.matches("[data-paint-color-custom]")) {
         ev.preventDefault();
         ev.stopPropagation();
         if (paintColorPop && !paintColorPop.hidden) closePaintColorPop(true);
         else openPaintColorPop();
         syncPaintUi();
-      };
+        return;
+      }
     }
-  }
+    const action = String(actionTarget?.getAttribute?.("data-action") || "");
+    if (!readOnly) {
+      if (action === "aspect") {
+        editor.cutoutAspectOpen = !editor.cutoutAspectOpen;
+        editor.menuSize.measured = false;
+        updateSelectionMenu();
+        requestDraw();
+        return;
+      }
+      if (action === "aspect-set") {
+        const selected = getSelected();
+        if (!selected) return;
+        const aspect = String(actionTarget.getAttribute("data-aspect") || "1:1");
+        applyCutoutAspect(selected, aspect);
+        editor.cutoutAspectOpen = false;
+        editor.menuSize.measured = false;
+        syncSidePanelControls();
+        pushHistory();
+        commitAndRefreshNode();
+        updateSelectionMenu();
+        requestDraw();
+        return;
+      }
+      if (action === "rotate-90") {
+        const selected = getSelected();
+        if (!selected) return;
+        rotateCutoutAspect90(selected);
+        editor.cutoutAspectOpen = false;
+        editor.menuSize.measured = false;
+        syncSidePanelControls();
+        pushHistory();
+        commitAndRefreshNode();
+        updateSelectionMenu();
+        requestDraw();
+        return;
+      }
+      if (action === "bring-front") {
+        bringSelectedToFront();
+        return;
+      }
+      if (action === "send-back") {
+        sendSelectedToBack();
+        return;
+      }
+      if (action === "duplicate") {
+        duplicateSelected();
+        return;
+      }
+      if (action === "replace-image") {
+        replaceSelectedImage();
+        return;
+      }
+      if (action === "toggle-lock") {
+        toggleSelectedLock();
+        return;
+      }
+      if (action === "back-initial") {
+        restoreSelectedToInitialPose();
+        return;
+      }
+      if (action === "toggle-visible") {
+        toggleSelectedExternalStickerVisibility();
+        return;
+      }
+      if (action === "delete") {
+        deleteSelected();
+        return;
+      }
+    }
+    if (action === "reset-view") {
+      startViewTween(0, 0, 100, 180, 680);
+      return;
+    }
+    if (action === "toggle-grid") {
+      editor.showGrid = !editor.showGrid;
+      setNodeGridVisibility(node?.id, editor.showGrid);
+      syncGridToggleButton();
+      requestDraw();
+      return;
+    }
+    if (action === "toggle-fullscreen") {
+      ev.preventDefault();
+      ev.stopPropagation();
+      toggleFullscreen();
+      return;
+    }
+    if (action === "toggle-output-preview-size") {
+      ev.preventDefault();
+      ev.stopPropagation();
+      const nextExpanded = !editor.outputPreviewExpanded;
+      editor.outputPreviewExpanded = nextExpanded;
+      editor.outputPreviewAnimFrom = editor.outputPreviewAnim;
+      editor.outputPreviewAnimTo = nextExpanded ? 1 : 0;
+      editor.outputPreviewAnimStartTs = performance.now();
+      syncOutputPreviewToggleButton();
+      requestDraw();
+      return;
+    }
+    const historyBtn = ev.target.closest("[data-paint-history-index]");
+    if (!historyBtn) return;
+    const idx = Number(historyBtn.getAttribute("data-paint-history-index"));
+    const color = editor.customPaintHistory[idx];
+    if (!color) return;
+    editor.customPaintColor = cloneColor(color);
+    editor.paintColor = cloneColor(color);
+    syncPaintUi();
+  });
+  root.addEventListener("input", (ev) => {
+    const slider = ev.target.closest("[data-paint-size-slider]");
+    if (slider) {
+      if (slider.disabled) return;
+      const v = Math.max(1, Math.min(120, Math.round(Number(slider.value))));
+      const sizePresetId = getBrushPresetIdForTool(editor.primaryTool === "paint" ? editor.paintTool : editor.maskTool);
+      editor.brushSizes[sizePresetId] = v;
+      syncPaintUi();
+      showPaintSizePreview();
+      return;
+    }
+    const alphaSlider = ev.target.closest("[data-paint-alpha-slider]");
+    if (alphaSlider) {
+      const next = { ...editor.customPaintColor, a: clamp(Number(alphaSlider.value) / 100, 0, 1) };
+      editor.customPaintColor = cloneColor(next);
+      editor.paintColor = cloneColor(next);
+      syncPaintUi();
+    }
+  });
+  root.addEventListener("change", (ev) => {
+    if (ev.target.closest("[data-paint-size-slider]")) hidePaintSizePreview();
+  });
+  root.addEventListener("pointerup", (ev) => {
+    if (ev.target.closest("[data-paint-size-slider]")) hidePaintSizePreview();
+  });
+  root.addEventListener("pointercancel", (ev) => {
+    if (ev.target.closest("[data-paint-size-slider]")) hidePaintSizePreview();
+  });
+  root.addEventListener("focusout", (ev) => {
+    if (ev.target.closest("[data-paint-size-slider]")) hidePaintSizePreview();
+  });
+  root.addEventListener("pointerover", (ev) => {
+    const target = ev.target.closest("[data-tip]");
+    if (!target || !root.contains(target)) return;
+    if (tooltip.target === target) return;
+    tooltip.target = target;
+    if (tooltip.timer) clearTimeout(tooltip.timer);
+    tooltip.timer = window.setTimeout(() => {
+      if (tooltip.target === target) showTooltipFor(target);
+    }, 220);
+  });
+  root.addEventListener("pointerout", (ev) => {
+    const target = ev.target.closest("[data-tip]");
+    if (!target || tooltip.target !== target) return;
+    const nextTarget = ev.relatedTarget instanceof Element ? ev.relatedTarget.closest?.("[data-tip]") : null;
+    if (nextTarget === target) return;
+    hideTooltip();
+  });
+  root.addEventListener("pointerdown", () => {
+    hideTooltip();
+  });
   const updatePaintColorFromSv = (clientX, clientY) => {
     if (!paintColorSv) return;
     const rect = paintColorSv.getBoundingClientRect();
@@ -9909,20 +9431,21 @@ async function showEditor(node, type, options = {}) {
       bindDrag(ev, (moveEvent) => updatePaintColorFromHue(moveEvent.clientX));
     };
   }
-  if (paintAlphaSlider) {
-    paintAlphaSlider.oninput = () => {
-      const next = { ...editor.customPaintColor, a: clamp(Number(paintAlphaSlider.value) / 100, 0, 1) };
-      editor.customPaintColor = cloneColor(next);
-      editor.paintColor = cloneColor(next);
-      syncPaintUi();
-    };
-  }
+  root.addEventListener("click", (ev) => {
+    const target = ev.target.closest("[data-action='confirm-cancel'], [data-action='confirm-accept']");
+    if (!target) return;
+    const ok = target.getAttribute("data-action") === "confirm-accept";
+    const resolver = uiState.confirmDialog?.resolve;
+    uiState.confirmDialog = { visible: false, title: "", text: "", confirmLabel: "Confirm", resolve: null };
+    resolver?.(ok);
+  });
   const syncFullscreenButton = () => {
-    if (!fullscreenBtn) return;
     const active = !!editor.fullscreen;
-    fullscreenBtn.innerHTML = active ? ICON.fullscreen_close : ICON.fullscreen;
-    fullscreenBtn.setAttribute("aria-label", active ? "Exit Fullscreen" : "Fullscreen");
-    fullscreenBtn.setAttribute("data-tip", active ? "Exit fullscreen" : "Fullscreen");
+    patchUiButton(uiState.floatingButtons, "action", "toggle-fullscreen", {
+      icon: active ? ICON.fullscreen_close : ICON.fullscreen,
+      label: active ? "Exit Fullscreen" : "Fullscreen",
+      tip: active ? "Exit fullscreen" : "Fullscreen",
+    });
   };
   const setFullscreenState = (active) => {
     const on = !!active;
@@ -9962,109 +9485,14 @@ async function showEditor(node, type, options = {}) {
     }
   };
   document.addEventListener("fullscreenchange", onFullscreenChange);
-  if (fullscreenBtn) {
-    syncFullscreenButton();
-    fullscreenBtn.onclick = (ev) => {
-      ev.preventDefault();
-      ev.stopPropagation();
-      toggleFullscreen();
-    };
-  }
+  syncFullscreenButton();
   const syncOutputPreviewToggleButton = () => {
-    if (!outputPreviewToggleBtn) return;
     const expanded = !!editor.outputPreviewExpanded;
-    outputPreviewToggleBtn.innerHTML = expanded ? ICON.fullscreen_close : ICON.fullscreen;
-    outputPreviewToggleBtn.setAttribute("aria-label", expanded ? "Reduce Preview" : "Expand Preview");
-    outputPreviewToggleBtn.setAttribute("data-tip", expanded ? "Reduce preview" : "Expand preview");
-  };
-  if (outputPreviewToggleBtn) {
-    syncOutputPreviewToggleButton();
-    outputPreviewToggleBtn.onclick = (ev) => {
-      ev.preventDefault();
-      ev.stopPropagation();
-      const nextExpanded = !editor.outputPreviewExpanded;
-      editor.outputPreviewExpanded = nextExpanded;
-      editor.outputPreviewAnimFrom = editor.outputPreviewAnim;
-      editor.outputPreviewAnimTo = nextExpanded ? 1 : 0;
-      editor.outputPreviewAnimStartTs = performance.now();
-      syncOutputPreviewToggleButton();
-      requestDraw();
-    };
+    uiState.outputPreviewToggle.icon = expanded ? ICON.fullscreen_close : ICON.fullscreen;
+    uiState.outputPreviewToggle.label = expanded ? "Reduce Preview" : "Expand Preview";
+    uiState.outputPreviewToggle.tip = expanded ? "Reduce preview" : "Expand preview";
   }
-  selectionMenu.addEventListener("click", (ev) => {
-    const target = ev.target.closest("[data-action]");
-    if (!target) return;
-    const action = target.getAttribute("data-action");
-    if (readOnly) return;
-    if (action === "aspect") {
-      editor.cutoutAspectOpen = !editor.cutoutAspectOpen;
-      editor.menuSize.measured = false;
-      updateSelectionMenu();
-      requestDraw();
-      return;
-    }
-    if (action === "aspect-set") {
-      const selected = getSelected();
-      if (!selected) return;
-      const aspect = String(target.getAttribute("data-aspect") || "1:1");
-      applyCutoutAspect(selected, aspect);
-      editor.cutoutAspectOpen = false;
-      editor.menuSize.measured = false;
-      syncSidePanelControls();
-      pushHistory();
-      commitAndRefreshNode();
-      updateSelectionMenu();
-      requestDraw();
-      return;
-    }
-    if (action === "rotate-90") {
-      const selected = getSelected();
-      if (!selected) return;
-      rotateCutoutAspect90(selected);
-      editor.cutoutAspectOpen = false;
-      editor.menuSize.measured = false;
-      syncSidePanelControls();
-      pushHistory();
-      commitAndRefreshNode();
-      updateSelectionMenu();
-      requestDraw();
-      return;
-    }
-    if (action === "bring-front") {
-      bringSelectedToFront();
-      return;
-    }
-    if (action === "send-back") {
-      sendSelectedToBack();
-      return;
-    }
-    if (action === "duplicate") {
-      duplicateSelected();
-      return;
-    }
-    if (action === "replace-image") {
-      replaceSelectedImage();
-      return;
-    }
-    if (action === "toggle-lock") {
-      toggleSelectedLock();
-      return;
-    }
-    if (action === "back-initial") {
-      restoreSelectedToInitialPose();
-      return;
-    }
-    if (action === "toggle-visible") {
-      toggleSelectedExternalStickerVisibility();
-      return;
-    }
-    if (action === "delete") {
-      deleteSelected();
-      return;
-    }
-    requestDraw();
-  });
-
+  syncOutputPreviewToggleButton();
   const modalPrevOnExecuted = node.onExecuted;
   const modalPrevOnConnectionsChange = node.onConnectionsChange;
   let modalOnExecuted = null;
@@ -10199,7 +9627,6 @@ async function showEditor(node, type, options = {}) {
     if (ev.target === overlay) closeEditor();
   });
 
-  installTooltipHandlers(root);
   applyInitialCutoutFocus();
   if (!readOnly && type === "stickers") {
     reconcileExternalStickerFromInputs("open");
@@ -10208,11 +9635,6 @@ async function showEditor(node, type, options = {}) {
   pushHistory();
   syncUndoRedoButtons();
   syncPaintUi();
-  if (paintDock) {
-    requestAnimationFrame(() => {
-      paintDock.classList.add("is-ready");
-    });
-  }
   updateSidePanel();
   syncLookAtFrameButtonState();
   syncCanvasSize();

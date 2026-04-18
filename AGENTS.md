@@ -25,11 +25,17 @@ Put procedures, commands, and checklists in README/docs/ (or per-folder docs).
 - Prefer **ComfyUI V3 node schema** (`io.ComfyNode` / `io.Schema`) for any node with UI or dynamic input behavior.
 - Do not add new legacy `INPUT_TYPES` nodes unless there is a documented compatibility reason.
 
+6) **Modal UI must be Vue**
+- DOM-based modal UI such as buttons, inspectors, menus, pickers, and dialogs must be implemented as **Vue components** in `web_src/components/`.
+- Do **not** build new modal UI with `document.createElement`, `innerHTML`, `appendChild`, or ad-hoc `querySelector` trees inside `pano_editor.js` or similar bridge files.
+- Keep low-level rendering, canvas/WebGL surfaces, math, and pointer/render bridges in JS modules. The rule applies to UI structure, not the render engine.
+
 ## Stop & ask before proceeding
 
 - Changing **node ids**, **port meaning**, or **parameter formats**.
 - Adding a dependency, introducing network/file I/O, or touching licensing/redistribution.
 - Any uncertainty about **coordinate conventions** (ERP axes, units, handedness).
+- Introducing a new modal/editor UI element that cannot be expressed cleanly as a Vue component.
 
 ## Where details belong
 
