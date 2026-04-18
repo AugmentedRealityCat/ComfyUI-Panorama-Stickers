@@ -30,6 +30,7 @@ from .core.painting import (
 )
 from .core.state import merge_state, normalize_coverage, parse_sticker_state
 from .core.stickers import compose_stickers_to_erp
+from .core.stickers import render_stickers_to_rgba_erp
 
 
 def _save_input_preview(images, key="pano_input_images"):
@@ -44,13 +45,43 @@ def _save_input_preview(images, key="pano_input_images"):
     return {}
 
 
+def _crop_erp_for_coverage(arr: np.ndarray, coverage: int, out_w: int, out_h: int) -> np.ndarray:
+    if arr is None:
+        return None
+    coverage_value = normalize_coverage(coverage)
+    if coverage_value != 180:
+        return arr
+    src_h = int(arr.shape[0]) if arr.ndim >= 2 else 0
+    src_w = int(arr.shape[1]) if arr.ndim >= 2 else 0
+    if src_h <= 0 or src_w <= 0:
+        return arr
+    if src_w <= src_h:
+        return arr
+    target_aspect = max(1e-6, float(out_w) / max(1.0, float(out_h)))
+    crop_w = min(src_w, max(1, int(round(src_h * target_aspect))))
+    if crop_w >= src_w:
+        return arr
+    x0 = max(0, (src_w - crop_w) // 2)
+    x1 = min(src_w, x0 + crop_w)
+    return arr[:, x0:x1, ...]
+
+
+def _resize_image_like(arr: np.ndarray, out_w: int, out_h: int, *, mode: str) -> np.ndarray:
+    if arr is None:
+        return None
+    pil = Image.fromarray(arr)
+    resample = Image.BILINEAR
+    if mode == "mask":
+        resample = Image.BILINEAR
+    return np.asarray(pil.resize((int(out_w), int(out_h)), resample))
+
+
 def _apply_coverage_to_rgba(arr, coverage: int, out_w: int, out_h: int):
     if arr is None:
         return None
     rgba = np.clip(arr.astype(np.float32), 0.0, 1.0)
     if int(rgba.shape[0]) != int(out_h) or int(rgba.shape[1]) != int(out_w):
-        pil = Image.fromarray((rgba * 255.0).astype(np.uint8))
-        rgba = np.asarray(pil.resize((int(out_w), int(out_h)), Image.BILINEAR), dtype=np.float32) / 255.0
+        rgba = _resize_image_like((rgba * 255.0).astype(np.uint8), out_w, out_h, mode="rgba").astype(np.float32) / 255.0
     return rgba
 
 
@@ -59,8 +90,7 @@ def _apply_coverage_to_mask(arr, coverage: int, out_w: int, out_h: int):
         return None
     mask = np.clip(arr.astype(np.float32), 0.0, 1.0)
     if int(mask.shape[0]) != int(out_h) or int(mask.shape[1]) != int(out_w):
-        pil = Image.fromarray(np.clip(mask * 255.0, 0.0, 255.0).astype(np.uint8))
-        mask = np.asarray(pil.resize((int(out_w), int(out_h)), Image.BILINEAR), dtype=np.float32) / 255.0
+        mask = _resize_image_like(np.clip(mask * 255.0, 0.0, 255.0).astype(np.uint8), out_w, out_h, mode="mask").astype(np.float32) / 255.0
     return mask
 
 
@@ -75,9 +105,28 @@ def _apply_coverage_to_rgb(arr, coverage: int, out_w: int, out_h: int):
     elif rgb.shape[-1] > 3:
         rgb = rgb[..., :3]
     if int(rgb.shape[0]) != int(out_h) or int(rgb.shape[1]) != int(out_w):
-        pil = Image.fromarray((rgb * 255.0).astype(np.uint8))
-        rgb = np.asarray(pil.resize((int(out_w), int(out_h)), Image.BILINEAR), dtype=np.float32) / 255.0
+        rgb = _resize_image_like((rgb * 255.0).astype(np.uint8), out_w, out_h, mode="rgb").astype(np.float32) / 255.0
     return rgb
+
+
+def _apply_overlay_coverage_to_rgba(arr, coverage: int, out_w: int, out_h: int):
+    if arr is None:
+        return None
+    rgba = np.clip(arr.astype(np.float32), 0.0, 1.0)
+    rgba = _crop_erp_for_coverage(rgba, coverage, out_w, out_h)
+    if int(rgba.shape[0]) != int(out_h) or int(rgba.shape[1]) != int(out_w):
+        rgba = _resize_image_like((rgba * 255.0).astype(np.uint8), out_w, out_h, mode="rgba").astype(np.float32) / 255.0
+    return rgba
+
+
+def _apply_overlay_coverage_to_mask(arr, coverage: int, out_w: int, out_h: int):
+    if arr is None:
+        return None
+    mask = np.clip(arr.astype(np.float32), 0.0, 1.0)
+    mask = _crop_erp_for_coverage(mask[..., None], coverage, out_w, out_h)[..., 0]
+    if int(mask.shape[0]) != int(out_h) or int(mask.shape[1]) != int(out_w):
+        mask = _resize_image_like(np.clip(mask * 255.0, 0.0, 255.0).astype(np.uint8), out_w, out_h, mode="mask").astype(np.float32) / 255.0
+    return mask
 
 
 def _push_ui_warning(ui_ret: dict, key: str, message: str):
@@ -424,6 +473,61 @@ def _compose_display_list_to_erp(
     return canvas, used_paint_entries
 
 
+def _alpha_composite_over_rgba(base_rgba: np.ndarray, overlay_rgba: np.ndarray) -> np.ndarray:
+    if base_rgba is None:
+        return np.clip(overlay_rgba.astype(np.float32), 0.0, 1.0)
+    dst = np.clip(base_rgba.astype(np.float32), 0.0, 1.0)
+    src = np.clip(overlay_rgba.astype(np.float32), 0.0, 1.0)
+    src_a = src[..., 3:4]
+    dst_a = dst[..., 3:4]
+    out_a = src_a + dst_a * (1.0 - src_a)
+    out_rgb = src[..., :3] * src_a + dst[..., :3] * (1.0 - src_a)
+    return np.concatenate([out_rgb, out_a], axis=-1).astype(np.float32)
+
+
+def _compose_display_list_to_overlay_rgba(
+    state: dict,
+    width: int,
+    height: int,
+    *,
+    painting_payload: dict | None = None,
+    base_dir: Path | None = None,
+    quality: str = "export",
+) -> tuple[np.ndarray, bool]:
+    canvas = np.zeros((height, width, 4), dtype=np.float32)
+    payload = painting_payload if isinstance(painting_payload, dict) else None
+    group_layers = payload.get("groups", {}) if payload else {}
+    painting = state.get("painting") if isinstance(state.get("painting"), dict) else {}
+    used_paint_entries = False
+    sticker_state = dict(state)
+    sticker_state["coverage"] = 360
+    for entry in _get_display_list_entries(state):
+        entry_type = str(entry.get("type") or "")
+        layer = None
+        if entry_type == "sticker":
+            layer = render_stickers_to_rgba_erp(
+                sticker_state,
+                width,
+                height,
+                base_dir=base_dir,
+                quality=quality,
+                stickers_override=[entry.get("item")],
+                coverage_override=360,
+            )
+        elif entry_type == "strokeGroup":
+            action_group_id = str(entry.get("actionGroupId") or "").strip()
+            layer = group_layers.get(action_group_id)
+            if layer is None:
+                layer = _render_group_layer_from_state(painting, action_group_id, width, height)
+        elif entry_type == "rasterObject":
+            layer = _render_raster_layer_from_state(entry.get("item"), width, height)
+        if layer is None:
+            continue
+        canvas = _alpha_composite_over_rgba(canvas, layer)
+        used_paint_entries = True
+    return canvas, used_paint_entries
+
+
 def _should_use_uploaded_group_layers(state: dict, painting_payload: dict | None) -> bool:
     if not isinstance(painting_payload, dict):
         return False
@@ -603,9 +707,12 @@ class PanoramaStickersNode(io.ComfyNode):
             erp_width=workspace_w,
             erp_height=workspace_h,
         )
-        out, used_group_layers = _compose_display_list_to_erp(
-            render_state,
-            bg_np,
+        overlay_state = dict(render_state)
+        overlay_state["coverage"] = 360
+        overlay_rgba, used_group_layers = _compose_display_list_to_overlay_rgba(
+            overlay_state,
+            workspace_w,
+            workspace_h,
             painting_payload=painting_payload,
             base_dir=Path.cwd(),
             quality="export",
@@ -624,19 +731,20 @@ class PanoramaStickersNode(io.ComfyNode):
                         "Paint export fell back to backend stroke rendering because uploaded paint layers were unavailable.",
                     )
                 paint_rgba, _mask_bw = render_painting_to_erp(state.get("painting"), workspace_w, workspace_h)
-        paint_rgba = _apply_coverage_to_rgba(paint_rgba, coverage_value, out_w, out_h)
         if paint_rgba is not None:
-            out = alpha_composite_over_rgb(out, paint_rgba)
+            overlay_rgba = _alpha_composite_over_rgba(overlay_rgba, paint_rgba)
         mask_bw = painting_payload.get("mask") if isinstance(painting_payload, dict) else None
         if mask_bw is None:
             if painting_state_has_renderables(painting_state):
                 _push_ui_warning(
                     ui_ret,
                     "pano_sticker_warnings",
-                    "Mask export fell back to backend stroke rendering because uploaded mask layers were unavailable.",
-                )
+                        "Mask export fell back to backend stroke rendering because uploaded mask layers were unavailable.",
+                    )
             _paint_rgba, mask_bw = render_painting_to_erp(state.get("painting"), workspace_w, workspace_h)
-        mask_bw = _apply_coverage_to_mask(mask_bw, coverage_value, out_w, out_h)
+        overlay_rgba = _apply_overlay_coverage_to_rgba(overlay_rgba, coverage_value, out_w, out_h)
+        out = alpha_composite_over_rgb(bg_np, overlay_rgba) if overlay_rgba is not None else bg_np
+        mask_bw = _apply_overlay_coverage_to_mask(mask_bw, coverage_value, out_w, out_h)
         if mask_bw is None:
             mask_bw = np.zeros((out_h, out_w), dtype=np.float32)
 

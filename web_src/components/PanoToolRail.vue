@@ -11,6 +11,7 @@ defineProps({
     <PanoIconButton
       v-for="button in buttons"
       :key="button.key"
+      v-show="button.visible !== false"
       :extra-class="{
         active: button.active,
         'pano-btn-icon-accent': button.accent,
@@ -19,7 +20,7 @@ defineProps({
       :label="button.label"
       :tip="button.tip"
       :pressed="button.pressed"
-      :attrs="{ [button.attr]: button.value }"
+      :attrs="{ [button.attr]: button.value, disabled: button.disabled === true }"
     />
   </div>
 </template>

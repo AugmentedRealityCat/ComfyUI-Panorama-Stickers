@@ -1,6 +1,6 @@
 import { app } from "../../scripts/app.js";
 import { api } from "../../scripts/api.js";
-import { createApp } from "vue";
+import { createApp, reactive } from "vue";
 import {
   attachCutoutPreview,
   attachPreviewNode,
@@ -21,7 +21,16 @@ import {
   buildStickerSceneFromState,
   buildStickerTexturesFromState,
 } from "./pano_gl_scene.js";
+import { drawCutoutProjectionPreview } from "./pano_cutout_projection.js";
 import { buildPanoramaCompositeDescriptor } from "./pano_render_descriptors.js";
+import {
+  buildEditorSidePanelModel,
+  buildPaintDockModel,
+  buildPreviewSidePanelModel,
+  buildSelectionMenuModel,
+  buildUiSettingsModel,
+  patchUiButton,
+} from "./pano_editor_ui_state.js";
 import PanoModal from "./components/PanoModal.vue";
 import { buildModalShellPreset } from "./modal_shell_presets.js";
 
@@ -1643,6 +1652,54 @@ async function showEditor(node, type, options = {}) {
       state.active.selected_shot_id = null;
     }
   }
+  const shellPreset = buildModalShellPreset(type);
+  const uiState = reactive({
+    viewButtons: (shellPreset.viewButtons || []).map((button) => ({ ...button, visible: true, disabled: false })),
+    toolButtons: (shellPreset.toolButtons || []).map((button) => ({ ...button, disabled: false })),
+    floatingButtons: [
+      ...(shellPreset.floatingButtons || []).map((button) => ({ ...button, disabled: false })),
+      ...(previewMode ? [{ action: "toggle-fullscreen", label: "Fullscreen", tip: "Fullscreen", pressed: null, icon: ICON.fullscreen, disabled: false }] : []),
+    ],
+    fovValue: "100°",
+    outputPreviewToggle: {
+      visible: false,
+      icon: ICON.fullscreen,
+      label: "Expand Preview",
+      tip: "Expand preview",
+    },
+    paintDock: {
+      visible: false,
+      activePane: "",
+      showColorRow: true,
+      colorEnabled: true,
+      activeSwatchId: "green",
+      customColorActive: false,
+      customColorCss: colorToCss({ r: 0, g: 1, b: 0, a: 1 }, 1),
+      colorPopOpen: false,
+      pickerHueColor: colorToCss({ r: 1, g: 0, b: 0, a: 1 }, 1),
+      pickerSat: "100%",
+      pickerVal: "0%",
+      pickerHue: "0%",
+      pickerSvLeft: "100%",
+      pickerSvTop: "0%",
+      pickerHueLeft: "0%",
+      alphaValue: 100,
+      alphaText: "100%",
+      historyVisible: true,
+      historyEntries: Array.from({ length: 8 }, (_, index) => ({ index, color: null })),
+      sizeValue: 10,
+      sizeText: "10",
+      sizeFill: "7.56%",
+      sizeDisabled: false,
+      showSizeRow: true,
+      clearVisible: { paint: true, mask: true },
+      activeTools: { paint: "pen", mask: "pen" },
+    },
+    sidePanel: {},
+    selectionMenu: { visible: false, left: 0, top: 0, items: [] },
+    tooltip: { visible: false, text: "", left: 0, top: 0, variant: "" },
+    confirmDialog: { visible: false, title: "", text: "", confirmLabel: "Confirm", resolve: null },
+  });
   const mountHost = document.createElement("div");
   document.body.appendChild(mountHost);
   const vueApp = createApp(PanoModal, {
@@ -1651,12 +1708,13 @@ async function showEditor(node, type, options = {}) {
     readOnly,
     hideSidebar,
     nodeTitle,
-    shellPreset: buildModalShellPreset(type),
+    shellPreset,
     paintSwatches: PAINT_COLOR_SWATCHES.map((swatch) => ({
       id: swatch.id,
       label: swatch.label,
       cssColor: colorToCss(swatch.color, 1),
     })),
+    uiState,
     onClose: () => closeEditor(),
   });
   try {
@@ -1700,39 +1758,19 @@ async function showEditor(node, type, options = {}) {
   stageWrap?.appendChild(paintSizePreviewEl);
   const ctx = canvas.getContext("2d");
   const modalPanoCore = createPanoramaRenderCore();
-  const cutoutPreviewCore = createPanoramaRenderCore();
+  // Vue owns modal DOM structure. The references below are bridge-only:
+  // canvas mounting, geometry measurement, low-level pointer wiring, and fullscreen integration.
   const side = root.querySelector("[data-side]");
-  const viewBtns = root.querySelectorAll("[data-view]");
-  const viewToggle = root.querySelector(".pano-view-toggle");
-  const fovValueEl = root.querySelector("[data-fov-value]");
   const selectionMenu = root.querySelector("[data-selection-menu]");
-  const outputPreviewToggleBtn = root.querySelector("[data-action='toggle-output-preview-size']");
-  const addOrLookBtn = root.querySelector("[data-tool-ui-action='add-or-look']");
-  const frameViewBtn = root.querySelector("[data-view='frame']");
-  const fullscreenBtn = root.querySelector("[data-action='toggle-fullscreen']");
   const tooltipEl = root.querySelector("[data-tooltip]");
-  const toolRail = root.querySelector("[data-tool-rail]");
-  const paintDock = root.querySelector("[data-paint-dock]");
-  const paintPanes = Array.from(root.querySelectorAll("[data-paint-pane]"));
   const paintColorRow = root.querySelector("[data-paint-color-row]");
   const paintColorPop = root.querySelector("[data-paint-color-pop]");
-  const paintColorPreview = root.querySelector("[data-paint-color-preview]");
   const paintColorSv = root.querySelector("[data-paint-color-sv]");
   const paintColorSvCursor = root.querySelector("[data-paint-color-sv-cursor]");
   const paintHueStrip = root.querySelector("[data-paint-hue-strip]");
   const paintHueHandle = root.querySelector("[data-paint-hue-handle]");
-  const paintAlphaSlider = root.querySelector("[data-paint-alpha-slider]");
-  const paintAlphaValue = root.querySelector("[data-paint-alpha-value]");
-  const paintColorHistoryWrap = root.querySelector("[data-paint-color-history-wrap]");
-  const paintColorHistory = root.querySelector("[data-paint-color-history]");
-  const paintSizeRows = Array.from(root.querySelectorAll("[data-paint-size-row]"));
-  const paintClearRows = Array.from(root.querySelectorAll("[data-paint-clear-row]"));
-  const paintLayerClearCurrentBtns = Array.from(root.querySelectorAll("[data-paint-layer-clear-current]"));
-  const paintSizeSliders = Array.from(root.querySelectorAll("[data-paint-size-slider]"));
-  const paintSizeValues = Array.from(root.querySelectorAll("[data-paint-size-value]"));
   let paintSizePreviewTimer = 0;
   let paintPaneFadeTimer = 0;
-  let visiblePaintPaneMode = "";
   stageWrap?.removeAttribute("data-stage-ready");
   stageWrap?.setAttribute("data-stage-loading-kind", "boot");
   canvas.style.opacity = "1";
@@ -1741,11 +1779,6 @@ async function showEditor(node, type, options = {}) {
     side?.remove();
     root.classList.add("pano-modal-readonly");
   }
-  function setPaintDockVisible(visible) {
-    if (!paintDock) return;
-    paintDock.classList.toggle("is-hidden", !visible);
-  }
-
   const commitCustomPaintHistory = () => {
     if (!editor.customPaintSessionStart) return;
     if (colorsApproximatelyEqual(editor.customPaintSessionStart, editor.customPaintColor)) {
@@ -1768,11 +1801,13 @@ async function showEditor(node, type, options = {}) {
     if (commitHistory) commitCustomPaintHistory();
     else editor.customPaintSessionStart = null;
     paintColorPop.hidden = true;
+    uiState.paintDock.colorPopOpen = false;
   };
   const openPaintColorPop = () => {
     if (!paintColorPop) return;
     if (paintColorPop.hidden) editor.customPaintSessionStart = cloneColor(editor.customPaintColor);
     paintColorPop.hidden = false;
+    uiState.paintDock.colorPopOpen = true;
   };
   root.addEventListener("pointerdown", (ev) => {
     hideTooltip();
@@ -1838,13 +1873,9 @@ async function showEditor(node, type, options = {}) {
     paintCompositeRevision: 0,
     objectVisualRevision: 0,
     livePaintInteractionRevision: 0,
-    cutoutPreviewSurfaceRaf: 0,
-    cutoutPreviewSurfaceTimer: 0,
-    cutoutPreviewSurfaceLastTs: 0,
     selectedIds: [],
     _sortedItemsCache: null,
     _strokeGeomCache: new Map(),
-    _strokeRasterBoundsCache: new Map(),
     marqueeModifier: false,
     panelLastValues: null,
     panelWasEnabled: false,
@@ -1880,6 +1911,22 @@ async function showEditor(node, type, options = {}) {
     active: false,
     depth: 0,
   };
+
+  function syncToolButtonModels() {
+    uiState.toolButtons.forEach((button) => {
+      const isPrimaryTool = button.attr === "data-tool-mode";
+      const isPaintTool = button.attr === "data-paint-tool";
+      const isMaskTool = button.attr === "data-mask-tool";
+      button.active = isPrimaryTool
+        ? button.value === editor.primaryTool
+        : isPaintTool
+          ? button.key === editor.paintTool
+          : isMaskTool
+            ? button.key === editor.maskTool
+            : false;
+      button.pressed = button.active ? "true" : (button.pressed == null ? null : "false");
+    });
+  }
 
   function dragHasImageFiles(e) {
     const dt = e?.dataTransfer;
@@ -2008,6 +2055,31 @@ async function showEditor(node, type, options = {}) {
     }
     return entry;
   }
+  function getFrameCornersUv(frame) {
+    if (!frame?.centerUv) return [];
+    const centerU = Number(frame.centerUv.u || 0);
+    const centerV = Number(frame.centerUv.v || 0);
+    const halfW = Number(frame.halfW || 0);
+    const halfH = Number(frame.halfH || 0);
+    return [
+      {
+        u: ((centerU - halfW) % 1 + 1) % 1,
+        v: clamp(centerV - halfH, 0, 1),
+      },
+      {
+        u: ((centerU + halfW) % 1 + 1) % 1,
+        v: clamp(centerV - halfH, 0, 1),
+      },
+      {
+        u: ((centerU + halfW) % 1 + 1) % 1,
+        v: clamp(centerV + halfH, 0, 1),
+      },
+      {
+        u: ((centerU - halfW) % 1 + 1) % 1,
+        v: clamp(centerV + halfH, 0, 1),
+      },
+    ];
+  }
   function syncPaintingGroupEntries() {
     const ids = new Set(getPaintStrokeActionGroupIds());
     const groups = getPaintingGroupList();
@@ -2032,6 +2104,7 @@ async function showEditor(node, type, options = {}) {
   // Returns { centerUv, rot_deg, halfW, halfH, uvPad } or null when no points.
   // Rotation is stored separately and accumulated via transforms — no PCA.
   function computeGroupFrame(actionGroupId, layerKind, strokes) {
+    const normalizeU = (u) => ((Number(u || 0) % 1) + 1) % 1;
     const sourcePoints = [];
     for (const stroke of strokes) {
       const geometry = stroke?.geometry;
@@ -2041,13 +2114,20 @@ async function showEditor(node, type, options = {}) {
       if (Array.isArray(pts)) sourcePoints.push(...pts);
     }
     if (!sourcePoints.length) return null;
-    let sumU = 0, sumV = 0;
-    sourcePoints.forEach((pt) => { sumU += Number(pt?.u || 0); sumV += Number(pt?.v || 0); });
-    const centU = sumU / sourcePoints.length;
+    const baseU = normalizeU(sourcePoints[0]?.u || 0);
+    let sumU = 0;
+    let sumV = 0;
+    sourcePoints.forEach((pt) => {
+      const u = normalizeU(pt?.u || 0);
+      sumU += baseU + shortestWrappedDelta(u, baseU);
+      sumV += Number(pt?.v || 0);
+    });
+    const centU = ((sumU / sourcePoints.length) % 1 + 1) % 1;
     const centV = sumV / sourcePoints.length;
     let minDU = Infinity, maxDU = -Infinity, minV = Infinity, maxV = -Infinity;
     sourcePoints.forEach((pt) => {
-      const du = shortestWrappedDelta(Number(pt?.u || 0), centU);
+      const u = normalizeU(pt?.u || 0);
+      const du = shortestWrappedDelta(u, centU);
       minDU = Math.min(minDU, du); maxDU = Math.max(maxDU, du);
       const v = Number(pt?.v || 0);
       minV = Math.min(minV, v); maxV = Math.max(maxV, v);
@@ -2068,17 +2148,15 @@ async function showEditor(node, type, options = {}) {
     };
   }
 
-  // Return the persistent frame for a group, initializing via PCA if frame is null.
-  // Pass strokes to avoid a second lookup when objectGeom() already has them.
+  // Stroke groups must derive their frame from the current stroke data every time.
+  // A persistent/stale frame breaks seam-crossing selection and transforms.
   function ensureGroupFrame(actionGroupId, layerKind, strokes) {
     const gid = String(actionGroupId || "").trim();
     if (!gid) return null;
     const entry = getPaintingGroupList().find((g) => String(g?.actionGroupId || "") === gid);
     if (!entry) return null;
-    if (!entry.frame) {
-      const s = strokes || getStrokeGroupStrokes(gid, layerKind);
-      entry.frame = computeGroupFrame(gid, layerKind, s);
-    }
+    const s = strokes || getStrokeGroupStrokes(gid, layerKind);
+    entry.frame = computeGroupFrame(gid, layerKind, s);
     return entry.frame;
   }
 
@@ -2168,7 +2246,7 @@ async function showEditor(node, type, options = {}) {
     const kind = String(interaction?.kind || "");
     if (kind === "paint_stroke" || kind === "paint_lasso_fill") return true;
     if (kind === "move_stroke_group" || kind === "scale_stroke_group" || kind === "rotate_stroke_group") return true;
-    if (kind === "move_raster_object") return true;
+    if (kind === "move_raster_object" || kind === "scale_raster_object") return true;
     if (kind === "move_multi") {
       const hasStrokeSnapshots = Array.isArray(interaction?.strokeSnapshots) && interaction.strokeSnapshots.length > 0;
       const hasRasterSnapshots = Array.isArray(interaction?.rasterSnapshots) && interaction.rasterSnapshots.length > 0;
@@ -2193,9 +2271,24 @@ async function showEditor(node, type, options = {}) {
 
   function getCutoutPreviewUpdateMinDelay(interaction = editor.interaction) {
     if (!isCutoutPreviewInteraction(interaction)) return 0;
-    const kind = String(interaction?.kind || "");
-    if (kind === "paint_stroke" || kind === "paint_lasso_fill") return 120;
-    return 33;
+    return 0;
+  }
+
+  function getSharedLivePaintSurface() {
+    let livePaint = null;
+    try {
+      const orderedGroupIds = getOrderedPaintGroupIds();
+      const displayPaint = editor.paintEngine?.getErpTarget?.(orderedGroupIds)?.displayPaint?.canvas || null;
+      if (displayPaint) {
+        livePaint = {
+          source: displayPaint,
+          revision: `${getPaintingCompositeRevisionKey()}:${getLivePaintRevisionSuffix()}`,
+        };
+      }
+    } catch {
+      livePaint = null;
+    }
+    return livePaint;
   }
 
   function getLivePaintRevisionSuffix() {
@@ -2214,13 +2307,10 @@ async function showEditor(node, type, options = {}) {
     return `_${interactionKind}_${groupId || rasterId || "active"}_${editor.livePaintInteractionRevision}`;
   }
   function getCutoutSelectableItems() {
-    return [
-      ...(Array.isArray(state.stickers) ? state.stickers : []),
-      ...(Array.isArray(state.shots) ? state.shots : []),
-    ];
+    return [...(Array.isArray(state.stickers) ? state.stickers : [])];
   }
   function isShotItem(item) {
-    return !!item && Array.isArray(state.shots) && state.shots.includes(item);
+    return false;
   }
   function isStickerItem(item) {
     return !!item && Array.isArray(state.stickers) && state.stickers.includes(item);
@@ -2293,7 +2383,7 @@ async function showEditor(node, type, options = {}) {
   function getStrokeGeomCacheKey(actionGroupId, layerKind = "paint") {
     const gid = String(actionGroupId || "").trim();
     const kind = String(layerKind || "paint").trim() || "paint";
-    const base = `${kind}:${gid}:${editor.mode}:${getPaintingRevisionKey()}`;
+    const base = `geomv5:${kind}:${gid}:${editor.mode}:${getPaintingRevisionKey()}`;
     if (editor.mode === "frame") {
       const shot = getActiveCutoutShot();
       const shotId = String(shot?.id || "");
@@ -2301,39 +2391,6 @@ async function showEditor(node, type, options = {}) {
       return `${base}:frame:${shotId}:${Math.round(Number(rect?.x || 0))}:${Math.round(Number(rect?.y || 0))}:${Math.round(Number(rect?.w || 0))}:${Math.round(Number(rect?.h || 0))}:${Math.round(Number(editor.frameView?.zoom || 1) * 1000)}:${Math.round(Number(editor.frameView?.panX || 0))}:${Math.round(Number(editor.frameView?.panY || 0))}`;
     }
     return `${base}:view:${Math.round(Number(editor.viewYaw || 0) * 100)}:${Math.round(Number(editor.viewPitch || 0) * 100)}:${Math.round(Number(editor.viewFov || 0) * 100)}:${Math.round(Number(canvas?.width || 0))}:${Math.round(Number(canvas?.height || 0))}`;
-  }
-  function getStrokeRasterBounds(actionGroupId) {
-    const gid = String(actionGroupId || "").trim();
-    if (!gid) return null;
-    const key = `${gid}:${getPaintingRevisionKey()}`;
-    const cached = editor._strokeRasterBoundsCache.get(key);
-    if (cached) return cached;
-    if (editor._strokeRasterBoundsCache.size > 128) editor._strokeRasterBoundsCache.clear();
-    const raster = editor.paintEngine?.getGroupDisplayCanvas?.(gid);
-    const ctx2d = raster?.getContext?.("2d");
-    if (!raster || !ctx2d) return null;
-    const w = Number(raster.width || 0);
-    const h = Number(raster.height || 0);
-    if (w < 1 || h < 1) return null;
-    const data = ctx2d.getImageData(0, 0, w, h).data;
-    let minX = w;
-    let minY = h;
-    let maxX = -1;
-    let maxY = -1;
-    for (let y = 0; y < h; y += 1) {
-      const row = y * w * 4;
-      for (let x = 0; x < w; x += 1) {
-        if (data[row + x * 4 + 3] <= 8) continue;
-        if (x < minX) minX = x;
-        if (y < minY) minY = y;
-        if (x > maxX) maxX = x;
-        if (y > maxY) maxY = y;
-      }
-    }
-    if (maxX < minX || maxY < minY) return null;
-    const bounds = { minX, minY, maxX, maxY, width: w, height: h };
-    editor._strokeRasterBoundsCache.set(key, bounds);
-    return bounds;
   }
   function translateErpPoint(point, du, dv) {
     if (!point || typeof point !== "object") return point;
@@ -2419,18 +2476,9 @@ async function showEditor(node, type, options = {}) {
         changed = true;
       }
     });
-    // Keep the persistent frame in sync so objectGeom() remains stable.
     if (changed && frameSnapshot) {
       const entry = getPaintingGroupList().find((g) => String(g?.actionGroupId || "") === gid);
-      if (entry) {
-        entry.frame = {
-          ...frameSnapshot,
-          centerUv: {
-            u: ((frameSnapshot.centerUv.u + du) % 1 + 1) % 1,
-            v: clamp(frameSnapshot.centerUv.v + dv, 0, 1),
-          },
-        };
-      }
+      if (entry) entry.frame = null;
     }
     return changed;
   }
@@ -2465,19 +2513,9 @@ async function showEditor(node, type, options = {}) {
         changed = true;
       }
     });
-    // Update the persistent frame so objectGeom() reflects the new orientation/scale.
     if (changed && frameSnapshot) {
-      const s = Number(scale || 1);
       const entry = getPaintingGroupList().find((g) => String(g?.actionGroupId || "") === gid);
-      if (entry) {
-        entry.frame = {
-          centerUv: frameSnapshot.centerUv,
-          rot_deg: Number(frameSnapshot.rot_deg || 0) + Number(rotationDeg || 0),
-          halfW: frameSnapshot.halfW * s,
-          halfH: frameSnapshot.halfH * s,
-          uvPad: frameSnapshot.uvPad,
-        };
-      }
+      if (entry) entry.frame = null;
     }
     return changed;
   }
@@ -2493,6 +2531,19 @@ async function showEditor(node, type, options = {}) {
     if (!item.transform) item.transform = { du: 0, dv: 0, rot_deg: 0, scale: 1 };
     item.transform.du = nextDu;
     item.transform.dv = nextDv;
+    return true;
+  }
+  function applyRasterObjectTransform(idOrRasterId, scale = 1, snapshot = null) {
+    const rid = parseRasterObjectSelectionId(idOrRasterId);
+    if (!rid) return false;
+    const item = getRasterObjectList().find((entry) => String(entry?.id || "").trim() === rid);
+    if (!item) return false;
+    const source = snapshot && typeof snapshot === "object" ? snapshot : item;
+    const sourceTf = source?.transform || {};
+    const sourceScale = Math.max(0.01, Number(sourceTf.scale || 1));
+    const nextScale = clamp(sourceScale * Math.max(0.01, Number(scale || 1)), 0.01, 100);
+    if (!item.transform) item.transform = { du: 0, dv: 0, rot_deg: 0, scale: 1 };
+    item.transform.scale = nextScale;
     return true;
   }
   function getSelected() {
@@ -2654,11 +2705,6 @@ async function showEditor(node, type, options = {}) {
     else if (!nextIds.length) state.active.selected_shot_id = null;
   }
   function getCutoutInspectorItems() {
-    const frames = (Array.isArray(state.shots) ? state.shots : []).map((item, index) => ({
-      kind: "frame",
-      item,
-      label: "Frame",
-    }));
     const images = (Array.isArray(state.stickers) ? state.stickers : []).map((item, index) => {
       const baseLabel = isExternalSticker(item)
         ? String(item.id || EXTERNAL_STICKER_ID)
@@ -2669,7 +2715,7 @@ async function showEditor(node, type, options = {}) {
         label: baseLabel,
       };
     });
-    return [...frames, ...images];
+    return images;
   }
 
   function getSelectionItemIcon(kind) {
@@ -3096,41 +3142,21 @@ async function showEditor(node, type, options = {}) {
   }
   function applyInitialCutoutFocus() {
     if (type !== "cutout") return;
-    const shots = Array.isArray(state.shots) ? state.shots : [];
-    if (!Array.isArray(shots) || shots.length === 0) return;
-    const preferredId = String(state.active?.selected_shot_id || "");
-    const target = shots.find((s) => String(s?.id || "") === preferredId) || shots[0];
-    if (!target) return;
-    state.active.selected_shot_id = target.id || null;
-    editor.viewYaw = wrapYaw(Number(target.yaw_deg || 0));
-    editor.viewPitch = clamp(Number(target.pitch_deg || 0), -89.9, 89.9);
   }
   function syncLookAtFrameButtonState() {
-    if (!addOrLookBtn) return;
-    const hasFrames = type === "cutout" && Array.isArray(state.shots) && state.shots.length > 0;
-    if (hasFrames) {
-      addOrLookBtn.innerHTML = ICON.crosshair;
-      addOrLookBtn.setAttribute("aria-label", "Look at frame");
-      addOrLookBtn.setAttribute("data-tip", "Look at frame");
-    } else {
-      addOrLookBtn.innerHTML = ICON.plus_circle;
-      addOrLookBtn.setAttribute("aria-label", "Add frame");
-      addOrLookBtn.setAttribute("data-tip", "Add frame");
-    }
+    patchUiButton(uiState.toolButtons, "value", "add-or-look", { visible: false });
   }
 
   function syncViewToggleState() {
-    const frameEnabled = type === "cutout" && Array.isArray(state.shots) && state.shots.length > 0;
-    if (editor.mode === "frame" && !frameEnabled) editor.mode = "pano";
-    if (frameViewBtn) {
-      frameViewBtn.disabled = !frameEnabled;
-      frameViewBtn.setAttribute("aria-disabled", frameEnabled ? "false" : "true");
-    }
-    viewBtns.forEach((btn) => {
-      const active = btn.dataset.view === editor.mode;
-      btn.setAttribute("aria-pressed", active ? "true" : "false");
+    if (editor.mode === "frame") editor.mode = "pano";
+    editor.outputPreviewRect = null;
+    uiState.viewButtons.forEach((button) => {
+      const active = button.key === editor.mode;
+      button.pressed = active ? "true" : "false";
+      button.visible = button.key !== "frame";
+      button.disabled = button.key === "frame";
     });
-    if (viewToggle) viewToggle.setAttribute("data-selected", editor.mode);
+    uiState.outputPreviewToggle.visible = false;
     if (isPaintCursorEnabled()) updateCursor(editor.pointerPos);
     else canvas.style.cursor = editor.mode === "pano" ? "grab" : "default";
   }
@@ -3355,7 +3381,7 @@ async function showEditor(node, type, options = {}) {
         : (Array.isArray(geometry.points) ? geometry.points : []);
       geometry.processedPoints = processFreehandPoints(raw, previewStroke.targetSpace, true);
     }
-    const surface = createRasterSurface(erpDesc.width, erpDesc.height);
+    const surface = createRasterSurface(erpDesc.width, erpDesc.height, { readback: true });
     if (!rasterizeStrokeToSurface(surface, previewStroke, { w: erpDesc.width, h: erpDesc.height })) return null;
     const data = surface.ctx?.getImageData(0, 0, erpDesc.width, erpDesc.height)?.data || null;
     if (!data) return null;
@@ -3456,13 +3482,34 @@ async function showEditor(node, type, options = {}) {
       ? editor._liveEraserPreviewCanvasCache
       : (editor._liveEraserPreviewCanvasCache = new Map());
     if (cache.has(cacheKey)) return cache.get(cacheKey);
-    const surface = createRasterSurface(width, height);
+    const minX = clamp(Math.floor(Number(previewInfo.bounds?.minX || 0)), 0, Math.max(0, width - 1));
+    const minY = clamp(Math.floor(Number(previewInfo.bounds?.minY || 0)), 0, Math.max(0, height - 1));
+    const maxX = clamp(Math.ceil(Number(previewInfo.bounds?.maxX || 0)), minX, Math.max(0, width - 1));
+    const maxY = clamp(Math.ceil(Number(previewInfo.bounds?.maxY || 0)), minY, Math.max(0, height - 1));
+    const regionW = Math.max(1, maxX - minX + 1);
+    const regionH = Math.max(1, maxY - minY + 1);
+    const surface = createRasterSurface(width, height, { readback: true });
     surface.ctx.clearRect(0, 0, width, height);
     surface.ctx.drawImage(sourceCanvas, 0, 0);
+    const beforeData = surface.ctx.getImageData(minX, minY, regionW, regionH);
     surface.ctx.save();
     surface.ctx.globalCompositeOperation = "destination-out";
     surface.ctx.drawImage(previewInfo.surface.canvas, 0, 0);
     surface.ctx.restore();
+    const afterData = surface.ctx.getImageData(minX, minY, regionW, regionH);
+    let touched = false;
+    for (let i = 0; i < regionW * regionH; i += 1) {
+      const beforeAlpha = beforeData.data[i * 4 + 3];
+      const afterAlpha = afterData.data[i * 4 + 3];
+      if (beforeAlpha > afterAlpha) {
+        touched = true;
+        break;
+      }
+    }
+    if (!touched) {
+      cache.set(cacheKey, sourceCanvas);
+      return sourceCanvas;
+    }
     if (cache.size > 64) cache.clear();
     cache.set(cacheKey, surface.canvas);
     return surface.canvas;
@@ -3541,29 +3588,6 @@ async function showEditor(node, type, options = {}) {
       && !!bgImg.complete
       && Number(bgImg.naturalWidth || bgImg.width || 0) > 1
       && Number(bgImg.naturalHeight || bgImg.height || 0) > 1;
-    if (mode === "unwrap") {
-      let drew = false;
-      if (bgReady && editor.showPanorama) {
-        ctx.save();
-        ctx.globalAlpha = 1;
-        ctx.drawImage(bgImg, rect.x, rect.y, rect.w, rect.h);
-        ctx.restore();
-        drew = true;
-      }
-      const orderedGroupIds = getOrderedPaintGroupIds();
-      const erpTarget = editor.paintEngine?.getErpTarget?.(orderedGroupIds) || null;
-      const paintCanvas = editor.showObjects ? (erpTarget?.displayPaint?.canvas || null) : null;
-      const maskCanvas = editor.showMask ? (erpTarget?.committedMask?.canvas || null) : null;
-      if (paintCanvas) {
-        ctx.drawImage(paintCanvas, rect.x, rect.y, rect.w, rect.h);
-        drew = true;
-      }
-      if (maskCanvas) {
-        ctx.drawImage(maskCanvas, rect.x, rect.y, rect.w, rect.h);
-        drew = true;
-      }
-      return drew;
-    }
     const useModalBackgroundLayer = shouldUseModalBackgroundLayer(rect, view);
     if (useModalBackgroundLayer) {
       return renderModalBackgroundLayer(
@@ -3575,8 +3599,10 @@ async function showEditor(node, type, options = {}) {
     }
     const scene = buildModalBackgroundScene();
     const textures = buildModalBackgroundTextures(scene);
-    const paintSource = editor.showObjects ? getModalLayerPaintSource() : null;
-    const maskSource = editor.showMask ? getModalLayerMaskSource() : null;
+    const interleavedLayerEntries = editor.showObjects
+      ? buildModalInterleavedLayerEntries()
+      : appendMaskDisplayLayerEntry([]);
+    const paintSource = null;
     const descriptor = buildPanoramaCompositeDescriptor({
       stateRevision: [
         cachePrefix,
@@ -3584,8 +3610,7 @@ async function showEditor(node, type, options = {}) {
         bgReady ? Number(bgImg.naturalWidth || bgImg.width || 0) : 0,
         bgReady ? Number(bgImg.naturalHeight || bgImg.height || 0) : 0,
         Array.isArray(textures) ? textures.map((item) => `${String(item?.assetId || "")}:${String(item?.revision || "")}`).join(",") : "none",
-        paintSource ? getDisplayPaintRevisionKey() : "paint:none",
-        maskSource ? `${getPaintingCompositeRevisionKey()}:mask` : "mask:none",
+        interleavedLayerEntries.length ? interleavedLayerEntries.map((entry) => `${String(entry?.id || "")}:${String(entry?.revision || "")}:${Number(entry?.zIndex || 0)}`).join(",") : "paint:none",
       ].join("|"),
       backgroundSource: bgReady && editor.showPanorama ? bgImg : null,
       backgroundRevision: bgReady ? `${cachePrefix}:bg` : "",
@@ -3593,14 +3618,12 @@ async function showEditor(node, type, options = {}) {
       scene,
       textures,
       paintSource,
-      paintRevision: paintSource ? getDisplayPaintRevisionKey() : "",
-      maskSource,
-      maskRevision: maskSource ? `${getPaintingCompositeRevisionKey()}:mask` : "",
-      rasterEntries: [],
+      paintRevision: "",
+      rasterEntries: interleavedLayerEntries,
       backgroundOpacity: 1,
       showMaskTint: false,
     });
-    const core = mode === "cutout" ? cutoutPreviewCore : modalPanoCore;
+    const core = modalPanoCore;
     const synced = core.syncState(descriptor);
     if (!synced) return false;
     const surface = core.renderToTarget(`${cachePrefix}_direct`, view, {
@@ -4096,6 +4119,82 @@ async function showEditor(node, type, options = {}) {
     return editor.paintEngine?.getErpTarget?.(orderedGroupIds)?.committedMask?.canvas || null;
   }
 
+  function getModalLayerMaskDisplaySource() {
+    return editor.paintEngine?.getMaskDisplayCanvas?.() || null;
+  }
+
+  function getMaskDisplayRevisionKey() {
+    const source = getModalLayerMaskDisplaySource();
+    if (!source) return "";
+    return `${getDisplayPaintRevisionKey()}:mask_display`;
+  }
+
+  function appendMaskDisplayLayerEntry(entries) {
+    if (!editor.showMask) return entries;
+    const source = getModalLayerMaskDisplaySource();
+    if (!source) return entries;
+    const revision = getMaskDisplayRevisionKey();
+    const topZ = entries.reduce((max, entry) => Math.max(max, Number(entry?.zIndex || 0)), -1);
+    entries.push({
+      id: "mask_display",
+      source,
+      revision,
+      zIndex: topZ + 1,
+      opacity: 1,
+      visible: true,
+    });
+    return entries;
+  }
+
+  function buildModalInterleavedLayerEntries() {
+    const ordered = getOrderedDisplayListObjects(true);
+    const previewInfo = getActivePaintEraserPreviewInfo();
+    const entries = [];
+    for (const entry of ordered) {
+      if (entry?.type === "strokeGroup") {
+        const gid = String(entry.actionGroupId || entry.id || "");
+        if (!gid) continue;
+        const source = editor.paintEngine?.getGroupDisplayCanvas?.(gid) || null;
+        if (!source) continue;
+        entries.push({
+          id: `paint_group:${gid}`,
+          source,
+          revision: `${getDisplayPaintRevisionKey()}:${gid}`,
+          zIndex: Number(entry?.z_index || 0),
+          opacity: 1,
+          visible: true,
+        });
+        continue;
+      }
+      if (entry?.type === "rasterObject") {
+        const item = entry.item || null;
+        const rid = parseRasterObjectSelectionId(item?.id || entry.id || "");
+        if (!rid) continue;
+        const baseSource = buildRasterObjectEditCanvas(item, () => requestDraw());
+        if (!baseSource) continue;
+        const source = getLiveEraserAppliedCanvas(baseSource, entry, previewInfo);
+        const tf = item?.transform || {};
+        entries.push({
+          id: `raster:${rid}`,
+          source,
+          revision: [
+            getPaintingCompositeRevisionKey(),
+            previewInfo?.key || "",
+            rid,
+            Number(tf.du || 0).toFixed(6),
+            Number(tf.dv || 0).toFixed(6),
+            Number(tf.rot_deg || 0).toFixed(3),
+            Number(tf.scale || 1).toFixed(4),
+          ].join(":"),
+          zIndex: Number(entry?.z_index || 0),
+          opacity: 1,
+          visible: item?.visible !== false,
+        });
+      }
+    }
+    return appendMaskDisplayLayerEntry(entries);
+  }
+
   function buildModalPanoramaDescriptor(bgImg, cachePrefix = "modal_bg_gl") {
     const scene = buildModalBackgroundScene();
     const textures = buildModalBackgroundTextures(scene);
@@ -4110,15 +4209,16 @@ async function showEditor(node, type, options = {}) {
         Number(bgImg.naturalHeight || bgImg.height || 0),
       ].join("|")
       : "none";
-    const paintSource = editor.showObjects ? getModalLayerPaintSource() : null;
-    const maskSource = editor.showMask ? getModalLayerMaskSource() : null;
+    const interleavedLayerEntries = editor.showObjects
+      ? buildModalInterleavedLayerEntries()
+      : appendMaskDisplayLayerEntry([]);
+    const paintSource = null;
     const stateRevision = [
       cachePrefix,
       bgRevision,
       Array.isArray(scene?.stickers) ? scene.stickers.map((item) => String(item?.id || "")).join(",") : "none",
       Array.isArray(textures) ? textures.map((item) => `${String(item?.assetId || "")}:${String(item?.revision || "")}`).join(",") : "none",
-      paintSource ? getDisplayPaintRevisionKey() : "paint:none",
-      maskSource ? `${getPaintingCompositeRevisionKey()}:mask` : "mask:none",
+      interleavedLayerEntries.length ? interleavedLayerEntries.map((entry) => `${String(entry?.id || "")}:${String(entry?.revision || "")}:${Number(entry?.zIndex || 0)}`).join(",") : "paint:none",
       editor.showPanorama ? "panorama:1" : "panorama:0",
       editor.showObjects ? "objects:1" : "objects:0",
       editor.showMask ? "showMask:1" : "showMask:0",
@@ -4132,14 +4232,12 @@ async function showEditor(node, type, options = {}) {
         scene,
         textures,
         paintSource,
-        paintRevision: paintSource ? getDisplayPaintRevisionKey() : "",
-        maskSource,
-        maskRevision: maskSource ? `${getPaintingCompositeRevisionKey()}:mask` : "",
-        rasterEntries: [],
+        paintRevision: "",
+        rasterEntries: interleavedLayerEntries,
         backgroundOpacity: 1,
         showMaskTint: false,
       }),
-      hasContent: bgReady || textures.length > 0 || !!paintSource || !!maskSource,
+      hasContent: bgReady || textures.length > 0 || interleavedLayerEntries.length > 0,
     };
   }
 
@@ -4309,21 +4407,33 @@ async function showEditor(node, type, options = {}) {
     }
   }
 
-  function projectEditorPoints(points, frameShot = null, frameRect = null) {
+  function projectEditorPoints(points, frameShot = null, frameRect = null, unwrapRefU = null) {
     if (editor.mode === "frame") {
       const shot = frameShot || getActiveCutoutShot();
       if (!shot) return [];
       const rect = frameRect || getFrameViewRect(shot);
       return projectErpPointsToFrameRect(points, shot, rect);
     }
-    return projectErpPointsToCurrentView(points);
+    return projectErpPointsToCurrentView(points, unwrapRefU);
+  }
+
+  function projectErpPointToEditor(point, refX = null, frameShot = null, frameRect = null, unwrapRefU = null) {
+    if (!point) return null;
+    if (editor.mode === "unwrap") {
+      const projected = projectErpPointsToCurrentView([point], unwrapRefU);
+      return projected[0] ? { x: projected[0].x, y: projected[0].y, z: 1 } : null;
+    }
+    const dir = erpPointToWorldDir(point);
+    return dir ? projectSceneItemDir(dir, refX, frameShot, frameRect) : null;
   }
 
   function buildStrokeGroupGeom(item, cacheKey) {
     const actionGroupId = String(item.actionGroupId || item.id || "").trim();
     const strokes = getStrokeGroupStrokes(actionGroupId, item.layerKind);
+    const frame = ensureGroupFrame(actionGroupId, item.layerKind, strokes);
+    const centerPoint = frame?.centerUv || getStrokeGroupCenterUv(actionGroupId, item.layerKind, strokes);
+    const unwrapRefU = editor.mode === "unwrap" ? Number(centerPoint?.u || 0) : null;
     const strokePaths = [];
-    const projected = [];
     const frameShot = editor.mode === "frame" ? getActiveCutoutShot() : null;
     const frameRect = frameShot ? getFrameViewRect(frameShot) : null;
     for (const stroke of strokes) {
@@ -4331,9 +4441,9 @@ async function showEditor(node, type, options = {}) {
       const srcPoints = geometry?.geometryKind === "lasso_fill"
         ? geometry?.points
         : (geometry?.processedPoints || geometry?.rawPoints || geometry?.points || []);
-      const pts = projectEditorPoints(srcPoints, frameShot, frameRect).filter((pt) => Number.isFinite(pt?.x) && Number.isFinite(pt?.y));
+      const pts = projectEditorPoints(srcPoints, frameShot, frameRect, unwrapRefU)
+        .filter((pt) => Number.isFinite(pt?.x) && Number.isFinite(pt?.y));
       if (!pts.length) continue;
-      projected.push(...pts);
       const presetId = getBrushPresetIdForTool(String(stroke?.toolKind || "pen"));
       const preset = BRUSH_PRESETS[presetId] || BRUSH_PRESETS[DEFAULT_BRUSH_PRESET_ID];
       strokePaths.push({
@@ -4343,53 +4453,43 @@ async function showEditor(node, type, options = {}) {
         layerKind: String(stroke?.layerKind || item.layerKind || "paint"),
       });
     }
-    if (!projected.length) {
+    const center = projectErpPointToEditor(centerPoint, null, frameShot, frameRect, unwrapRefU);
+    if (!center) {
       const hidden = { visible: false, kind: "strokeGroup" };
       editor._strokeGeomCache.set(cacheKey, hidden);
       return hidden;
     }
-    let minX = Infinity;
-    let minY = Infinity;
-    let maxX = -Infinity;
-    let maxY = -Infinity;
-    for (const path of strokePaths) {
-      const pad = 2;
-      for (const pt of (Array.isArray(path?.points) ? path.points : [])) {
-        const x = Number(pt?.x || 0);
-        const y = Number(pt?.y || 0);
-        minX = Math.min(minX, x - pad);
-        minY = Math.min(minY, y - pad);
-        maxX = Math.max(maxX, x + pad);
-        maxY = Math.max(maxY, y + pad);
-      }
-    }
-    if (!Number.isFinite(minX) || !Number.isFinite(minY) || !Number.isFinite(maxX) || !Number.isFinite(maxY)) {
+    const cornersUv = getFrameCornersUv(frame);
+    const corners = cornersUv
+      .map((pt) => projectErpPointToEditor(pt, center.x, frameShot, frameRect, unwrapRefU))
+      .filter((pt) => Number.isFinite(pt?.x) && Number.isFinite(pt?.y))
+      .map((pt) => ({ x: Number(pt.x || 0), y: Number(pt.y || 0) }));
+    if (corners.length < 4) {
       const hidden = { visible: false, kind: "strokeGroup" };
       editor._strokeGeomCache.set(cacheKey, hidden);
       return hidden;
     }
-    const corners = [
-      { x: minX, y: minY },
-      { x: maxX, y: minY },
-      { x: maxX, y: maxY },
-      { x: minX, y: maxY },
-    ];
-    const center = { x: (minX + maxX) * 0.5, y: (minY + maxY) * 0.5 };
-    const topMid = { x: center.x, y: minY };
-    const rightMid = { x: maxX, y: center.y };
-    const bottomMid = { x: center.x, y: maxY };
-    const leftMid = { x: minX, y: center.y };
+    const edgeMidpoint = (a, b) => ({
+      x: (Number(a?.x || 0) + Number(b?.x || 0)) * 0.5,
+      y: (Number(a?.y || 0) + Number(b?.y || 0)) * 0.5,
+      a,
+      b,
+    });
+    const topMid = edgeMidpoint(corners[0], corners[1]);
+    const rightMid = edgeMidpoint(corners[1], corners[2]);
+    const bottomMid = edgeMidpoint(corners[2], corners[3]);
+    const leftMid = edgeMidpoint(corners[3], corners[0]);
     const geom = {
       kind: "strokeGroup",
-      center,
+      center: { x: Number(center.x || 0), y: Number(center.y || 0) },
       corners,
       edgeMidpoints: [
-        { edge: "top", x: topMid.x, y: topMid.y, a: corners[0], b: corners[1] },
-        { edge: "right", x: rightMid.x, y: rightMid.y, a: corners[1], b: corners[2] },
-        { edge: "bottom", x: bottomMid.x, y: bottomMid.y, a: corners[2], b: corners[3] },
-        { edge: "left", x: leftMid.x, y: leftMid.y, a: corners[3], b: corners[0] },
+        { edge: "top", ...topMid },
+        { edge: "right", ...rightMid },
+        { edge: "bottom", ...bottomMid },
+        { edge: "left", ...leftMid },
       ],
-      rotateStemBase: topMid,
+      rotateStemBase: { x: topMid.x, y: topMid.y },
       rotateHandle: { x: topMid.x, y: topMid.y - 30 },
       strokePaths,
       visible: true,
@@ -4399,8 +4499,15 @@ async function showEditor(node, type, options = {}) {
   }
 
   function buildRasterObjectGeom(item, cacheKey) {
+    const frameShot = editor.mode === "frame" ? getActiveCutoutShot() : null;
+    const frameRect = frameShot ? getFrameViewRect(frameShot) : null;
+    const centerUv = getRasterObjectCenterUv(item);
+    const unwrapRefU = editor.mode === "unwrap" ? Number(centerUv?.u || 0) : null;
+    const centerPoint = projectErpPointToEditor(centerUv, null, frameShot, frameRect, unwrapRefU);
     const erpPoints = getRasterObjectTransformedErpPoints(item);
-    const projected = projectEditorPoints(erpPoints);
+    const projected = erpPoints
+      .map((pt) => projectErpPointToEditor(pt, centerPoint?.x ?? null, frameShot, frameRect, unwrapRefU))
+      .filter((pt) => Number.isFinite(pt?.x) && Number.isFinite(pt?.y));
     if (!Array.isArray(projected) || projected.length < 4) {
       const hidden = { visible: false, kind: "rasterObject" };
       editor._strokeGeomCache.set(cacheKey, hidden);
@@ -4558,7 +4665,10 @@ async function showEditor(node, type, options = {}) {
     const ih = img.naturalHeight || img.height;
     const [Nu, Nv] = getMeshDivisions();
     const centerDir = yawPitchToDir(Number(item.yaw_deg || 0), Number(item.pitch_deg || 0));
-    const centerProj = editor.mode === "unwrap" ? projectDirUnwrap(centerDir) : null;
+    const frameShot = editor.mode === "frame" ? getActiveCutoutShot() : null;
+    const frameRect = frameShot ? getFrameViewRect(frameShot) : null;
+    const centerProj = projectSceneItemDir(centerDir, null, frameShot, frameRect);
+    const refX = editor.mode === "unwrap" ? centerProj?.x ?? null : null;
 
     const verts = [];
     for (let j = 0; j <= Nv; j += 1) {
@@ -4570,7 +4680,7 @@ async function showEditor(node, type, options = {}) {
         const su = (sx0 + (sx1 - sx0) * u) * iw;
         const sv = (sy0 + (sy1 - sy0) * v) * ih;
         const d = stickerSampleDir(item, wu, wv);
-        const p = editor.mode === "unwrap" ? projectDirUnwrap(d, centerProj?.x ?? null) : projectDir(d);
+        const p = projectSceneItemDir(d, refX, frameShot, frameRect);
         verts.push({ p, s: { x: su, y: sv } });
       }
     }
@@ -4702,17 +4812,13 @@ async function showEditor(node, type, options = {}) {
   function getCutoutSelectableItemsForDisplay() {
     const stickers = [...(Array.isArray(state.stickers) ? state.stickers : [])]
       .sort((a, b) => Number(a.z_index || 0) - Number(b.z_index || 0));
-    if (editor.mode === "frame") return stickers;
-    const shots = Array.isArray(state.shots) ? state.shots : [];
-    return [...stickers, ...shots];
+    return stickers;
   }
 
   function getCutoutSelectableItemsForHit() {
     const stickers = [...(Array.isArray(state.stickers) ? state.stickers : [])]
       .sort((a, b) => Number(b.z_index || 0) - Number(a.z_index || 0));
-    if (editor.mode === "frame") return stickers;
-    const shots = Array.isArray(state.shots) ? state.shots : [];
-    return [...stickers, ...shots];
+    return stickers;
   }
 
   function traceQuad(ctx2d, corners = []) {
@@ -4807,13 +4913,15 @@ async function showEditor(node, type, options = {}) {
       const selected = !multiSelected && isItemSelected(item);
       if (editor.mode === "frame" && !selected) continue;
       if (!editor.showObjects && !isShotItem(item)) continue;
+      const itemIsSticker = isStickerItem(item);
+      const itemLocked = isItemLocked(item);
+      if (!itemIsSticker) {
+        continue;
+      }
       const g = objectGeom(item);
       if (type !== "stickers" && !g.visible) {
         continue;
       }
-
-      const itemIsSticker = isStickerItem(item);
-      const itemLocked = isItemLocked(item);
       drawObjectBody(item, g, selected, itemLocked);
 
       if (selected && g.visible) {
@@ -4856,10 +4964,8 @@ async function showEditor(node, type, options = {}) {
         ctx.closePath();
         ctx.stroke();
         ctx.setLineDash([]);
-        if (isStrokeGroupItem(selected)) {
-          ctx.fillStyle = accent;
-          g.corners.forEach((p) => { ctx.beginPath(); ctx.arc(p.x, p.y, 6.5, 0, Math.PI * 2); ctx.fill(); });
-        }
+        ctx.fillStyle = accent;
+        g.corners.forEach((p) => { ctx.beginPath(); ctx.arc(p.x, p.y, 6.5, 0, Math.PI * 2); ctx.fill(); });
         ctx.restore();
       });
     }
@@ -4950,261 +5056,13 @@ async function showEditor(node, type, options = {}) {
     ].join("|");
   }
 
-  function ensureNodeCutoutPreviewSurface(options = {}) {
-    if (type !== "cutout") return null;
-    const shot = options.shot || getActiveCutoutShot();
-    if (!shot) {
-      node.__panoCutoutPreviewSurface = null;
-      return null;
-    }
-    const size = getCutoutPreviewSurfaceSize(shot);
-    const revision = getCutoutPreviewSurfaceRevision(shot, options);
-    if (!options.forceRedraw && node.__panoCutoutPreviewSurface?.revision === revision) {
-      return node.__panoCutoutPreviewSurface;
-    }
-    const previewCanvas = renderCutoutPreviewToTarget(shot, size, {
-      cachePrefix: "shared_cutout_preview_surface",
-      quality: String(options.quality || "balanced"),
-    });
-    if (!previewCanvas) {
-      return node.__panoCutoutPreviewSurface || null;
-    }
-    node.__panoCutoutPreviewSurface = {
-      source: previewCanvas,
-      revision,
-    };
-    return node.__panoCutoutPreviewSurface;
-  }
-
   function drawCutoutOutputPreview() {
-    if (type !== "cutout") return;
-    const shot = getActiveCutoutShot();
-    if (!shot) {
-      editor.outputPreviewRect = null;
-      if (outputPreviewToggleBtn) outputPreviewToggleBtn.style.display = "none";
-      return;
-    }
-
-    const margin = 14;
-    const mix = clamp(Number(editor.outputPreviewAnim ?? (editor.outputPreviewExpanded ? 1 : 0)), 0, 1);
-    const maxWCollapsed = Math.max(120, Math.min(250, canvas.width * 0.28));
-    const maxWExpanded = Math.max(260, Math.min(560, canvas.width * 0.62));
-    const maxHCollapsed = Math.max(76, Math.min(150, canvas.height * 0.22));
-    const maxHExpanded = Math.max(160, Math.min(340, canvas.height * 0.48));
-    const maxW = lerp(maxWCollapsed, maxWExpanded, mix);
-    const maxH = lerp(maxHCollapsed, maxHExpanded, mix);
-    const cutoutView = buildCutoutViewParamsFromShot(shot);
-    const aspect = Number(cutoutView?.aspect || 1);
-    let pw = maxW;
-    let ph = pw / aspect;
-    if (ph > maxH) {
-      ph = maxH;
-      pw = ph * aspect;
-    }
-    const px = canvas.width - margin - pw;
-    const py = margin;
-    const radius = 12;
-    editor.outputPreviewRect = { x: px, y: py, w: pw, h: ph };
-    const placeOutputPreviewToggle = () => {
-      if (!outputPreviewToggleBtn) return;
-      const left = `${Math.round(px + pw - 8 - 24)}px`;
-      const top = `${Math.round(py + 8)}px`;
-      outputPreviewToggleBtn.style.display = "inline-flex";
-      if (outputPreviewToggleBtn.style.left !== left) outputPreviewToggleBtn.style.left = left;
-      if (outputPreviewToggleBtn.style.top !== top) outputPreviewToggleBtn.style.top = top;
-    };
-
-    const roundedRect = (x, y, w, h, r) => {
-      const rr = Math.max(0, Math.min(r, Math.min(w, h) * 0.5));
-      ctx.beginPath();
-      if (typeof ctx.roundRect === "function") {
-        ctx.roundRect(x, y, w, h, rr);
-      } else {
-        ctx.moveTo(x + rr, y);
-        ctx.arcTo(x + w, y, x + w, y + h, rr);
-        ctx.arcTo(x + w, y + h, x, y + h, rr);
-        ctx.arcTo(x, y + h, x, y, rr);
-        ctx.arcTo(x, y, x + w, y, rr);
-      }
-      ctx.closePath();
-    };
-
-    ctx.save();
-    ctx.shadowColor = "rgba(0, 0, 0, 0.45)";
-    ctx.shadowBlur = 22;
-    ctx.shadowOffsetX = 0;
-    ctx.shadowOffsetY = 8;
-    ctx.fillStyle = "rgba(10, 10, 10, 0.72)";
-    roundedRect(px, py, pw, ph, radius);
-    ctx.fill();
-    ctx.restore();
-
-    ctx.save();
-    roundedRect(px, py, pw, ph, radius);
-    ctx.clip();
-
-    const expectedRevision = getCutoutPreviewSurfaceRevision(shot, { quality: "balanced" });
-    let previewSurface = node.__panoCutoutPreviewSurface;
-    const liveFramePreview = isCutoutTransformInteractionActive();
-    if (liveFramePreview) {
-      previewSurface = ensureNodeCutoutPreviewSurface({
-        shot,
-        quality: "balanced",
-        forceRedraw: true,
-      });
-    }
-    if ((!previewSurface || previewSurface.revision !== expectedRevision)
-      && !liveFramePreview
-      && !editor.interaction
-      && !editor.cutoutPreviewSurfaceRaf
-      && !editor.cutoutPreviewSurfaceTimer) {
-      previewSurface = ensureNodeCutoutPreviewSurface({ shot, quality: "balanced" });
-    }
-    const previewCanvas = previewSurface?.source || null;
-    const previewReady = !!(previewCanvas
-      && Number(previewCanvas.width || 0) > 1
-      && Number(previewCanvas.height || 0) > 1);
-    if (previewSurface?.revision !== expectedRevision) {
-      scheduleNodeCutoutPreviewSurfaceUpdate();
-    }
-    if (!previewReady) {
-      ctx.fillStyle = "rgba(255, 255, 255, 0.06)";
-      ctx.fillRect(px, py, pw, ph);
-      ctx.strokeStyle = "rgba(255, 255, 255, 0.12)";
-      ctx.lineWidth = 1;
-      ctx.strokeRect(px + 0.5, py + 0.5, pw - 1, ph - 1);
-      scheduleNodeCutoutPreviewSurfaceUpdate();
-      ctx.restore();
-      placeOutputPreviewToggle();
-      return;
-    }
-
-    ctx.drawImage(previewCanvas, px, py, pw, ph);
-    ctx.restore();
-    placeOutputPreviewToggle();
+    editor.outputPreviewRect = null;
+    uiState.outputPreviewToggle.visible = false;
   }
 
   function renderCutoutPreviewToContext(targetCtx, rect, shot, options = {}) {
-    const img = getConnectedErpImage();
-    if (!targetCtx || !rect || !shot || !img) return false;
-    const scene = buildEditorStickerScene();
-    const textures = buildEditorStickerTextures(scene);
-    const orderedGroupIds = getOrderedPaintGroupIds();
-    const erpTarget = editor.paintEngine?.getErpTarget?.(orderedGroupIds) || null;
-    const descriptor = buildPanoramaCompositeDescriptor({
-      stateRevision: [
-        "cutout_preview",
-        String(img?.currentSrc || img?.src || ""),
-        Number(img?.naturalWidth || img?.width || 0),
-        Number(img?.naturalHeight || img?.height || 0),
-        Array.isArray(textures) ? textures.map((item) => `${String(item?.assetId || "")}:${String(item?.revision || "")}`).join(",") : "",
-        getDisplayPaintRevisionKey(),
-      ].join("|"),
-      backgroundSource: img,
-      backgroundRevision: String(options.cachePrefix || "modal_cutout_output_preview"),
-      coverageDeg: normalizeCoverageValue(state.coverage),
-      scene,
-      textures,
-      paintSource: erpTarget?.displayPaint?.canvas || null,
-      paintRevision: getDisplayPaintRevisionKey(),
-      maskSource: erpTarget?.committedMask?.canvas || null,
-      maskRevision: getPaintingCompositeRevisionKey(),
-      backgroundOpacity: 1,
-      showMaskTint: false,
-    });
-    const cutoutView = buildCutoutViewParamsFromShot(shot);
-    const synced = cutoutPreviewCore.syncState(descriptor);
-    if (!synced) return false;
-    const surface = cutoutPreviewCore.renderToTarget(
-      "cutout_preview",
-      cutoutView,
-      {
-        width: rect.w,
-        height: rect.h,
-        dpr: window.devicePixelRatio || 1,
-        backgroundOpacity: 1,
-        showMaskTint: false,
-      },
-    );
-    if (!surface) return false;
-    targetCtx.drawImage(surface, rect.x, rect.y, rect.w, rect.h);
-    return true;
-  }
-
-  function renderCutoutPreviewToTarget(shot, size, options = {}) {
-    const img = getConnectedErpImage();
-    if (!shot || !img || !(Number(size?.width || 0) > 0) || !(Number(size?.height || 0) > 0)) return null;
-    const scene = buildEditorStickerScene();
-    const textures = buildEditorStickerTextures(scene);
-    const orderedGroupIds = getOrderedPaintGroupIds();
-    const erpTarget = editor.paintEngine?.getErpTarget?.(orderedGroupIds) || null;
-    const descriptor = buildPanoramaCompositeDescriptor({
-      stateRevision: [
-        "cutout_preview_target",
-        String(img?.currentSrc || img?.src || ""),
-        Number(img?.naturalWidth || img?.width || 0),
-        Number(img?.naturalHeight || img?.height || 0),
-        Array.isArray(textures) ? textures.map((item) => `${String(item?.assetId || "")}:${String(item?.revision || "")}`).join(",") : "",
-        getDisplayPaintRevisionKey(),
-      ].join("|"),
-      backgroundSource: img,
-      backgroundRevision: String(options.cachePrefix || "modal_cutout_output_preview"),
-      coverageDeg: normalizeCoverageValue(state.coverage),
-      scene,
-      textures,
-      paintSource: erpTarget?.displayPaint?.canvas || null,
-      paintRevision: getDisplayPaintRevisionKey(),
-      maskSource: erpTarget?.committedMask?.canvas || null,
-      maskRevision: getPaintingCompositeRevisionKey(),
-      backgroundOpacity: 1,
-      showMaskTint: false,
-    });
-    const cutoutView = buildCutoutViewParamsFromShot(shot);
-    const synced = cutoutPreviewCore.syncState(descriptor);
-    if (!synced) return null;
-    return cutoutPreviewCore.renderToTarget(
-      "cutout_preview",
-      cutoutView,
-      {
-        width: size.width,
-        height: size.height,
-        dpr: window.devicePixelRatio || 1,
-        backgroundOpacity: 1,
-        showMaskTint: false,
-      },
-    );
-  }
-
-  function syncNodeCutoutPreviewSurface() {
-    ensureNodeCutoutPreviewSurface();
-  }
-
-  function scheduleNodeCutoutPreviewSurfaceUpdate() {
-    if (type !== "cutout") return;
-    const now = performance.now();
-    const minDelay = getCutoutPreviewUpdateMinDelay();
-    const elapsed = now - Number(editor.cutoutPreviewSurfaceLastTs || 0);
-    if (editor.cutoutPreviewSurfaceRaf || editor.cutoutPreviewSurfaceTimer) return;
-    const queue = () => {
-      editor.cutoutPreviewSurfaceRaf = requestAnimationFrame(() => {
-        editor.cutoutPreviewSurfaceRaf = 0;
-        editor.cutoutPreviewSurfaceLastTs = performance.now();
-        syncNodeCutoutPreviewSurface();
-        runtime.dirty = true;
-        node.__panoDomPreview?.requestDraw?.();
-        node.setDirtyCanvas?.(true, false);
-        node.graph?.setDirtyCanvas?.(true, true);
-        app?.canvas?.setDirty?.(true, true);
-      });
-    };
-    if (elapsed >= minDelay) {
-      queue();
-      return;
-    }
-    editor.cutoutPreviewSurfaceTimer = window.setTimeout(() => {
-      editor.cutoutPreviewSurfaceTimer = 0;
-      if (!editor.cutoutPreviewSurfaceRaf) queue();
-    }, Math.max(0, Math.ceil(minDelay - elapsed)));
+    return false;
   }
 
   function projectErpStrokeToCurrentView(stroke) {
@@ -5253,36 +5111,63 @@ async function showEditor(node, type, options = {}) {
     return { ...base, ...extra, u: x, v: y };
   }
 
-  function interpolateTargetPoint(a, b, t) {
-    const ac = getTargetSpaceCoord(a);
-    const bc = getTargetSpaceCoord(b);
-    return cloneTargetPointWithCoords(a, lerp(ac.x, bc.x, t), lerp(ac.y, bc.y, t), {
-      t: lerp(Number(a?.t || 0), Number(b?.t || 0), t),
-      widthScale: lerp(getStrokePointScalar(a, "widthScale", 1), getStrokePointScalar(b, "widthScale", 1), t),
-      pressureLike: lerp(getStrokePointScalar(a, "pressureLike", 1), getStrokePointScalar(b, "pressureLike", 1), t),
-    });
-  }
-
   function getFreehandResampleSpacing(targetSpace, finalPass = false) {
     return finalPass ? 0.0012 : 0.0018;
   }
 
   function processFreehandPoints(rawPoints, targetSpace, finalPass = false) {
     if (!Array.isArray(rawPoints) || !rawPoints.length) return [];
-    if (rawPoints.length === 1) return [cloneTargetPointWithCoords(rawPoints[0], getTargetSpaceCoord(rawPoints[0]).x, getTargetSpaceCoord(rawPoints[0]).y)];
+    const isErpGlobal = String(targetSpace?.kind || "") === "ERP_GLOBAL";
+    const pointCoords = new WeakMap();
+    if (isErpGlobal) {
+      let prevContinuousU = null;
+      rawPoints.forEach((point) => {
+        const rawU = Number(point?.u || 0);
+        const rawV = Number(point?.v || 0);
+        const wrappedU = ((rawU % 1) + 1) % 1;
+        const continuousU = prevContinuousU == null
+          ? wrappedU
+          : (prevContinuousU + shortestWrappedDelta(wrappedU, ((prevContinuousU % 1) + 1) % 1));
+        pointCoords.set(point, { x: continuousU, y: rawV });
+        prevContinuousU = continuousU;
+      });
+    }
+    const getCoord = (point) => {
+      if (!point || typeof point !== "object") return { x: 0, y: 0 };
+      return pointCoords.get(point) || getTargetSpaceCoord(point);
+    };
+    const cloneWithCoords = (template, x, y, extra = {}) => {
+      const outX = isErpGlobal ? ((((Number(x) % 1) + 1) % 1)) : Number(x);
+      const next = cloneTargetPointWithCoords(template, outX, y, extra);
+      pointCoords.set(next, { x: Number(x), y: Number(y) });
+      return next;
+    };
+    const interpolatePoint = (a, b, t) => {
+      const ac = getCoord(a);
+      const bc = getCoord(b);
+      return cloneWithCoords(a, lerp(ac.x, bc.x, t), lerp(ac.y, bc.y, t), {
+        t: lerp(Number(a?.t || 0), Number(b?.t || 0), t),
+        widthScale: lerp(getStrokePointScalar(a, "widthScale", 1), getStrokePointScalar(b, "widthScale", 1), t),
+        pressureLike: lerp(getStrokePointScalar(a, "pressureLike", 1), getStrokePointScalar(b, "pressureLike", 1), t),
+      });
+    };
+    if (rawPoints.length === 1) {
+      const onlyCoord = getCoord(rawPoints[0]);
+      return [cloneWithCoords(rawPoints[0], onlyCoord.x, onlyCoord.y)];
+    }
     const spacing = getFreehandResampleSpacing(targetSpace, finalPass);
     const buildUniformSamples = (srcPoints, sampleSpacing) => {
       const cumulative = [0];
       for (let i = 1; i < srcPoints.length; i += 1) {
-        const a = getTargetSpaceCoord(srcPoints[i - 1]);
-        const b = getTargetSpaceCoord(srcPoints[i]);
+        const a = getCoord(srcPoints[i - 1]);
+        const b = getCoord(srcPoints[i]);
         cumulative.push(cumulative[i - 1] + Math.hypot(b.x - a.x, b.y - a.y));
       }
       const totalLen = cumulative[cumulative.length - 1] || 0;
       if (totalLen <= 1e-8) {
         const only = srcPoints[0];
-        const onlyCoord = getTargetSpaceCoord(only);
-        return [cloneTargetPointWithCoords(only, onlyCoord.x, onlyCoord.y)];
+        const onlyCoord = getCoord(only);
+        return [cloneWithCoords(only, onlyCoord.x, onlyCoord.y)];
       }
       const out = [];
       let segIndex = 0;
@@ -5291,26 +5176,27 @@ async function showEditor(node, type, options = {}) {
         const s0 = cumulative[segIndex];
         const s1 = cumulative[segIndex + 1];
         const range = Math.max(1e-8, s1 - s0);
-        out.push(interpolateTargetPoint(srcPoints[segIndex], srcPoints[segIndex + 1], clamp((d - s0) / range, 0, 1)));
+        out.push(interpolatePoint(srcPoints[segIndex], srcPoints[segIndex + 1], clamp((d - s0) / range, 0, 1)));
       }
       const tail = srcPoints[srcPoints.length - 1];
-      const tailCoord = getTargetSpaceCoord(tail);
+      const tailCoord = getCoord(tail);
       const prev = out[out.length - 1];
-      const prevCoord = prev ? getTargetSpaceCoord(prev) : null;
+      const prevCoord = prev ? getCoord(prev) : null;
       if (!prevCoord || Math.hypot(prevCoord.x - tailCoord.x, prevCoord.y - tailCoord.y) > sampleSpacing * 0.35) {
-        out.push(cloneTargetPointWithCoords(tail, tailCoord.x, tailCoord.y));
+        out.push(cloneWithCoords(tail, tailCoord.x, tailCoord.y));
       }
       return out;
     };
     const chaikinPass = (srcPoints) => {
       if (!Array.isArray(srcPoints) || srcPoints.length < 3) return srcPoints ? srcPoints.slice() : [];
-      const out = [cloneTargetPointWithCoords(srcPoints[0], getTargetSpaceCoord(srcPoints[0]).x, getTargetSpaceCoord(srcPoints[0]).y)];
+      const firstCoord = getCoord(srcPoints[0]);
+      const out = [cloneWithCoords(srcPoints[0], firstCoord.x, firstCoord.y)];
       for (let i = 0; i < srcPoints.length - 1; i += 1) {
         const a = srcPoints[i];
         const b = srcPoints[i + 1];
-        const ac = getTargetSpaceCoord(a);
-        const bc = getTargetSpaceCoord(b);
-        const q = cloneTargetPointWithCoords(a,
+        const ac = getCoord(a);
+        const bc = getCoord(b);
+        const q = cloneWithCoords(a,
           (ac.x * 0.75) + (bc.x * 0.25),
           (ac.y * 0.75) + (bc.y * 0.25),
           {
@@ -5318,17 +5204,19 @@ async function showEditor(node, type, options = {}) {
             widthScale: (getStrokePointScalar(a, "widthScale", 1) * 0.75) + (getStrokePointScalar(b, "widthScale", 1) * 0.25),
             pressureLike: (getStrokePointScalar(a, "pressureLike", 1) * 0.75) + (getStrokePointScalar(b, "pressureLike", 1) * 0.25),
           });
-        const r = cloneTargetPointWithCoords(a,
+        const r = cloneWithCoords(a,
           (ac.x * 0.25) + (bc.x * 0.75),
           (ac.y * 0.25) + (bc.y * 0.75),
           {
             t: (Number(a.t || 0) * 0.25) + (Number(b.t || 0) * 0.75),
             widthScale: (getStrokePointScalar(a, "widthScale", 1) * 0.25) + (getStrokePointScalar(b, "widthScale", 1) * 0.75),
             pressureLike: (getStrokePointScalar(a, "pressureLike", 1) * 0.25) + (getStrokePointScalar(b, "pressureLike", 1) * 0.75),
-          });
+        });
         out.push(q, r);
       }
-      out.push(cloneTargetPointWithCoords(srcPoints[srcPoints.length - 1], getTargetSpaceCoord(srcPoints[srcPoints.length - 1]).x, getTargetSpaceCoord(srcPoints[srcPoints.length - 1]).y));
+      const tail = srcPoints[srcPoints.length - 1];
+      const tailCoord = getCoord(tail);
+      out.push(cloneWithCoords(tail, tailCoord.x, tailCoord.y));
       return out;
     };
     const resampled = buildUniformSamples(rawPoints, spacing);
@@ -5366,11 +5254,11 @@ async function showEditor(node, type, options = {}) {
     };
   }
 
-  function createRasterSurface(width, height) {
+  function createRasterSurface(width, height, options = {}) {
     const surface = document.createElement("canvas");
     surface.width = Math.max(1, Math.round(width));
     surface.height = Math.max(1, Math.round(height));
-    const surfaceCtx = surface.getContext("2d");
+    const surfaceCtx = surface.getContext("2d", options.readback ? { willReadFrequently: true } : void 0);
     if (surfaceCtx) {
       surfaceCtx.clearRect(0, 0, surface.width, surface.height);
       surfaceCtx.imageSmoothingEnabled = true;
@@ -5754,13 +5642,13 @@ async function showEditor(node, type, options = {}) {
           if (cx > maxX) maxX = cx;
           if (cy > maxY) maxY = cy;
           const neighbors = [
-            [cx - 1, cy],
-            [cx + 1, cy],
+            [(cx - 1 + width) % width, cy],
+            [(cx + 1) % width, cy],
             [cx, cy - 1],
             [cx, cy + 1],
           ];
           for (const [nx, ny] of neighbors) {
-            if (nx < 0 || ny < 0 || nx >= width || ny >= height) continue;
+            if (ny < 0 || ny >= height) continue;
             const nidx = ny * width + nx;
             if (visited[nidx] || alpha[nidx] <= threshold) continue;
             visited[nidx] = 1;
@@ -5775,6 +5663,37 @@ async function showEditor(node, type, options = {}) {
     return components;
   }
 
+  function getWrappedComponentWindow(component, width) {
+    const xs = [...new Set((Array.isArray(component?.pixels) ? component.pixels : []).map((pt) => Number(pt?.x || 0)).filter((x) => Number.isFinite(x)))].sort((a, b) => a - b);
+    if (!xs.length) return null;
+    if (xs.length === 1) {
+      return { startX: xs[0], widthPx: 1 };
+    }
+    let bestGap = -1;
+    let bestIndex = 0;
+    for (let i = 0; i < xs.length; i += 1) {
+      const current = xs[i];
+      const next = i === xs.length - 1 ? xs[0] + width : xs[i + 1];
+      const gap = next - current - 1;
+      if (gap > bestGap) {
+        bestGap = gap;
+        bestIndex = i;
+      }
+    }
+    const startX = (xs[(bestIndex + 1) % xs.length] + width) % width;
+    let minWrappedX = Infinity;
+    let maxWrappedX = -Infinity;
+    for (const x of xs) {
+      const wrappedX = (x - startX + width) % width;
+      minWrappedX = Math.min(minWrappedX, wrappedX);
+      maxWrappedX = Math.max(maxWrappedX, wrappedX);
+    }
+    return {
+      startX,
+      widthPx: Math.max(1, maxWrappedX - minWrappedX + 1),
+    };
+  }
+
   function createRasterFrozenObjectsFromCanvas(canvas, layerKind, baseMeta = {}) {
     const w = Number(canvas?.width || 0);
     const h = Number(canvas?.height || 0);
@@ -5785,8 +5704,11 @@ async function showEditor(node, type, options = {}) {
     for (let i = 0; i < alpha.length; i += 1) alpha[i] = imageData.data[i * 4 + 3];
     const components = findAlphaConnectedComponents(alpha, w, h, 8);
     return components.map((component, index) => {
-      const cw = component.maxX - component.minX + 1;
+      const window = getWrappedComponentWindow(component, w);
+      if (!window) return null;
+      const cw = Number(window.widthPx || 0);
       const ch = component.maxY - component.minY + 1;
+      const startX = Number(window.startX || 0);
       const out = document.createElement("canvas");
       out.width = cw;
       out.height = ch;
@@ -5795,7 +5717,8 @@ async function showEditor(node, type, options = {}) {
       const outData = outCtx.createImageData(cw, ch);
       component.pixels.forEach(({ x, y }) => {
         const srcIdx = (y * w + x) * 4;
-        const dstIdx = ((y - component.minY) * cw + (x - component.minX)) * 4;
+        const wrappedX = (Number(x || 0) - startX + w) % w;
+        const dstIdx = ((y - component.minY) * cw + wrappedX) * 4;
         outData.data[dstIdx + 0] = imageData.data[srcIdx + 0];
         outData.data[dstIdx + 1] = imageData.data[srcIdx + 1];
         outData.data[dstIdx + 2] = imageData.data[srcIdx + 2];
@@ -5809,14 +5732,14 @@ async function showEditor(node, type, options = {}) {
         z_index: Number(baseMeta?.z_index || 0) + (index * 0.001),
         locked: baseMeta?.locked === true,
         bbox: {
-          u0: component.minX / w,
+          u0: 0,
           v0: component.minY / h,
-          u1: (component.maxX + 1) / w,
+          u1: cw / w,
           v1: (component.maxY + 1) / h,
         },
         rasterDataUrl: out.toDataURL("image/png"),
         transform: {
-          du: 0,
+          du: startX / w,
           dv: 0,
           rot_deg: 0,
           scale: 1,
@@ -5856,14 +5779,18 @@ async function showEditor(node, type, options = {}) {
       : [];
   }
 
-  function projectErpPointsToCurrentView(points) {
+  function projectErpPointsToCurrentView(points, unwrapRefU = null) {
     if (!Array.isArray(points) || points.length < 1) return [];
     if (editor.mode === "unwrap") {
       const r = getUnwrapRect();
-      return points.map((pt) => ({
-        x: r.x + (Number(pt.u || 0) * r.w),
-        y: r.y + (Number(pt.v || 0) * r.h),
-      }));
+      return points.map((pt) => {
+        const u = ((Number(pt.u || 0) % 1) + 1) % 1;
+        const uu = unwrapRefU == null ? u : (Number(unwrapRefU || 0) + shortestWrappedDelta(u, unwrapRefU));
+        return {
+          x: r.x + (uu * r.w),
+          y: r.y + (Number(pt.v || 0) * r.h),
+        };
+      });
     }
     const projected = points.map((pt) => projectDir(erpPointToWorldDir(pt))).filter(Boolean);
     return projected.every((pt) => Number(pt.z || 0) > 0)
@@ -5962,17 +5889,69 @@ async function showEditor(node, type, options = {}) {
     ctx.rect(rect.x, rect.y, rect.w, rect.h);
     ctx.clip();
     if (img && (img.complete || img.naturalWidth || img.width) && Number(img.naturalWidth || img.width || 0) > 1 && Number(img.naturalHeight || img.height || 0) > 1) {
-      const view = buildCutoutViewParamsFromShot(shot);
-      const glDrawn = drawOrderedDisplayListInView(ctx, rect, view, img, `modal_frame_${String(shot.id || "")}`);
-      if (!glDrawn) {
-        drawCutoutProjectionPreview(
-          ctx,
-          node,
-          img,
-          rect,
-          shot,
-          String(state.ui_settings?.preview_quality || "balanced"),
-        );
+      const previewQuality = editor.interaction ? "draft" : String(state.ui_settings?.preview_quality || "balanced");
+      let drew = false;
+      if (editor.showPanorama) {
+        drew = drawCutoutProjectionPreview(ctx, node, img, rect, shot, previewQuality) || drew;
+      }
+      const orderedGroupIds = getOrderedPaintGroupIds();
+      const erpTarget = editor.paintEngine?.getErpTarget?.(orderedGroupIds) || null;
+      if (editor.showObjects) {
+        const stickers = [...(Array.isArray(state.stickers) ? state.stickers : [])]
+          .filter((item) => item?.visible !== false)
+          .sort((a, b) => Number(a?.z_index || 0) - Number(b?.z_index || 0));
+        for (const item of stickers) {
+          const stickerImg = getStickerImage(item);
+          if (stickerImg && (stickerImg.complete || stickerImg.width)) {
+            const geom = objectGeom(item);
+            const corners = Array.isArray(geom?.corners) ? geom.corners : [];
+            if (corners.length < 4) continue;
+            const crop = item?.crop && typeof item.crop === "object" ? item.crop : {};
+            const iw = Number(stickerImg.naturalWidth || stickerImg.width || 0);
+            const ih = Number(stickerImg.naturalHeight || stickerImg.height || 0);
+            if (iw <= 1 || ih <= 1) continue;
+            const sx0 = clamp(Math.min(Number(crop.x0 ?? 0), Number(crop.x1 ?? 1)), 0, 1) * iw;
+            const sy0 = clamp(Math.min(Number(crop.y0 ?? 0), Number(crop.y1 ?? 1)), 0, 1) * ih;
+            const sx1 = clamp(Math.max(Number(crop.x0 ?? 0), Number(crop.x1 ?? 1)), 0, 1) * iw;
+            const sy1 = clamp(Math.max(Number(crop.y0 ?? 0), Number(crop.y1 ?? 1)), 0, 1) * ih;
+            const prevAlpha = ctx.globalAlpha;
+            ctx.globalAlpha = getStickerDisplayAlpha(item);
+            drawImageTri(
+              stickerImg,
+              { x: sx0, y: sy0 },
+              { x: sx1, y: sy0 },
+              { x: sx1, y: sy1 },
+              corners[0],
+              corners[1],
+              corners[2],
+            );
+            drawImageTri(
+              stickerImg,
+              { x: sx0, y: sy0 },
+              { x: sx1, y: sy1 },
+              { x: sx0, y: sy1 },
+              corners[0],
+              corners[2],
+              corners[3],
+            );
+            ctx.globalAlpha = prevAlpha;
+            drew = true;
+          }
+        }
+        const paintCanvas = erpTarget?.displayPaint?.canvas || null;
+        if (paintCanvas) {
+          drew = drawCutoutProjectionPreview(ctx, node, paintCanvas, rect, shot, previewQuality) || drew;
+        }
+      }
+      if (editor.showMask) {
+        const maskCanvas = editor.paintEngine?.getMaskDisplayCanvas?.() || null;
+        if (maskCanvas) {
+          drew = drawCutoutProjectionPreview(ctx, node, maskCanvas, rect, shot, previewQuality) || drew;
+        }
+      }
+      if (!drew) {
+        ctx.fillStyle = "rgba(255, 255, 255, 0.03)";
+        ctx.fillRect(rect.x, rect.y, rect.w, rect.h);
       }
     } else {
       ctx.fillStyle = "rgba(255, 255, 255, 0.03)";
@@ -6041,9 +6020,8 @@ async function showEditor(node, type, options = {}) {
     else if (editor.mode === "unwrap") drawGridUnwrap(false);
     else drawGridPano(false);
     drawObjects();
-    if (editor.mode !== "frame") drawCutoutOutputPreview();
     drawLassoOutlineOverlay();
-    if (fovValueEl) fovValueEl.textContent = `${Math.round(editor.viewFov)}°`;
+    uiState.fovValue = `${Math.round(editor.viewFov)}°`;
     updateSelectionMenu();
     if (!runtime.hasPresentedFrame) {
       runtime.hasPresentedFrame = true;
@@ -6077,30 +6055,9 @@ async function showEditor(node, type, options = {}) {
     return false;
   }
 
-  function syncNodeLivePreviewSources(options = {}) {
-    const updateCutoutPreview = options.updateCutoutPreview !== false;
+  function syncNodeLivePreviewSources() {
     node.__panoLiveStateOverride = state;
-    if (type === "cutout") {
-      node.__panoLivePaintSurface = null;
-      if (updateCutoutPreview) scheduleNodeCutoutPreviewSurfaceUpdate();
-      return;
-    }
-    let livePaint = null;
-    try {
-      const orderedGroupIds = getOrderedPaintGroupIds();
-      const interactionCompositeActive = isPaintCompositeInteraction();
-      const displayPaint = editor.paintEngine?.getErpTarget?.(orderedGroupIds)?.displayPaint?.canvas || null;
-      const source = displayPaint;
-      if (source) {
-        livePaint = {
-          source,
-          revision: `${getPaintingCompositeRevisionKey()}:${getLivePaintRevisionSuffix()}`,
-        };
-      }
-    } catch {
-      livePaint = null;
-    }
-    node.__panoLivePaintSurface = livePaint;
+    node.__panoLivePaintSurface = getSharedLivePaintSurface();
   }
 
   function requestDraw(options = {}) {
@@ -6129,17 +6086,8 @@ async function showEditor(node, type, options = {}) {
       syncLookAtFrameButtonState();
       syncViewToggleState();
     }
-    const shouldUpdateCutoutPreview = type === "cutout" && (
-      !localOnly
-      || cause === "paint"
-      || cause === "cutout_frame"
-      || cause === "frame_transform"
-      || cause === "frame_view"
-      || isCutoutPreviewInteraction()
-      || isCutoutTransformInteractionActive()
-    );
-    syncNodeLivePreviewSources({ updateCutoutPreview: shouldUpdateCutoutPreview });
-    if (externalSync && (shouldUpdateCutoutPreview || !localOnly || type !== "cutout")) {
+    syncNodeLivePreviewSources();
+    if (externalSync) {
       node.__panoDomPreview?.requestDraw?.();
       node.setDirtyCanvas?.(true, false);
     }
@@ -6271,161 +6219,50 @@ async function showEditor(node, type, options = {}) {
   }
 
   function syncPaintUi() {
-    toolRail?.querySelectorAll("[data-tool-mode]").forEach((btn) => {
-      const active = btn.getAttribute("data-tool-mode") === editor.primaryTool;
-      btn.classList.toggle("active", active);
-      btn.setAttribute("aria-pressed", active ? "true" : "false");
+    // Keep derived paint UI state in the dedicated builder module so this file stays bridge-focused.
+    syncToolButtonModels();
+    const nextPaintDock = buildPaintDockModel({
+      editor,
+      swatches: PAINT_COLOR_SWATCHES,
+      paintColorPopOpen: paintColorPop ? !paintColorPop.hidden : false,
+      colorToCss,
+      colorsApproximatelyEqual,
+      rgb01ToHsv,
+      hsv01ToRgb,
+      getBrushPresetIdForTool,
+      isActiveLassoTool,
     });
-    const showFooter = editor.primaryTool === "paint" || editor.primaryTool === "mask";
-    if (paintDock) {
-      setPaintDockVisible(showFooter);
-    }
-    if (!showFooter) {
-      paintPanes.forEach((pane) => {
-        pane.classList.remove("is-active");
-      });
+    Object.assign(uiState.paintDock, nextPaintDock);
+    if (!nextPaintDock.visible) {
       if (paintColorPop) paintColorPop.hidden = true;
-      visiblePaintPaneMode = "";
       return;
     }
-    const nextMode = editor.primaryTool;
-    const nextPane = paintPanes.find((pane) => String(pane.getAttribute("data-paint-pane") || "") === nextMode) || null;
-    paintPanes.forEach((pane) => {
-      pane.classList.toggle("is-active", pane === nextPane);
-    });
-    visiblePaintPaneMode = nextMode;
-    paintSizeRows.forEach((row) => {
-      row.hidden = false;
-    });
-    paintClearRows.forEach((row) => {
-      row.hidden = false;
-    });
     if (paintPaneFadeTimer) {
       clearTimeout(paintPaneFadeTimer);
       paintPaneFadeTimer = 0;
     }
-    root.querySelectorAll("[data-paint-tool]").forEach((btn) => {
-      btn.classList.toggle("active", btn.getAttribute("data-paint-tool") === editor.paintTool);
-    });
-    root.querySelectorAll("[data-mask-tool]").forEach((btn) => {
-      btn.classList.toggle("active", btn.getAttribute("data-mask-tool") === editor.maskTool);
-    });
     if (paintColorRow) {
-      const colorEnabled = editor.paintTool !== "eraser";
-      paintColorRow.hidden = false;
-      paintColorRow.classList.toggle("disabled", !colorEnabled);
-      if (!colorEnabled && paintColorPop && !paintColorPop.hidden) {
+      if (!nextPaintDock.colorEnabled && paintColorPop && !paintColorPop.hidden) {
         paintPaneFadeTimer = window.setTimeout(() => {
           paintColorPop.hidden = true;
+          uiState.paintDock.colorPopOpen = false;
           paintPaneFadeTimer = 0;
         }, 170);
       }
-      const matchedSwatchId = PAINT_COLOR_SWATCHES.find((swatch) => colorsApproximatelyEqual(editor.paintColor, swatch.color))?.id || "";
-      paintColorRow.querySelectorAll("[data-paint-color-swatch]").forEach((btn) => {
-        const active = btn.getAttribute("data-paint-color-swatch") === matchedSwatchId;
-        btn.classList.toggle("active", active);
-        btn.setAttribute("aria-pressed", active ? "true" : "false");
-        btn.disabled = !colorEnabled;
-      });
-      const customBtn = paintColorRow.querySelector("[data-paint-color-custom]");
-      if (customBtn) {
-        const customActive = !matchedSwatchId;
-        customBtn.classList.toggle("active", customActive);
-        customBtn.style.setProperty("--custom-color", colorToCss(editor.customPaintColor, 1));
-        customBtn.setAttribute("aria-pressed", customActive ? "true" : "false");
-        customBtn.disabled = !colorEnabled;
-      }
-      if (paintAlphaSlider) paintAlphaSlider.value = String(Math.round(clamp(Number(editor.customPaintColor?.a ?? 1), 0, 1) * 100));
-      if (paintAlphaValue) paintAlphaValue.textContent = `${Math.round(clamp(Number(editor.customPaintColor?.a ?? 1), 0, 1) * 100)}%`;
-      if (paintColorPreview) paintColorPreview.style.background = colorToCss(editor.customPaintColor);
       if (paintColorPop) {
-        const hsv = rgb01ToHsv(editor.customPaintColor);
-        paintColorPop.style.setProperty("--picker-hue-color", colorToCss({ ...hsv01ToRgb(hsv.h, 1, 1), a: 1 }, 1));
-        paintColorPop.style.setProperty("--picker-sat", `${clamp(hsv.s, 0, 1) * 100}%`);
-        paintColorPop.style.setProperty("--picker-val", `${(1 - clamp(hsv.v, 0, 1)) * 100}%`);
-        paintColorPop.style.setProperty("--picker-hue", `${clamp(hsv.h, 0, 1) * 100}%`);
+        paintColorPop.style.setProperty("--picker-hue-color", nextPaintDock.pickerHueColor);
+        paintColorPop.style.setProperty("--picker-sat", nextPaintDock.pickerSat);
+        paintColorPop.style.setProperty("--picker-val", nextPaintDock.pickerVal);
+        paintColorPop.style.setProperty("--picker-hue", nextPaintDock.pickerHue);
       }
       if (paintColorSvCursor) {
-        const hsv = rgb01ToHsv(editor.customPaintColor);
-        paintColorSvCursor.style.left = `${clamp(hsv.s, 0, 1) * 100}%`;
-        paintColorSvCursor.style.top = `${(1 - clamp(hsv.v, 0, 1)) * 100}%`;
+        paintColorSvCursor.style.left = nextPaintDock.pickerSvLeft;
+        paintColorSvCursor.style.top = nextPaintDock.pickerSvTop;
       }
       if (paintHueHandle) {
-        const hsv = rgb01ToHsv(editor.customPaintColor);
-        paintHueHandle.style.left = `${clamp(hsv.h, 0, 1) * 100}%`;
-      }
-      if (paintColorHistoryWrap && paintColorHistory) {
-        const slots = Array.from({ length: 8 }, (_, index) => editor.customPaintHistory[index] || null);
-        paintColorHistory.innerHTML = slots.map((color, index) => `
-          <button class="pano-paint-color-history-dot${color ? "" : " empty"}" type="button" data-paint-history-index="${index}" ${color ? `style="--swatch:${colorToCss(color, 1)}"` : ""} aria-label="Recent color ${index + 1}" ${color ? "" : "disabled"}></button>
-        `).join("");
-        paintColorHistory.querySelectorAll("[data-paint-history-index]").forEach((btn) => {
-          btn.onclick = () => {
-            const idx = Number(btn.getAttribute("data-paint-history-index"));
-            const color = editor.customPaintHistory[idx];
-            if (!color) return;
-            editor.customPaintColor = cloneColor(color);
-            editor.paintColor = cloneColor(color);
-            syncPaintUi();
-          };
-        });
+        paintHueHandle.style.left = nextPaintDock.pickerHueLeft;
       }
     }
-    const sizePresetId = getBrushPresetIdForTool(editor.primaryTool === "paint" ? editor.paintTool : editor.maskTool);
-    const currentSize = editor.brushSizes[sizePresetId] ?? 10;
-    const lassoToolActive = isActiveLassoTool();
-    paintSizeRows.forEach((row) => {
-      row.classList.toggle("disabled", lassoToolActive);
-    });
-    paintSizeSliders.forEach((slider) => {
-      slider.value = String(currentSize);
-      const pct = ((currentSize - 1) / 119) * 100;
-      slider.style.setProperty("--v", `${clamp(pct, 0, 100)}%`);
-      slider.disabled = lassoToolActive;
-    });
-    paintSizeValues.forEach((valueEl) => {
-      valueEl.textContent = String(currentSize);
-    });
-  }
-
-  function addParamRow(container, selected, key, label, min, max, step, enabled = true) {
-    const row = document.createElement("div");
-    row.dataset.key = key;
-    row.dataset.min = String(min);
-    row.dataset.max = String(max);
-    row.className = "pano-field";
-    row.innerHTML = `<label>${label}</label><input type='range' min='${min}' max='${max}' step='${step}' value='${Number(selected[key] || 0)}'><input type='number' min='${min}' max='${max}' step='${step}' value='${formatParamValue(selected[key] || 0)}'>`;
-    const [rng, num] = row.querySelectorAll("input");
-    const setRangeFill = () => {
-      const nMin = Number(min);
-      const nMax = Number(max);
-      const nVal = Number(rng.value);
-      const pct = ((nVal - nMin) / Math.max(1e-6, nMax - nMin)) * 100;
-      rng.style.setProperty("--v", `${clamp(pct, 0, 100)}%`);
-    };
-    rng.disabled = !enabled;
-    num.disabled = !enabled;
-    const setVal = (v) => {
-      if (!enabled) return;
-      let out = Number(v);
-      if (Number.isNaN(out)) out = 0;
-      out = clamp(out, min, max);
-      if (key === "yaw_deg") out = wrapYaw(out);
-      selected[key] = out;
-      if (type === "cutout" && (key === "hFOV_deg" || key === "vFOV_deg")) {
-        selected.aspect_id = deriveCutoutAspectLabelFromFov(selected);
-      }
-      rng.value = String(out);
-      num.value = formatParamValue(out);
-      setRangeFill();
-      requestDraw();
-    };
-    rng.oninput = () => setVal(rng.value);
-    num.oninput = () => setVal(num.value);
-    rng.onchange = () => pushHistory();
-    num.onchange = () => pushHistory();
-    setRangeFill();
-    container.appendChild(row);
   }
 
   function syncSidePanelControls() {
@@ -6440,231 +6277,20 @@ async function showEditor(node, type, options = {}) {
       roll_deg: Number(selected.roll_deg || 0),
       aspect_id: getCutoutAspectLabel(selected),
     };
-    const rows = side.querySelectorAll(".pano-field[data-key]");
-    rows.forEach((row) => {
-      const key = row.dataset.key;
-      if (!key) return;
-      if (!(key in selected)) return;
-      const rng = row.querySelector("input[type='range']");
-      const num = row.querySelector("input[type='number']");
-      if (!rng || !num) return;
-      const min = Number(row.dataset.min ?? rng.min ?? 0);
-      const max = Number(row.dataset.max ?? rng.max ?? 0);
-      let out = Number(selected[key] || 0);
-      if (Number.isNaN(out)) out = 0;
-      out = clamp(out, min, max);
-      const s = String(out);
-      if (rng.value !== s) rng.value = s;
-      const t = formatParamValue(out);
-      if (num.value !== t) num.value = t;
-      const pct = ((out - min) / Math.max(1e-6, max - min)) * 100;
-      rng.style.setProperty("--v", `${clamp(pct, 0, 100)}%`);
-    });
-    const resolvedAspect = getCutoutAspectLabel(selected);
-    const aspectLabel = side.querySelector(".pano-cutout-aspect-label span");
-    if (aspectLabel) aspectLabel.textContent = resolvedAspect;
-    const presetBtns = side.querySelectorAll(".pano-cutout-aspect-pop [data-aspect]");
-    presetBtns.forEach((btn) => {
-      btn.classList.toggle("active", String(btn.getAttribute("data-aspect")) === resolvedAspect);
-    });
-  }
-
-  function createCoverageInspectorSection({ disabled = false, onChange }) {
-    const currentCoverage = normalizeCoverageValue(state.coverage);
-    const section = document.createElement("div");
-    section.innerHTML = `
-      <div class="pano-section-title">
-        <span>Scene</span>
-      </div>
-      <div class="pano-ui-row pano-coverage-row">
-        <label>Coverage</label>
-        <div class="pano-segment" data-setting="coverage" data-selected="${currentCoverage === 180 ? "1" : "0"}">
-          <button class="pano-segment-btn" type="button" data-value="360" aria-pressed="${currentCoverage === 360 ? "true" : "false"}">360</button>
-          <button class="pano-segment-btn" type="button" data-value="180" aria-pressed="${currentCoverage === 180 ? "true" : "false"}">180</button>
-        </div>
-      </div>
-    `;
-    const segment = section.querySelector("[data-setting='coverage']");
-    const setSegmentValue = (coverage) => {
-      const nextCoverage = normalizeCoverageValue(coverage);
-      segment.setAttribute("data-selected", nextCoverage === 180 ? "1" : "0");
-      segment.querySelectorAll(".pano-segment-btn").forEach((btn) => {
-        btn.setAttribute("aria-pressed", normalizeCoverageValue(btn.getAttribute("data-value")) === nextCoverage ? "true" : "false");
-        btn.disabled = !!disabled;
-      });
-    };
-    segment.querySelectorAll(".pano-segment-btn").forEach((btn) => {
-      btn.onclick = () => {
-        if (disabled) return;
-        const nextCoverage = normalizeCoverageValue(btn.getAttribute("data-value"));
-        if (nextCoverage === normalizeCoverageValue(state.coverage)) return;
-        onChange?.(nextCoverage);
-        setSegmentValue(nextCoverage);
-      };
-    });
-    setSegmentValue(currentCoverage);
-    return section;
+    updateSidePanel();
   }
 
   function updateSidePanel() {
     if (hideSidebar) return;
-    const staticNodes = [...side.children].slice(0, 2);
-    side.innerHTML = "";
-    staticNodes.forEach((n) => side.appendChild(n));
-
-    const sideActions = side.querySelector(".pano-side-actions");
-    if (sideActions) {
-      sideActions.innerHTML = "";
-    }
+    state.ui_settings = state.ui_settings || {};
+    // Inspector content is derived data for Vue, not imperative DOM construction.
+    const uiSettingsModel = buildUiSettingsModel(state.ui_settings);
     if (previewMode) {
-      const inspector = document.createElement("div");
-      inspector.className = "pano-inspector";
-      inspector.appendChild(createCoverageInspectorSection({
-        onChange: (nextCoverage) => {
-          state.coverage = nextCoverage;
-          editor.coverage = nextCoverage;
-          if (coverageWidget) {
-            coverageWidget.value = String(nextCoverage);
-            coverageWidget.callback?.(coverageWidget.value);
-          }
-          runtime.backgroundDirty = true;
-          requestDraw();
-          updateSidePanel();
-        },
-      }));
-      const uiDetails = document.createElement("details");
-      uiDetails.className = "pano-ui-settings";
-      uiDetails.open = false;
-      uiDetails.innerHTML = `
-      <summary>
-        <span class="pano-ui-summary-label">UI Settings</span>
-        <span class="pano-ui-caret" aria-hidden="true">${ICON.chevron}</span>
-      </summary>
-      <div class="pano-ui-settings-body">
-        <div class="pano-ui-row">
-          <label>Drag X</label>
-          <div class="pano-segment" data-setting="invert-x" data-selected="${state.ui_settings?.invert_view_x ? "1" : "0"}">
-            <button class="pano-segment-btn" type="button" data-value="0" aria-pressed="${state.ui_settings?.invert_view_x ? "false" : "true"}">Normal</button>
-            <button class="pano-segment-btn" type="button" data-value="1" aria-pressed="${state.ui_settings?.invert_view_x ? "true" : "false"}">Inverted</button>
-          </div>
-        </div>
-        <div class="pano-ui-row">
-          <label>Drag Y</label>
-          <div class="pano-segment" data-setting="invert-y" data-selected="${state.ui_settings?.invert_view_y ? "1" : "0"}">
-            <button class="pano-segment-btn" type="button" data-value="0" aria-pressed="${state.ui_settings?.invert_view_y ? "false" : "true"}">Normal</button>
-            <button class="pano-segment-btn" type="button" data-value="1" aria-pressed="${state.ui_settings?.invert_view_y ? "true" : "false"}">Inverted</button>
-          </div>
-        </div>
-        <div class="pano-ui-row">
-          <label for="pano-ui-quality">Render Quality</label>
-          <div class="pano-picker pano-ui-picker" data-ui-picker="quality">
-            <button class="pano-picker-trigger" type="button">
-              <span class="pano-picker-label"></span>
-              <span class="pano-picker-caret">▾</span>
-            </button>
-            <div class="pano-picker-pop" hidden></div>
-          </div>
-        </div>
-        <div class="pano-ui-row">
-          <span></span>
-          <button class="pano-btn subtle" type="button" data-action="ui-reset-defaults">Reset Defaults</button>
-        </div>
-      </div>
-    `;
-      const segX = uiDetails.querySelector("[data-setting='invert-x']");
-      const segY = uiDetails.querySelector("[data-setting='invert-y']");
-      const qualityPicker = uiDetails.querySelector("[data-ui-picker='quality']");
-      const resetUi = uiDetails.querySelector("[data-action='ui-reset-defaults']");
-      const setupUiPicker = (pickerEl, options, getValue, setValue) => {
-        const trigger = pickerEl.querySelector(".pano-picker-trigger");
-        const label = pickerEl.querySelector(".pano-picker-label");
-        const pop = pickerEl.querySelector(".pano-picker-pop");
-        const refresh = () => {
-          const cur = String(getValue());
-          const found = options.find((o) => String(o.value) === cur) || options[0];
-          label.textContent = found.label;
-          pop.innerHTML = "";
-          options.forEach((o) => {
-            const b = document.createElement("button");
-            b.type = "button";
-            b.className = `pano-picker-item${String(o.value) === cur ? " active" : ""}`;
-            b.textContent = o.label;
-            b.onclick = () => {
-              setValue(o.value);
-              pop.hidden = true;
-              refresh();
-              persistUiSettings();
-              requestDraw();
-            };
-            pop.appendChild(b);
-          });
-        };
-        trigger.onclick = (ev) => {
-          ev.stopPropagation();
-          uiDetails.querySelectorAll(".pano-ui-picker .pano-picker-pop").forEach((el) => {
-            if (el !== pop) el.hidden = true;
-          });
-          pop.hidden = !pop.hidden;
-        };
-        refresh();
-        return refresh;
-      };
-      const setSegmentValue = (seg, on) => {
-        seg.setAttribute("data-selected", on ? "1" : "0");
-        seg.querySelectorAll(".pano-segment-btn").forEach((b) => {
-          b.setAttribute("aria-pressed", b.getAttribute("data-value") === (on ? "1" : "0") ? "true" : "false");
-        });
-      };
-      segX.querySelectorAll(".pano-segment-btn").forEach((btn) => {
-        btn.onclick = () => {
-          const on = btn.getAttribute("data-value") === "1";
-          state.ui_settings.invert_view_x = on;
-          setSegmentValue(segX, on);
-          persistUiSettings();
-          requestDraw();
-        };
+      uiState.sidePanel = buildPreviewSidePanelModel({
+        coverage: state.coverage,
+        uiSettings: uiSettingsModel,
+        normalizeCoverageValue,
       });
-      segY.querySelectorAll(".pano-segment-btn").forEach((btn) => {
-        btn.onclick = () => {
-          const on = btn.getAttribute("data-value") === "1";
-          state.ui_settings.invert_view_y = on;
-          setSegmentValue(segY, on);
-          persistUiSettings();
-          requestDraw();
-        };
-      });
-      const refreshQuality = setupUiPicker(
-        qualityPicker,
-        [
-          { value: "draft", label: "Draft" },
-          { value: "balanced", label: "Balanced" },
-          { value: "high", label: "High" },
-        ],
-        () => String(state.ui_settings.preview_quality || "balanced"),
-        (v) => {
-          const q = String(v || "balanced");
-          state.ui_settings.preview_quality = (q === "draft" || q === "high") ? q : "balanced";
-        },
-      );
-      resetUi.onclick = () => {
-        state.ui_settings.invert_view_x = false;
-        state.ui_settings.invert_view_y = false;
-        state.ui_settings.preview_quality = "balanced";
-        setSegmentValue(segX, false);
-        setSegmentValue(segY, false);
-        refreshQuality();
-        persistUiSettings();
-        requestDraw();
-      };
-      inspector.appendChild(uiDetails);
-      side.appendChild(inspector);
-
-      const footer = document.createElement("div");
-      footer.className = "pano-side-footer";
-      footer.innerHTML = `<button class="pano-btn pano-btn-primary" data-action="close-preview">Close</button>`;
-      footer.querySelector("[data-action='close-preview']").onclick = () => closeEditor();
-      side.appendChild(footer);
-      installTooltipHandlers(inspector);
       return;
     }
 
@@ -6674,18 +6300,16 @@ async function showEditor(node, type, options = {}) {
     if (selectedItems.length > 1) {
       editor.panelLastValues = editor.panelLastValues || { yaw_deg: 0, pitch_deg: 0, hFOV_deg: 30, vFOV_deg: 30, rot_deg: 0 };
     }
-    if (selected) {
-      if (selectedKind !== "stroke") {
-        editor.panelLastValues = {
-          yaw_deg: Number(selected.yaw_deg || 0),
-          pitch_deg: Number(selected.pitch_deg || 0),
-          hFOV_deg: Number(selected.hFOV_deg || (selectedKind === "image" ? 30 : 90)),
-          vFOV_deg: Number(selected.vFOV_deg || (selectedKind === "image" ? 30 : 60)),
-          rot_deg: Number(selected.rot_deg || 0),
-          roll_deg: Number(selected.roll_deg || 0),
-          aspect_id: getCutoutAspectLabel(selected),
-        };
-      }
+    if (selected && selectedKind !== "stroke") {
+      editor.panelLastValues = {
+        yaw_deg: Number(selected.yaw_deg || 0),
+        pitch_deg: Number(selected.pitch_deg || 0),
+        hFOV_deg: Number(selected.hFOV_deg || (selectedKind === "image" ? 30 : 90)),
+        vFOV_deg: Number(selected.vFOV_deg || (selectedKind === "image" ? 30 : 60)),
+        rot_deg: Number(selected.rot_deg || 0),
+        roll_deg: Number(selected.roll_deg || 0),
+        aspect_id: getCutoutAspectLabel(selected),
+      };
     }
     const fallback = editor.panelLastValues || ((type === "stickers" || selectedKind === "image")
       ? { yaw_deg: 0, pitch_deg: 0, hFOV_deg: 30, vFOV_deg: 30, rot_deg: 0 }
@@ -6693,374 +6317,97 @@ async function showEditor(node, type, options = {}) {
     const inspectorSelected = selectedKind === "stroke" ? null : selected;
     const effective = inspectorSelected || fallback;
     const enabled = !!inspectorSelected;
+    editor.panelWasEnabled = enabled;
+    syncLookAtFrameButtonState();
 
-    const inspector = document.createElement("div");
-    inspector.className = "pano-inspector";
-    inspector.appendChild(createCoverageInspectorSection({
-      disabled: readOnly,
-      onChange: (nextCoverage) => {
-        state.coverage = nextCoverage;
-        editor.coverage = nextCoverage;
-        if (coverageWidget) {
-          coverageWidget.value = String(nextCoverage);
-          coverageWidget.callback?.(coverageWidget.value);
-        }
-        commitAndRefreshNode();
-        node.setDirtyCanvas?.(true, true);
-        updateSidePanel();
-        updateSelectionMenu();
-        requestDraw();
-      },
-    }));
-
-    const summary = document.createElement("div");
-    summary.innerHTML = `
-      <div class="pano-section-title">
-        <span>Transform</span>
-      </div>
-    `;
-    while (summary.firstChild) inspector.appendChild(summary.firstChild);
-    side.appendChild(inspector);
-
+    let selectionPicker = null;
     if (type === "stickers" || type === "cutout") {
-      const targetRow = document.createElement("div");
-      targetRow.className = "pano-field-wide pano-target-row";
-      const rowLabel = type === "stickers" ? "Selection" : "Selection";
-      targetRow.innerHTML = `
-        <label>${rowLabel}</label>
-        <div class="pano-picker">
-          <button class="pano-picker-trigger" type="button">
-            <span class="pano-picker-label"></span>
-            <span class="pano-picker-caret">▾</span>
-          </button>
-          <div class="pano-picker-pop" hidden></div>
-        </div>
-      `;
-      const trigger = targetRow.querySelector(".pano-picker-trigger");
-      const labelEl = targetRow.querySelector(".pano-picker-label");
-      const pop = targetRow.querySelector(".pano-picker-pop");
-      const items = [{ id: "", label: type === "stickers" ? "No image" : "Nothing selected", item: null }];
+      const items = [{ id: "", labelHtml: escapeHtml(type === "stickers" ? "No image" : "Nothing selected"), item: null }];
       if (type === "stickers") {
         getList().forEach((item, i) => {
           const baseLabel = isExternalSticker(item)
             ? String(item.id || EXTERNAL_STICKER_ID)
             : String(state.assets?.[item.asset_id]?.name || item.asset_id || item.id);
           const label = `${i + 1}. ${baseLabel}${isExternalSticker(item) && isStickerHidden(item) ? " (hidden)" : ""}`;
-          items.push({ id: item.id, label, item, kind: "image" });
+          items.push({ id: item.id, labelHtml: getSelectionItemLabelHtml({ item, label, kind: "image" }), item, kind: "image" });
         });
       } else {
         getCutoutInspectorItems().forEach((entry) => {
-          items.push({ id: entry.item.id, label: entry.label, item: entry.item, kind: entry.kind });
+          items.push({ id: entry.item.id, labelHtml: getSelectionItemLabelHtml(entry), item: entry.item, kind: entry.kind });
         });
       }
       const currentId = inspectorSelected?.id || "";
-      const currentItem = items.find((it) => it.id === currentId) || items[0];
-      labelEl.innerHTML = currentItem.item ? getSelectionItemLabelHtml(currentItem) : escapeHtml(String(currentItem.label || ""));
-      pop.innerHTML = "";
-      items.forEach((it) => {
-        const btn = document.createElement("button");
-        btn.type = "button";
-        btn.className = `pano-picker-item${it.id === currentId ? " active" : ""}`;
-        btn.innerHTML = it.item ? getSelectionItemLabelHtml(it) : escapeHtml(String(it.label || ""));
-        btn.onclick = () => {
-          pop.hidden = true;
-          setSelectedItem(it.item || null);
-          const selectedNow = it.item || null;
-          if (selectedNow && !isStrokeGroupItem(selectedNow)) {
-            const targetYaw = wrapYaw(Number(selectedNow.yaw_deg || 0));
-            const targetPitch = clamp(Number(selectedNow.pitch_deg || 0), -89.9, 89.9);
-            startViewTween(targetYaw, targetPitch, editor.viewFov);
-          }
-          updateSidePanel();
-          updateSelectionMenu();
-          requestDraw();
-        };
-        pop.appendChild(btn);
-      });
-      trigger.disabled = items.length <= 1;
-      trigger.onclick = (ev) => {
-        ev.stopPropagation();
-        if (trigger.disabled) return;
-        pop.hidden = !pop.hidden;
+      const currentItem = items.find((item) => item.id === currentId) || items[0];
+      selectionPicker = {
+        label: "Selection",
+        open: false,
+        disabled: items.length <= 1,
+        currentLabelHtml: currentItem.labelHtml,
+        items: items.map((item) => ({ id: item.id, labelHtml: item.labelHtml, active: item.id === currentId })),
       };
-      inspector.appendChild(targetRow);
     }
 
-    const toolsRow = document.createElement("div");
-    toolsRow.className = "pano-state-actions";
-    toolsRow.innerHTML = `<button class="pano-btn subtle pano-btn-tight pano-btn-copy" data-action="copy-state-inline">${ICON.copy}<span>Copy State</span></button>`;
-    const copyInline = toolsRow.querySelector("[data-action='copy-state-inline']");
-    copyInline.disabled = !enabled || selectedKind === "stroke" || selectedItems.length > 1;
-    copyInline.onclick = async () => {
-      if (!enabled || selectedKind === "stroke" || selectedItems.length > 1) return;
-      const text = JSON.stringify(type === "cutout" && selectedKind !== "image"
-        ? buildCanonicalCutoutStickerState(effective)
-        : buildCanonicalSelectedStickerState(selected));
-      try {
-        await navigator.clipboard.writeText(text);
-        const label = copyInline.querySelector("span");
-        if (label) {
-          label.textContent = "Copied";
-          window.setTimeout(() => {
-            label.textContent = "Copy State";
-          }, 900);
-        }
-      } catch {
-        // no-op fallback for environments without clipboard permission
-      }
+    const params = [];
+    const pushParam = (key, label, min, max, step) => {
+      const value = clamp(Number(effective[key] || 0), min, max);
+      params.push({
+        key,
+        label,
+        min,
+        max,
+        step,
+        value,
+        displayValue: formatParamValue(value),
+        fillPct: clamp(((value - min) / Math.max(1e-6, max - min)) * 100, 0, 100),
+        enabled: enabled && !readOnly,
+      });
     };
-    inspector.appendChild(toolsRow);
-
-    const paramsWrap = document.createElement("div");
-    paramsWrap.className = `pano-params${editor.panelWasEnabled ? "" : " disabled"}`;
-    inspector.appendChild(paramsWrap);
-
+    const notes = [];
     if (selectedItems.length > 1) {
-      paramsWrap.innerHTML = `
-        <div class="pano-param-note">Selected objects: ${selectedItems.length}</div>
-        <div class="pano-param-note">Multi-selection supports z-order and delete.</div>
-      `;
-      paramsWrap.classList.toggle("disabled", !enabled);
-      editor.panelWasEnabled = enabled;
-      syncLookAtFrameButtonState();
+      notes.push(`Selected objects: ${selectedItems.length}`);
+      notes.push("Multi-selection supports z-order and delete.");
     } else {
-
-      addParamRow(paramsWrap, effective, "yaw_deg", "Yaw", -180, 180, 0.1, enabled && !readOnly);
-      addParamRow(paramsWrap, effective, "pitch_deg", "Pitch", -90, 90, 0.1, enabled && !readOnly);
-      addParamRow(paramsWrap, effective, "hFOV_deg", "H FOV", 1, 179, 0.1, enabled && !readOnly);
-      addParamRow(paramsWrap, effective, "vFOV_deg", "V FOV", 1, 179, 0.1, enabled && !readOnly);
-      if (type === "stickers" || selectedKind === "image") {
-        addParamRow(paramsWrap, effective, "rot_deg", "Rotation", -180, 180, 0.1, enabled && !readOnly);
-      } else {
-        addParamRow(paramsWrap, effective, "roll_deg", "Roll", -180, 180, 0.1, enabled && !readOnly);
-      }
-
-    if (enabled !== editor.panelWasEnabled) {
-        requestAnimationFrame(() => {
-          paramsWrap.classList.toggle("disabled", !enabled);
-        });
-      } else {
-        paramsWrap.classList.toggle("disabled", !enabled);
-      }
-      editor.panelWasEnabled = enabled;
-      syncLookAtFrameButtonState();
+      pushParam("yaw_deg", "Yaw", -180, 180, 0.1);
+      pushParam("pitch_deg", "Pitch", -90, 90, 0.1);
+      pushParam("hFOV_deg", "H FOV", 1, 179, 0.1);
+      pushParam("vFOV_deg", "V FOV", 1, 179, 0.1);
+      if (type === "stickers" || selectedKind === "image") pushParam("rot_deg", "Rotation", -180, 180, 0.1);
+      else pushParam("roll_deg", "Roll", -180, 180, 0.1);
     }
 
-    const visibilitySection = document.createElement("div");
-    visibilitySection.className = "pano-visibility-section";
-    visibilitySection.innerHTML = `
-      <div class="pano-section-title">
-        <span>Layers</span>
-      </div>
-      <div class="pano-visibility-stack">
-        <div class="pano-visibility-row" data-visibility-row="mask">
-          <span class="pano-visibility-name"><span class="pano-visibility-name-icon" aria-hidden="true">${ICON.circle_dashed_tool}</span><span>Mask</span></span>
-          <button class="pano-visibility-toggle" type="button" data-visibility="mask" aria-label="Toggle mask"></button>
-        </div>
-        <div class="pano-visibility-row" data-visibility-row="objects">
-          <span class="pano-visibility-name"><span class="pano-visibility-name-icon" aria-hidden="true">${ICON.image}</span><span>Paint / Images</span></span>
-          <button class="pano-visibility-toggle" type="button" data-visibility="objects" aria-label="Toggle paint and images"></button>
-        </div>
-        <div class="pano-visibility-row" data-visibility-row="panorama">
-          <span class="pano-visibility-name"><span class="pano-visibility-name-icon" aria-hidden="true">${ICON.globe}</span><span>Panorama</span></span>
-          <button class="pano-visibility-toggle" type="button" data-visibility="panorama" aria-label="Toggle panorama"></button>
-        </div>
-      </div>
-    `;
     const paintStrokeCount = Array.isArray(state?.painting?.paint?.strokes) ? state.painting.paint.strokes.length : 0;
     const maskStrokeCount = Array.isArray(state?.painting?.mask?.strokes) ? state.painting.mask.strokes.length : 0;
-    const panoramaInputNames = Array.isArray(node?.inputs)
-      ? node.inputs.map((entry) => String(entry?.name || ""))
-      : [];
+    const panoramaInputNames = Array.isArray(node?.inputs) ? node.inputs.map((entry) => String(entry?.name || "")) : [];
     const linkedPanoramaSource = findPreferredExactLinkedImageSource(
       node,
       panoramaInputNames.includes("erp_image") ? ["erp_image", "bg_erp"] : ["bg_erp", "erp_image"],
     );
-    const hasPanoramaLayer = !!String(linkedPanoramaSource?.src || "").trim()
-      || getNodeUiList("pano_input_images").length > 0;
+    const hasPanoramaLayer = !!String(linkedPanoramaSource?.src || "").trim() || getNodeUiList("pano_input_images").length > 0;
     const hasObjectLayer = (Array.isArray(getList()) && getList().length > 0) || paintStrokeCount > 0;
     const hasMaskLayer = maskStrokeCount > 0;
-    const isVisibilityEnabled = (key) => {
-      if (key === "panorama") return hasPanoramaLayer;
-      if (key === "objects") return hasObjectLayer;
-      return hasMaskLayer;
-    };
-    const syncVisibilityButton = (btn, visible) => {
-      const row = btn.closest("[data-visibility-row]");
-      const enabled = isVisibilityEnabled(String(btn.getAttribute("data-visibility") || ""));
-      btn.innerHTML = visible ? ICON.eye : ICON.eye_dashed;
-      btn.setAttribute("aria-pressed", visible ? "true" : "false");
-      btn.setAttribute("data-tip", visible ? "Hide" : "Show");
-      btn.disabled = !enabled;
-      btn.classList.toggle("active", !!visible);
-      row?.classList.toggle("is-hidden", !visible);
-      row?.classList.toggle("is-disabled", !enabled);
-    };
-    visibilitySection.querySelectorAll("[data-visibility]").forEach((btn) => {
-      const key = String(btn.getAttribute("data-visibility") || "");
-      const readValue = () => {
-        if (key === "panorama") return !!editor.showPanorama;
-        if (key === "objects") return !!editor.showObjects;
-        return !!editor.showMask;
-      };
-      syncVisibilityButton(btn, readValue());
-      btn.onclick = () => {
-        if (!isVisibilityEnabled(key)) return;
-        if (key === "panorama") editor.showPanorama = !editor.showPanorama;
-        else if (key === "objects") editor.showObjects = !editor.showObjects;
-        else editor.showMask = !editor.showMask;
-        syncVisibilityButton(btn, readValue());
-        requestDraw();
-      };
+    const visibilityRows = [
+      { key: "mask", label: "Mask", icon: ICON.circle_dashed_tool, visible: !!editor.showMask, enabled: hasMaskLayer },
+      { key: "objects", label: "Paint / Images", icon: ICON.image, visible: !!editor.showObjects, enabled: hasObjectLayer },
+      { key: "panorama", label: "Panorama", icon: ICON.globe, visible: !!editor.showPanorama, enabled: hasPanoramaLayer },
+    ].map((row) => ({
+      ...row,
+      ariaLabel: `Toggle ${row.label.toLowerCase()}`,
+      tip: row.visible ? "Hide" : "Show",
+    }));
+
+    uiState.sidePanel = buildEditorSidePanelModel({
+      coverage: state.coverage,
+      readOnly,
+      selectionPicker,
+      enabled,
+      selectedKind,
+      selectedItems,
+      params,
+      notes,
+      visibilityRows,
+      uiSettings: uiSettingsModel,
+      normalizeCoverageValue,
     });
-    inspector.appendChild(Object.assign(document.createElement("div"), { className: "pano-divider" }));
-    inspector.appendChild(visibilitySection);
-
-    if (!readOnly) {
-      const uiDetails = document.createElement("details");
-      uiDetails.className = "pano-ui-settings";
-      uiDetails.open = false;
-      uiDetails.innerHTML = `
-      <summary>
-        <span class="pano-ui-summary-label">UI Settings</span>
-        <span class="pano-ui-caret" aria-hidden="true">${ICON.chevron}</span>
-      </summary>
-      <div class="pano-ui-settings-body">
-        <div class="pano-ui-row">
-          <label>Drag X</label>
-          <div class="pano-segment" data-setting="invert-x" data-selected="${state.ui_settings?.invert_view_x ? "1" : "0"}">
-            <button class="pano-segment-btn" type="button" data-value="0" aria-pressed="${state.ui_settings?.invert_view_x ? "false" : "true"}">Normal</button>
-            <button class="pano-segment-btn" type="button" data-value="1" aria-pressed="${state.ui_settings?.invert_view_x ? "true" : "false"}">Inverted</button>
-          </div>
-        </div>
-        <div class="pano-ui-row">
-          <label>Drag Y</label>
-          <div class="pano-segment" data-setting="invert-y" data-selected="${state.ui_settings?.invert_view_y ? "1" : "0"}">
-            <button class="pano-segment-btn" type="button" data-value="0" aria-pressed="${state.ui_settings?.invert_view_y ? "false" : "true"}">Normal</button>
-            <button class="pano-segment-btn" type="button" data-value="1" aria-pressed="${state.ui_settings?.invert_view_y ? "true" : "false"}">Inverted</button>
-          </div>
-        </div>
-        <div class="pano-ui-row">
-          <label for="pano-ui-quality">Render Quality</label>
-          <div class="pano-picker pano-ui-picker" data-ui-picker="quality">
-            <button class="pano-picker-trigger" type="button">
-              <span class="pano-picker-label"></span>
-              <span class="pano-picker-caret">▾</span>
-            </button>
-            <div class="pano-picker-pop" hidden></div>
-          </div>
-        </div>
-        <div class="pano-ui-row">
-          <span></span>
-          <button class="pano-btn subtle" type="button" data-action="ui-reset-defaults">Reset Defaults</button>
-        </div>
-      </div>
-    `;
-      const segX = uiDetails.querySelector("[data-setting='invert-x']");
-      const segY = uiDetails.querySelector("[data-setting='invert-y']");
-      const qualityPicker = uiDetails.querySelector("[data-ui-picker='quality']");
-      const resetUi = uiDetails.querySelector("[data-action='ui-reset-defaults']");
-      const setupUiPicker = (pickerEl, options, getValue, setValue) => {
-        const trigger = pickerEl.querySelector(".pano-picker-trigger");
-        const label = pickerEl.querySelector(".pano-picker-label");
-        const pop = pickerEl.querySelector(".pano-picker-pop");
-        const refresh = () => {
-          const cur = String(getValue());
-          const found = options.find((o) => String(o.value) === cur) || options[0];
-          label.textContent = found.label;
-          pop.innerHTML = "";
-          options.forEach((o) => {
-            const b = document.createElement("button");
-            b.type = "button";
-            b.className = `pano-picker-item${String(o.value) === cur ? " active" : ""}`;
-            b.textContent = o.label;
-            b.onclick = () => {
-              setValue(o.value);
-              pop.hidden = true;
-              refresh();
-              persistUiSettings();
-              node.setDirtyCanvas(true, true);
-              requestDraw();
-            };
-            pop.appendChild(b);
-          });
-        };
-        trigger.onclick = (ev) => {
-          ev.stopPropagation();
-          uiDetails.querySelectorAll(".pano-ui-picker .pano-picker-pop").forEach((el) => {
-            if (el !== pop) el.hidden = true;
-          });
-          pop.hidden = !pop.hidden;
-        };
-        refresh();
-        return refresh;
-      };
-      const setSegmentValue = (seg, on) => {
-        seg.setAttribute("data-selected", on ? "1" : "0");
-        seg.querySelectorAll(".pano-segment-btn").forEach((b) => {
-          b.setAttribute("aria-pressed", b.getAttribute("data-value") === (on ? "1" : "0") ? "true" : "false");
-        });
-      };
-      segX.querySelectorAll(".pano-segment-btn").forEach((btn) => {
-        btn.onclick = () => {
-          const on = btn.getAttribute("data-value") === "1";
-          state.ui_settings.invert_view_x = on;
-          setSegmentValue(segX, on);
-          persistUiSettings();
-          node.setDirtyCanvas(true, true);
-          requestDraw();
-        };
-      });
-      segY.querySelectorAll(".pano-segment-btn").forEach((btn) => {
-        btn.onclick = () => {
-          const on = btn.getAttribute("data-value") === "1";
-          state.ui_settings.invert_view_y = on;
-          setSegmentValue(segY, on);
-          persistUiSettings();
-          node.setDirtyCanvas(true, true);
-          requestDraw();
-        };
-      });
-      const refreshQuality = setupUiPicker(
-        qualityPicker,
-        [
-          { value: "draft", label: "Draft" },
-          { value: "balanced", label: "Balanced" },
-          { value: "high", label: "High" },
-        ],
-        () => String(state.ui_settings.preview_quality || "balanced"),
-        (v) => {
-          const q = String(v || "balanced");
-          state.ui_settings.preview_quality = (q === "draft" || q === "high") ? q : "balanced";
-        },
-      );
-      resetUi.onclick = () => {
-        state.ui_settings.invert_view_x = false;
-        state.ui_settings.invert_view_y = false;
-        state.ui_settings.preview_quality = "balanced";
-        setSegmentValue(segX, false);
-        setSegmentValue(segY, false);
-        refreshQuality();
-        persistUiSettings();
-        node.setDirtyCanvas(true, true);
-        requestDraw();
-      };
-      inspector.appendChild(uiDetails);
-    }
-
-    const footer = document.createElement("div");
-    footer.className = "pano-side-footer";
-    footer.innerHTML = `
-      <button class="pano-btn" data-action="cancel-close">Cancel</button>
-      <button class="pano-btn pano-btn-primary" data-action="save-close">Save</button>
-    `;
-    footer.querySelector("[data-action='cancel-close']").onclick = () => closeEditor();
-    footer.querySelector("[data-action='save-close']").onclick = () => {
-      apply();
-      closeEditor();
-    };
-    side.appendChild(footer);
-    installTooltipHandlers(inspector);
   }
 
   function isImageFile(file) {
@@ -7279,24 +6626,7 @@ async function showEditor(node, type, options = {}) {
   }
 
   function addCutoutFrame() {
-    if (readOnly) return;
-    if (type !== "cutout") return;
-    forceCursorTool();
-    state.shots = [{
-      id: uid("sh"),
-      yaw_deg: editor.viewYaw,
-      pitch_deg: editor.viewPitch,
-      hFOV_deg: 64,
-      vFOV_deg: 40,
-      roll_deg: 0,
-      aspect_id: ratioTextFromPair(64, 40),
-    }];
-    setSelectedItem(state.shots[0]);
-    editor.cutoutAspectOpen = false;
-    pushHistory();
-    commitAndRefreshNode();
-    updateSidePanel();
-    requestDraw({ cause: "cutout_frame" });
+    return;
   }
 
   function clearCutoutFrame() {
@@ -7327,31 +6657,13 @@ async function showEditor(node, type, options = {}) {
 
   function showCanvasConfirm(title, text, confirmLabel = "Clear") {
     return new Promise((resolve) => {
-      const layer = document.createElement("div");
-      layer.className = "pano-canvas-confirm";
-      layer.innerHTML = `
-        <div class="pano-canvas-confirm-card" role="dialog" aria-modal="true" aria-label="${title}">
-          <div class="pano-canvas-confirm-title">${title}</div>
-          <div class="pano-canvas-confirm-text">${text}</div>
-          <div class="pano-canvas-confirm-actions">
-            <button class="pano-btn" data-action="cancel">Cancel</button>
-            <button class="pano-btn pano-btn-primary" data-action="confirm">${confirmLabel}</button>
-          </div>
-        </div>
-      `;
-      const close = (ok) => {
-        layer.remove();
-        resolve(!!ok);
+      uiState.confirmDialog = {
+        visible: true,
+        title: String(title || ""),
+        text: String(text || ""),
+        confirmLabel: String(confirmLabel || "Confirm"),
+        resolve,
       };
-      layer.addEventListener("pointerdown", (ev) => {
-        if (ev.target === layer) close(false);
-      });
-      const cancelBtn = layer.querySelector("[data-action='cancel']");
-      const confirmBtn = layer.querySelector("[data-action='confirm']");
-      cancelBtn.onclick = () => close(false);
-      confirmBtn.onclick = () => close(true);
-      stageWrap.appendChild(layer);
-      confirmBtn.focus();
     });
   }
 
@@ -7536,7 +6848,7 @@ async function showEditor(node, type, options = {}) {
       state.stickers = state.stickers.filter((s) => s.id !== selected.id);
       pruneUnusedAssets();
       markObjectVisualsDirty();
-      editor.selectedId = type === "cutout" ? (state.active.selected_shot_id || state.stickers[0]?.id || null) : (state.stickers[0]?.id || null);
+      editor.selectedId = state.stickers[0]?.id || null;
       editor.selectedIds = editor.selectedId ? [editor.selectedId] : [];
       state.active.selected_sticker_id = state.stickers[0]?.id || null;
       pushHistory();
@@ -7734,6 +7046,20 @@ async function showEditor(node, type, options = {}) {
     node.setDirtyCanvas?.(true, true);
   }
 
+  function syncCoverageChangeToNodePreviews(options = {}) {
+    const syncPreview = options.syncPreview !== false;
+    const syncGraph = options.syncGraph !== false;
+    if (syncPreview) {
+      node.__panoPreviewNodeRuntime?.requestDraw?.();
+      node.__panoDomPreview?.requestDraw?.();
+      node.setDirtyCanvas?.(true, false);
+    }
+    if (syncGraph) {
+      node.graph?.setDirtyCanvas?.(true, true);
+      app?.canvas?.setDirty?.(true, true);
+    }
+  }
+
   function forceCursorTool() {
     if (editor.primaryTool === "cursor") return;
     editor.primaryTool = "cursor";
@@ -7763,38 +7089,15 @@ async function showEditor(node, type, options = {}) {
 
   function getActiveCutoutShot() {
     if (type !== "cutout") return null;
-    const shots = Array.isArray(state.shots) ? state.shots : [];
-    const preferredId = String(state.active?.selected_shot_id || "");
-    return shots.find((shot) => String(shot?.id || "") === preferredId) || shots[0] || null;
+    return null;
   }
 
   function getFrameViewRect(shot = getActiveCutoutShot()) {
-    if (!shot) return null;
-    const aspect = Math.max(1e-4, Number(buildCutoutViewParamsFromShot(shot)?.aspect || 1));
-    const pad = 56;
-    const availW = Math.max(80, canvas.width - pad * 2);
-    const availH = Math.max(80, canvas.height - pad * 2);
-    let baseW = availW;
-    let baseH = baseW / aspect;
-    if (baseH > availH) {
-      baseH = availH;
-      baseW = baseH * aspect;
-    }
-    const zoom = Math.max(0.1, Number(editor.frameView?.zoom || 1));
-    const w = baseW * zoom;
-    const h = baseH * zoom;
-    const panX = Number(editor.frameView?.panX || 0);
-    const panY = Number(editor.frameView?.panY || 0);
-    return {
-      x: ((canvas.width - w) * 0.5) + panX,
-      y: ((canvas.height - h) * 0.5) + panY,
-      w,
-      h,
-    };
+    return null;
   }
 
   function supportsFramePainting() {
-    return type === "cutout" && editor.mode === "frame" && !!getActiveCutoutShot();
+    return false;
   }
 
   function screenPosToErpPoint(pos, ts = performance.now()) {
@@ -8408,7 +7711,7 @@ async function showEditor(node, type, options = {}) {
 
     function eraseCanvasAndDetectTouch(sourceCanvas) {
       if (!sourceCanvas) return { touched: false, canvas: null };
-      const working = createRasterSurface(erpDesc.width, erpDesc.height);
+      const working = createRasterSurface(erpDesc.width, erpDesc.height, { readback: true });
       working.ctx.drawImage(sourceCanvas, 0, 0);
       const beforeData = working.ctx.getImageData(0, 0, erpDesc.width, erpDesc.height);
       working.ctx.save();
@@ -8654,6 +7957,14 @@ async function showEditor(node, type, options = {}) {
       return { kind: "none", cursor: editor.mode === "pano" ? "grab" : "default" };
     }
     if (geom.kind === "rasterObject") {
+      const cornerIdx = geom.corners.findIndex((c) => dist2(c, p) <= 11 * 11);
+      if (cornerIdx >= 0) {
+        const c = geom.corners[cornerIdx];
+        const vx = c.x - geom.center.x;
+        const vy = c.y - geom.center.y;
+        const cursor = (vx * vy) >= 0 ? "nwse-resize" : "nesw-resize";
+        return { kind: "scale", cornerIdx, cursor };
+      }
       if (pointInPoly(p, geom.corners)) return { kind: "move", cursor: "default" };
       return { kind: "none", cursor: editor.mode === "pano" ? "grab" : "default" };
     }
@@ -8710,7 +8021,7 @@ async function showEditor(node, type, options = {}) {
       else if (editor.interaction.kind === "view") canvas.style.cursor = "grabbing";
       else if (editor.interaction.kind === "pan_frame") canvas.style.cursor = "grabbing";
     else if (editor.interaction.kind === "move" || editor.interaction.kind === "move_multi" || editor.interaction.kind === "move_stroke_group" || editor.interaction.kind === "move_raster_object") canvas.style.cursor = "move";
-      else if (editor.interaction.kind === "scale" || editor.interaction.kind === "scale_x" || editor.interaction.kind === "scale_y") canvas.style.cursor = editor.interaction.cursor || "nwse-resize";
+      else if (editor.interaction.kind === "scale" || editor.interaction.kind === "scale_x" || editor.interaction.kind === "scale_y" || editor.interaction.kind === "scale_raster_object") canvas.style.cursor = editor.interaction.cursor || "nwse-resize";
       else if (editor.interaction.kind === "rotate") canvas.style.cursor = "grabbing";
       else canvas.style.cursor = "default";
       return;
@@ -8752,241 +8063,105 @@ async function showEditor(node, type, options = {}) {
     const selected = getSelected();
     const selectedItems = getSelectedItems();
     if ((!selected && selectedItems.length === 0) || editor.interaction) {
-      selectionMenu.style.display = "none";
-      return;
-    }
-    if (selectedItems.length > 1) {
-      const menuMode = "multi";
-      const allLocked = areAllSelectedItemsLocked(selectedItems);
-      if (editor.menuMode !== menuMode) {
-        selectionMenu.innerHTML = `
-          <button class="pano-btn pano-btn-icon" data-action="bring-front" aria-label="Bring to Front" data-tip="Bring to front">${ICON.bring_front}</button>
-          <button class="pano-btn pano-btn-icon" data-action="send-back" aria-label="Send to Back" data-tip="Send to back">${ICON.send_back}</button>
-          <button class="pano-btn pano-btn-icon" data-action="toggle-lock" aria-label="${allLocked ? "Unlock" : "Lock"}" data-tip="${allLocked ? "Unlock" : "Lock"}">${allLocked ? ICON.lock_open : ICON.lock_closed}</button>
-          <button class="pano-btn pano-btn-icon" data-action="delete" aria-label="Delete" data-tip="Delete">${ICON.delete}</button>
-        `;
-        editor.menuMode = menuMode;
-        editor.menuSize.measured = false;
-        installTooltipHandlers(selectionMenu);
-      } else {
-        const lockBtn = selectionMenu.querySelector("[data-action='toggle-lock']");
-        if (lockBtn) {
-          lockBtn.innerHTML = allLocked ? ICON.lock_open : ICON.lock_closed;
-          lockBtn.setAttribute("aria-label", allLocked ? "Unlock" : "Lock");
-          lockBtn.setAttribute("data-tip", allLocked ? "Unlock" : "Lock");
-        }
-      }
-      const multiGeom = getMultiSelectionGeom(selectedItems);
-      if (!multiGeom?.visible) {
-        selectionMenu.style.display = "none";
-        return;
-      }
-      const xs = multiGeom.corners.map((p) => p.x);
-      const ys = multiGeom.corners.map((p) => p.y);
-      const minX = Math.min(...xs);
-      const maxX = Math.max(...xs);
-      const maxY = Math.max(...ys);
-      const prevDisplay = selectionMenu.style.display;
-      const prevVisibility = selectionMenu.style.visibility;
-      selectionMenu.style.display = "flex";
-      selectionMenu.style.visibility = "hidden";
-      const rect = selectionMenu.getBoundingClientRect();
-      const measuredW = Math.round(Number(rect?.width || 0)) || selectionMenu.offsetWidth || editor.menuSize.w || 220;
-      const measuredH = Math.round(Number(rect?.height || 0)) || selectionMenu.offsetHeight || editor.menuSize.h || 40;
-      editor.menuSize.w = Number.isFinite(measuredW) && measuredW > 0 ? measuredW : 220;
-      editor.menuSize.h = Number.isFinite(measuredH) && measuredH > 0 ? measuredH : 40;
-      selectionMenu.style.display = prevDisplay;
-      selectionMenu.style.visibility = prevVisibility;
-      editor.menuSize.measured = true;
-      const menuW = editor.menuSize.w;
-      const menuH = editor.menuSize.h;
-      const pad = 14;
-      selectionMenu.style.display = "flex";
-      let x = (minX + maxX) * 0.5 - menuW * 0.5;
-      let y = maxY + 18;
-      x = clamp(x, pad, canvas.width - menuW - pad);
-      if (y + menuH > canvas.height - pad) {
-        selectionMenu.style.display = "none";
-        return;
-      }
-      selectionMenu.style.left = `${x}px`;
-      selectionMenu.style.top = `${y}px`;
+      uiState.selectionMenu = { visible: false, left: 0, top: 0, items: [] };
       return;
     }
     const selectedKind = getSelectedKind();
-    const selectedLocked = isItemLocked(selected);
-    const menuMode = selectedKind === "stroke"
-      ? "stroke:paint"
-      : (type === "stickers" || selectedKind === "image")
-      ? `stickers:${isExternalSticker(selected) ? "external" : "normal"}`
-      : `cutout:${editor.cutoutAspectOpen ? "open" : "closed"}`;
-    if (editor.menuMode !== menuMode) {
-      if (selectedKind === "stroke") {
-        selectionMenu.innerHTML = `
-          <button class="pano-btn pano-btn-icon" data-action="bring-front" aria-label="Bring to Front" data-tip="Bring to front">${ICON.bring_front}</button>
-          <button class="pano-btn pano-btn-icon" data-action="send-back" aria-label="Send to Back" data-tip="Send to back">${ICON.send_back}</button>
-          <button class="pano-btn pano-btn-icon" data-action="toggle-lock" aria-label="${selectedLocked ? "Unlock" : "Lock"}" data-tip="${selectedLocked ? "Unlock" : "Lock"}">${selectedLocked ? ICON.lock_open : ICON.lock_closed}</button>
-          <button class="pano-btn pano-btn-icon" data-action="delete" aria-label="Delete" data-tip="Delete">${ICON.delete}</button>
-        `;
-      } else if (type === "stickers" || selectedKind === "image") {
-        selectionMenu.innerHTML = `
-          <button class="pano-btn pano-btn-icon" data-action="bring-front" aria-label="Bring to Front" data-tip="Bring to front">${ICON.bring_front}</button>
-          <button class="pano-btn pano-btn-icon" data-action="send-back" aria-label="Send to Back" data-tip="Send to back">${ICON.send_back}</button>
-          ${isExternalSticker(selected) ? "" : `<button class="pano-btn pano-btn-icon" data-action="duplicate" aria-label="Duplicate" data-tip="Duplicate">${ICON.duplicate}</button><button class="pano-btn pano-btn-icon" data-action="replace-image" aria-label="Replace Image" data-tip="Replace image">${ICON.replace_image}</button>`}
-          ${isExternalSticker(selected) ? `<button class="pano-btn pano-btn-icon" data-action="back-initial" aria-label="Back to Initial" data-tip="Back to initial position">${ICON.back_initial}</button>` : ""}
-          <button class="pano-btn pano-btn-icon" data-action="toggle-lock" aria-label="${selectedLocked ? "Unlock" : "Lock"}" data-tip="${selectedLocked ? "Unlock" : "Lock"}">${selectedLocked ? ICON.lock_open : ICON.lock_closed}</button>
-          ${isExternalSticker(selected)
-            ? `<button class="pano-btn pano-btn-icon" data-action="toggle-visible" aria-label="Hide" data-tip="Hide input image">${ICON.eye_dashed}</button>`
-            : `<button class="pano-btn pano-btn-icon" data-action="delete" aria-label="Delete" data-tip="Delete">${ICON.delete}</button>`}
-        `;
-      } else {
-        const activeAspect = getCutoutAspectLabel(selected);
-        selectionMenu.innerHTML = `
-          <div class="pano-cutout-menu">
-            <button class="pano-btn pano-btn-icon" data-action="aspect" aria-label="Aspect Ratio" data-tip="Aspect ratio">${ICON.aspect}</button>
-            <div class="pano-aspect-popover${editor.cutoutAspectOpen ? " open" : ""}" role="dialog" aria-label="Aspect Ratio">
-              <button class="pano-btn pano-aspect-choice${activeAspect === "1:1" ? " active" : ""}" data-action="aspect-set" data-aspect="1:1">1:1</button>
-              <button class="pano-btn pano-aspect-choice${activeAspect === "4:3" ? " active" : ""}" data-action="aspect-set" data-aspect="4:3">4:3</button>
-              <button class="pano-btn pano-aspect-choice${activeAspect === "3:2" ? " active" : ""}" data-action="aspect-set" data-aspect="3:2">3:2</button>
-              <button class="pano-btn pano-aspect-choice${activeAspect === "16:9" ? " active" : ""}" data-action="aspect-set" data-aspect="16:9">16:9</button>
-            </div>
-          </div>
-          <button class="pano-btn pano-btn-icon" data-action="rotate-90" aria-label="Rotate 90°" data-tip="Rotate 90°">${ICON.rotate_90}</button>
-          <button class="pano-btn pano-btn-icon" data-action="toggle-lock" aria-label="${selectedLocked ? "Unlock" : "Lock"}" data-tip="${selectedLocked ? "Unlock" : "Lock"}">${selectedLocked ? ICON.lock_open : ICON.lock_closed}</button>
-          <button class="pano-btn pano-btn-icon" data-action="delete" aria-label="Delete" data-tip="Delete">${ICON.delete}</button>
-        `;
-      }
-      editor.menuMode = menuMode;
-      editor.menuSize.measured = false;
-      installTooltipHandlers(selectionMenu);
-    }
-    if ((type === "stickers" || selectedKind === "image") && isExternalSticker(selected)) {
-      const backBtn = selectionMenu.querySelector("[data-action='back-initial']");
-      if (backBtn) {
-        const enabled = canRestoreSelectedToInitial();
-        backBtn.disabled = !enabled;
-        backBtn.setAttribute("aria-disabled", enabled ? "false" : "true");
-        backBtn.setAttribute("data-tip", enabled ? "Back to initial position" : "Already at initial position");
-      }
-      const toggleBtn = selectionMenu.querySelector("[data-action='toggle-visible']");
-      if (toggleBtn) {
-        const hidden = isStickerHidden(selected);
-        toggleBtn.innerHTML = hidden ? ICON.eye : ICON.eye_dashed;
-        toggleBtn.setAttribute("aria-label", hidden ? "Show" : "Hide");
-        toggleBtn.setAttribute("data-tip", hidden ? "Show input image" : "Hide input image");
-      }
-    }
-    const lockBtn = selectionMenu.querySelector("[data-action='toggle-lock']");
-    if (lockBtn) {
-      lockBtn.innerHTML = selectedLocked ? ICON.lock_open : ICON.lock_closed;
-      lockBtn.setAttribute("aria-label", selectedLocked ? "Unlock" : "Lock");
-      lockBtn.setAttribute("data-tip", selectedLocked ? "Unlock" : "Lock");
-    }
-    const geom = objectGeom(selected);
-    if (!geom?.visible) {
-      selectionMenu.style.display = "none";
+    const model = buildSelectionMenuModel({
+      type,
+      selected,
+      selectedItems,
+      selectedKind,
+      geom: selectedItems.length > 1 ? getMultiSelectionGeom(selectedItems) : objectGeom(selected),
+      allLocked: areAllSelectedItemsLocked(selectedItems),
+      selectedLocked: isItemLocked(selected),
+      activeAspect: getCutoutAspectLabel(selected),
+      cutoutAspectOpen: editor.cutoutAspectOpen,
+      isExternalSticker,
+      isStickerHidden,
+      canRestoreSelectedToInitial,
+      iconSet: ICON,
+    });
+
+    if (!model.visible) {
+      uiState.selectionMenu = { visible: false, left: 0, top: 0, items: [] };
       return;
     }
-    const poly = geom.corners;
-    const xs = poly.map((p) => p.x);
-    const ys = poly.map((p) => p.y);
-    const minX = Math.min(...xs);
-    const maxX = Math.max(...xs);
-    const maxY = Math.max(...ys);
-    const prevDisplay = selectionMenu.style.display;
-    const prevVisibility = selectionMenu.style.visibility;
-    selectionMenu.style.display = "flex";
-    selectionMenu.style.visibility = "hidden";
-    const rect = selectionMenu.getBoundingClientRect();
-    const measuredW = Math.round(Number(rect?.width || 0)) || selectionMenu.offsetWidth || editor.menuSize.w || 220;
-    const measuredH = Math.round(Number(rect?.height || 0)) || selectionMenu.offsetHeight || editor.menuSize.h || 40;
-    editor.menuSize.w = Number.isFinite(measuredW) && measuredW > 0 ? measuredW : 220;
-    editor.menuSize.h = Number.isFinite(measuredH) && measuredH > 0 ? measuredH : 40;
-    selectionMenu.style.display = prevDisplay;
-    selectionMenu.style.visibility = prevVisibility;
-    editor.menuSize.measured = true;
-    const menuW = editor.menuSize.w;
-    const menuH = editor.menuSize.h;
-    const pad = 14;
-    selectionMenu.style.display = "flex";
-    let x = (minX + maxX) * 0.5 - menuW * 0.5;
-    let y = maxY + 18;
-    if (!Number.isFinite(x) || !Number.isFinite(y)) {
-      selectionMenu.style.display = "none";
-      return;
-    }
-    x = clamp(x, pad, canvas.width - menuW - pad);
-    if (y + menuH > canvas.height - pad) {
-      selectionMenu.style.display = "none";
-      return;
-    }
-    selectionMenu.style.left = `${x}px`;
-    selectionMenu.style.top = `${y}px`;
+    uiState.selectionMenu = {
+      visible: true,
+      left: model.left,
+      top: model.top,
+      items: model.items,
+    };
+    requestAnimationFrame(() => {
+      if (!selectionMenu || uiState.selectionMenu.visible !== true) return;
+      const rect = selectionMenu.getBoundingClientRect();
+      const menuW = Math.round(Number(rect?.width || 0)) || 220;
+      const menuH = Math.round(Number(rect?.height || 0)) || 40;
+      const pad = 14;
+      let x = clamp((Number(model.anchor?.minX || 0) + Number(model.anchor?.maxX || 0)) * 0.5 - menuW * 0.5, pad, canvas.width - menuW - pad);
+      let y = Number(model.anchor?.maxY || 0) + 18;
+      if (!Number.isFinite(x) || !Number.isFinite(y) || y + menuH > canvas.height - pad) {
+        uiState.selectionMenu.visible = false;
+        return;
+      }
+      uiState.selectionMenu.left = x;
+      uiState.selectionMenu.top = y;
+    });
   }
 
   function hideTooltip() {
-    if (!tooltipEl) return;
     if (tooltip.timer) {
       clearTimeout(tooltip.timer);
       tooltip.timer = 0;
     }
     tooltip.target = null;
-    tooltipEl.classList.remove("show", "pano-tooltip-footer", "pano-tooltip-tool-rail");
+    uiState.tooltip.visible = false;
+    uiState.tooltip.text = "";
+    uiState.tooltip.variant = "";
   }
 
   function showTooltipFor(el) {
     if (!tooltipEl || !el || !el.isConnected) return;
     const text = String(el.getAttribute("data-tip") || "").trim();
     if (!text) return;
-    tooltipEl.textContent = text;
-    const hostRect = stageWrap.getBoundingClientRect();
-    const rect = el.getBoundingClientRect();
-    const pad = 8;
-    const mw = tooltipEl.offsetWidth || 100;
-    const mh = tooltipEl.offsetHeight || 24;
-    const inToolRail = !!el.closest(".pano-floating-left");
-    const inFooter = !!el.closest(".pano-paint-footer") || !!el.closest(".pano-paint-color-float");
-    tooltipEl.classList.remove("pano-tooltip-footer", "pano-tooltip-tool-rail");
-    let x = rect.left - hostRect.left + rect.width * 0.5 - mw * 0.5;
-    let y = rect.top - hostRect.top - mh - 8;
-    if (inToolRail) {
-      tooltipEl.classList.add("pano-tooltip-tool-rail");
-      x = rect.right - hostRect.left + 10;
-      y = rect.top - hostRect.top + rect.height * 0.5 - mh * 0.5;
-      x = clamp(x, pad, Math.max(pad, hostRect.width - mw - pad));
-      y = clamp(y, pad, Math.max(pad, hostRect.height - mh - pad));
-    } else if (inFooter) {
-      tooltipEl.classList.add("pano-tooltip-footer");
-      const footerHost = el.closest(".pano-paint-footer");
-      const footerRect = footerHost ? footerHost.getBoundingClientRect() : rect;
-      x = footerRect.left - hostRect.left + footerRect.width * 0.5 - mw * 0.5;
-      y = footerRect.bottom - hostRect.top + 5;
+    uiState.tooltip.text = text;
+    uiState.tooltip.visible = true;
+    const expectedTarget = el;
+    requestAnimationFrame(() => {
+      if (tooltip.target !== expectedTarget || !tooltipEl || !expectedTarget?.isConnected) return;
+      const hostRect = stageWrap.getBoundingClientRect();
+      const rect = expectedTarget.getBoundingClientRect();
+      const pad = 8;
+      const topGap = 12;
+      const mw = Math.round(Number(tooltipEl.getBoundingClientRect()?.width || 0)) || 100;
+      const mh = Math.round(Number(tooltipEl.getBoundingClientRect()?.height || 0)) || 24;
+      const inToolRail = !!expectedTarget.closest(".pano-floating-left");
+      const inFooter = !!expectedTarget.closest(".pano-paint-footer") || !!expectedTarget.closest(".pano-paint-color-float");
+      let variant = "";
+      let x = rect.left - hostRect.left + rect.width * 0.5 - mw * 0.5;
+      let y = rect.top - hostRect.top - mh - topGap;
+      if (inToolRail) {
+        variant = "tool-rail";
+        x = rect.right - hostRect.left + 10;
+        y = rect.top - hostRect.top + rect.height * 0.5 - mh * 0.5;
+        x = clamp(x, pad, Math.max(pad, hostRect.width - mw - pad));
+        y = clamp(y, pad, Math.max(pad, hostRect.height - mh - pad));
+      } else if (inFooter) {
+        variant = "footer";
+        const footerHost = expectedTarget.closest(".pano-paint-footer");
+        const footerRect = footerHost ? footerHost.getBoundingClientRect() : rect;
+        x = footerRect.left - hostRect.left + footerRect.width * 0.5 - mw * 0.5;
+        y = footerRect.bottom - hostRect.top + 5;
+        x = clamp(x, pad, Math.max(pad, hostRect.width - mw - pad));
+        y = Math.max(pad, y);
+      }
       x = clamp(x, pad, Math.max(pad, hostRect.width - mw - pad));
       y = Math.max(pad, y);
-    }
-    x = clamp(x, pad, Math.max(pad, hostRect.width - mw - pad));
-    y = Math.max(pad, y);
-    tooltipEl.style.left = `${x}px`;
-    tooltipEl.style.top = `${y}px`;
-    tooltipEl.classList.add("show");
-  }
-
-  function installTooltipHandlers(scope) {
-    scope.querySelectorAll("[data-tip]").forEach((el) => {
-      if (el.__panoTipBound) return;
-      el.__panoTipBound = true;
-      el.addEventListener("pointerenter", () => {
-        tooltip.target = el;
-        if (tooltip.timer) clearTimeout(tooltip.timer);
-        tooltip.timer = window.setTimeout(() => {
-          if (tooltip.target === el) showTooltipFor(el);
-        }, 220);
-      });
-      el.addEventListener("pointerleave", () => {
-        if (tooltip.target === el) tooltip.target = null;
-        hideTooltip();
-      });
-      el.addEventListener("pointerdown", hideTooltip);
+      uiState.tooltip.left = x;
+      uiState.tooltip.top = y;
+      uiState.tooltip.variant = variant;
+      uiState.tooltip.visible = true;
     });
   }
 
@@ -9158,6 +8333,15 @@ async function showEditor(node, type, options = {}) {
             startDist: Math.max(1, Math.hypot(p.x - selGeom.center.x, p.y - selGeom.center.y)),
             snapshot: cloneJson(getStrokeGroupStrokes(selected.actionGroupId, selected.layerKind)),
             frameSnapshot: cloneJson(ensureGroupFrame(selected.actionGroupId, selected.layerKind)),
+            cursor: h.cursor,
+          }
+          : isRasterObjectItem(selected)
+          ? {
+            kind: "scale_raster_object",
+            item: selected,
+            center: selGeom.center,
+            startDist: Math.max(1, Math.hypot(p.x - selGeom.center.x, p.y - selGeom.center.y)),
+            snapshot: cloneJson(getRasterObjectList().find((entry) => String(entry?.id || "") === parseRasterObjectSelectionId(selected.rasterObjectId || selected.id || ""))),
             cursor: h.cursor,
           }
           : {
@@ -9415,10 +8599,10 @@ async function showEditor(node, type, options = {}) {
         })()
         : screenPosToErpPoint(p, performance.now());
       if (!currentUv || !it.startUv) return;
-      const du = Number(currentUv.u || 0) - Number(it.startUv.u || 0);
+      const du = shortestWrappedDelta(Number(currentUv.u || 0), Number(it.startUv.u || 0));
       const dv = Number(currentUv.v || 0) - Number(it.startUv.v || 0);
       if (applyStrokeGroupOffset(it.item?.actionGroupId, du, dv, it.snapshot, it.item?.layerKind, it.frameSnapshot)) {
-        markPaintStrokeVisualsDirty({ rebuildPaintEngine: true });
+        markPaintStrokeVisualsDirty({ rebuildPaintEngine: false });
         requestDraw({ localOnly: true });
       }
       return;
@@ -9432,9 +8616,19 @@ async function showEditor(node, type, options = {}) {
         })()
         : screenPosToErpPoint(p, performance.now());
       if (!currentUv || !it.startUv) return;
-      const du = Number(currentUv.u || 0) - Number(it.startUv.u || 0);
+      const du = shortestWrappedDelta(Number(currentUv.u || 0), Number(it.startUv.u || 0));
       const dv = Number(currentUv.v || 0) - Number(it.startUv.v || 0);
       if (applyRasterObjectOffset(it.item?.rasterObjectId || it.item?.id || "", du, dv, it.snapshot)) {
+        markPaintCompositeVisualsDirty();
+        requestDraw({ localOnly: true });
+      }
+      return;
+    }
+
+    if (it.kind === "scale_raster_object") {
+      const d = Math.max(1, Math.hypot(p.x - it.center.x, p.y - it.center.y));
+      const ratio = d / Math.max(1, Number(it.startDist || 1));
+      if (applyRasterObjectTransform(it.item?.rasterObjectId || it.item?.id || "", ratio, it.snapshot)) {
         markPaintCompositeVisualsDirty();
         requestDraw({ localOnly: true });
       }
@@ -9496,7 +8690,7 @@ async function showEditor(node, type, options = {}) {
           : screenPosToErpPoint(targetScreen, performance.now());
         const startUvForGroup = snap.centerUv || null;
         if (currentUv && startUvForGroup) {
-          const du = Number(currentUv.u || 0) - Number(startUvForGroup.u || 0);
+          const du = shortestWrappedDelta(Number(currentUv.u || 0), Number(startUvForGroup.u || 0));
           const dv = Number(currentUv.v || 0) - Number(startUvForGroup.v || 0);
           if (applyStrokeGroupOffset(snap.id, du, dv, snap.snapshot, snap.layerKind, snap.frameSnapshot)) {
             changed = true;
@@ -9517,7 +8711,7 @@ async function showEditor(node, type, options = {}) {
           : screenPosToErpPoint(targetScreen, performance.now());
         const startUvForObject = snap.centerUv || null;
         if (currentUv && startUvForObject) {
-          const du = Number(currentUv.u || 0) - Number(startUvForObject.u || 0);
+          const du = shortestWrappedDelta(Number(currentUv.u || 0), Number(startUvForObject.u || 0));
           const dv = Number(currentUv.v || 0) - Number(startUvForObject.v || 0);
           if (applyRasterObjectOffset(snap.id, du, dv, snap.snapshot)) {
             changed = true;
@@ -9527,7 +8721,7 @@ async function showEditor(node, type, options = {}) {
       }
       if (changed) {
         if (paintStrokeChanged) {
-          markPaintStrokeVisualsDirty({ rebuildPaintEngine: true });
+          markPaintStrokeVisualsDirty({ rebuildPaintEngine: false });
         } else if (rasterChanged) {
           markPaintCompositeVisualsDirty();
         } else {
@@ -9542,7 +8736,7 @@ async function showEditor(node, type, options = {}) {
       const d = Math.max(1, Math.hypot(p.x - it.center.x, p.y - it.center.y));
       const ratio = d / Math.max(1, Number(it.startDist || 1));
       if (applyStrokeGroupTransform(it.item?.actionGroupId, ratio, 0, it.snapshot, it.item?.layerKind, it.frameSnapshot)) {
-        markPaintStrokeVisualsDirty({ rebuildPaintEngine: true });
+        markPaintStrokeVisualsDirty({ rebuildPaintEngine: false });
         requestDraw({ localOnly: true });
       }
       return;
@@ -9552,7 +8746,7 @@ async function showEditor(node, type, options = {}) {
       let delta = (Math.atan2(p.y - it.center.y, p.x - it.center.x) - Number(it.startAng || 0)) * RAD2DEG;
       if (e.shiftKey) delta = Math.round(delta / 45) * 45;
       if (applyStrokeGroupTransform(it.item?.actionGroupId, 1, delta, it.snapshot, it.item?.layerKind, it.frameSnapshot)) {
-        markPaintStrokeVisualsDirty({ rebuildPaintEngine: true });
+        markPaintStrokeVisualsDirty({ rebuildPaintEngine: false });
         requestDraw({ localOnly: true });
       }
       return;
@@ -9571,6 +8765,7 @@ async function showEditor(node, type, options = {}) {
       it.item.hFOV_deg = clamp(it.startHFOV * ratio, 1, 179);
       it.item.vFOV_deg = clamp(it.startVFOV * ratio, 1, 179);
       it.item.aspect_id = deriveCutoutAspectLabelFromFov(it.item);
+      if (isStickerItem(it.item)) markObjectVisualsDirty();
       requestDraw({ localOnly: true });
       return;
     }
@@ -9580,6 +8775,7 @@ async function showEditor(node, type, options = {}) {
       const ratio = d / it.startDist;
       it.item.hFOV_deg = clamp(it.startHFOV * ratio, 1, 179);
       it.item.aspect_id = deriveCutoutAspectLabelFromFov(it.item);
+      if (isStickerItem(it.item)) markObjectVisualsDirty();
       requestDraw({ localOnly: true });
       return;
     }
@@ -9589,6 +8785,7 @@ async function showEditor(node, type, options = {}) {
       const ratio = d / it.startDist;
       it.item.vFOV_deg = clamp(it.startVFOV * ratio, 1, 179);
       it.item.aspect_id = deriveCutoutAspectLabelFromFov(it.item);
+      if (isStickerItem(it.item)) markObjectVisualsDirty();
       requestDraw({ localOnly: true });
       return;
     }
@@ -9600,6 +8797,7 @@ async function showEditor(node, type, options = {}) {
       if (e.shiftKey) out = Math.round(out / 45) * 45;
       const key = isStickerItem(it.item) ? "rot_deg" : "roll_deg";
       it.item[key] = out;
+      if (isStickerItem(it.item)) markObjectVisualsDirty();
       requestDraw({ localOnly: true });
     }
   };
@@ -9657,7 +8855,7 @@ async function showEditor(node, type, options = {}) {
         || editor.interaction.kind === "rotate_stroke_group") {
         compositeChanged = true;
       }
-      if (editor.interaction.kind === "move_raster_object") {
+      if (editor.interaction.kind === "move_raster_object" || editor.interaction.kind === "scale_raster_object") {
         compositeChanged = true;
       }
       if (editor.interaction.kind === "move_multi" && Array.isArray(editor.interaction.strokeSnapshots) && editor.interaction.strokeSnapshots.length) {
@@ -9667,7 +8865,14 @@ async function showEditor(node, type, options = {}) {
         compositeChanged = true;
       }
       if (compositeChanged) {
-        markPaintCompositeVisualsDirty();
+        const strokeDragKinds = ["move_stroke_group", "scale_stroke_group", "rotate_stroke_group"];
+        const isStrokeDrag = strokeDragKinds.includes(editor.interaction.kind)
+          || (editor.interaction.kind === "move_multi" && Array.isArray(editor.interaction.strokeSnapshots) && editor.interaction.strokeSnapshots.length);
+        if (isStrokeDrag) {
+          markPaintStrokeVisualsDirty({ rebuildPaintEngine: true });
+        } else {
+          markPaintCompositeVisualsDirty();
+        }
       }
       pushHistory();
       commitState();
@@ -9781,10 +8986,193 @@ async function showEditor(node, type, options = {}) {
   window.addEventListener("dragleave", onWindowDragLeave, true);
   window.addEventListener("drop", onWindowDrop, true);
 
-  viewBtns.forEach((btn) => {
-    btn.onclick = () => {
-      if (btn.disabled) return;
-      editor.mode = btn.dataset.view;
+  function syncUndoRedoButtons() {
+    const { canUndo, canRedo } = getHistoryCapabilities();
+    patchUiButton(uiState.toolButtons, "value", "undo", { disabled: !canUndo });
+    patchUiButton(uiState.toolButtons, "value", "redo", { disabled: !canRedo });
+  };
+  const applySidePanelParam = (key, rawValue, commit = false) => {
+    const selected = getSelected();
+    const selectedKind = getSelectedKind();
+    if (!selected || selectedKind === "stroke") return;
+    const param = (uiState.sidePanel?.params || []).find((item) => item.key === key);
+    if (!param || param.enabled === false) return;
+    let out = Number(rawValue);
+    if (Number.isNaN(out)) out = 0;
+    out = clamp(out, Number(param.min), Number(param.max));
+    if (key === "yaw_deg") out = wrapYaw(out);
+    selected[key] = out;
+    if (type === "cutout" && (key === "hFOV_deg" || key === "vFOV_deg")) {
+      selected.aspect_id = deriveCutoutAspectLabelFromFov(selected);
+    }
+    updateSidePanel();
+    requestDraw();
+    if (commit) pushHistory();
+  };
+  side?.addEventListener("click", async (ev) => {
+    const target = ev.target.closest("[data-action]");
+    if (!target) return;
+    const action = String(target.getAttribute("data-action") || "");
+    if (action === "coverage-set") {
+      const nextCoverage = normalizeCoverageValue(target.getAttribute("data-coverage"));
+      if (nextCoverage === normalizeCoverageValue(state.coverage)) return;
+      state.coverage = nextCoverage;
+      editor.coverage = nextCoverage;
+      if (coverageWidget) {
+        coverageWidget.value = String(nextCoverage);
+      }
+      if (previewMode) {
+        runtime.backgroundDirty = true;
+      } else {
+        commitState();
+        syncCoverageChangeToNodePreviews({
+          syncPreview: type !== "cutout",
+          syncGraph: type !== "cutout",
+        });
+      }
+      updateSidePanel();
+      updateSelectionMenu();
+      requestDraw();
+      return;
+    }
+    if (action === "toggle-selection-picker") {
+      if (uiState.sidePanel?.selectionPicker?.disabled) return;
+      uiState.sidePanel.selectionPicker.open = !uiState.sidePanel.selectionPicker.open;
+      return;
+    }
+    if (action === "select-picker-item") {
+      uiState.sidePanel.selectionPicker.open = false;
+      const selectedId = String(target.getAttribute("data-selection-id") || "");
+      let nextItem = null;
+      if (selectedId) {
+        if (type === "stickers") nextItem = getList().find((item) => String(item?.id || "") === selectedId) || null;
+        else nextItem = getCutoutInspectorItems().find((entry) => String(entry?.item?.id || "") === selectedId)?.item || null;
+      }
+      setSelectedItem(nextItem || null);
+      if (nextItem && !isStrokeGroupItem(nextItem)) {
+        startViewTween(
+          wrapYaw(Number(nextItem.yaw_deg || 0)),
+          clamp(Number(nextItem.pitch_deg || 0), -89.9, 89.9),
+          editor.viewFov,
+        );
+      }
+      updateSidePanel();
+      updateSelectionMenu();
+      requestDraw();
+      return;
+    }
+    if (action === "copy-state-inline") {
+      const selected = getSelected();
+      const selectedKind = getSelectedKind();
+      if (!selected || selectedKind === "stroke" || getSelectedItems().length > 1) return;
+      const text = JSON.stringify(type === "cutout" && selectedKind !== "image"
+        ? buildCanonicalCutoutStickerState(selected)
+        : buildCanonicalSelectedStickerState(selected));
+      try {
+        await navigator.clipboard.writeText(text);
+        if (uiState.sidePanel?.copyStateButton) {
+          uiState.sidePanel.copyStateButton.label = "Copied";
+          window.setTimeout(() => {
+            if (uiState.sidePanel?.copyStateButton) uiState.sidePanel.copyStateButton.label = "Copy State";
+          }, 900);
+        }
+      } catch {
+        // ignore clipboard failures
+      }
+      return;
+    }
+    if (action === "toggle-visibility") {
+      const key = String(target.getAttribute("data-visibility") || "");
+      if (key === "panorama") editor.showPanorama = !editor.showPanorama;
+      else if (key === "objects") editor.showObjects = !editor.showObjects;
+      else if (key === "mask") editor.showMask = !editor.showMask;
+      updateSidePanel();
+      requestDraw();
+      return;
+    }
+    if (action === "set-invert-x") {
+      state.ui_settings.invert_view_x = target.getAttribute("data-value") === "1";
+      persistUiSettings();
+      updateSidePanel();
+      node.setDirtyCanvas?.(true, true);
+      requestDraw();
+      return;
+    }
+    if (action === "set-invert-y") {
+      state.ui_settings.invert_view_y = target.getAttribute("data-value") === "1";
+      persistUiSettings();
+      updateSidePanel();
+      node.setDirtyCanvas?.(true, true);
+      requestDraw();
+      return;
+    }
+    if (action === "toggle-quality-picker") {
+      if (uiState.sidePanel?.uiSettings) uiState.sidePanel.uiSettings.qualityOpen = !uiState.sidePanel.uiSettings.qualityOpen;
+      return;
+    }
+    if (action === "set-quality") {
+      const q = String(target.getAttribute("data-quality") || "balanced");
+      state.ui_settings.preview_quality = (q === "draft" || q === "high") ? q : "balanced";
+      persistUiSettings();
+      updateSidePanel();
+      node.setDirtyCanvas?.(true, true);
+      requestDraw();
+      return;
+    }
+    if (action === "ui-reset-defaults") {
+      state.ui_settings.invert_view_x = false;
+      state.ui_settings.invert_view_y = false;
+      state.ui_settings.preview_quality = "balanced";
+      persistUiSettings();
+      updateSidePanel();
+      node.setDirtyCanvas?.(true, true);
+      requestDraw();
+      return;
+    }
+    if (action === "close-preview") {
+      closeEditor();
+      return;
+    }
+    if (action === "cancel-close") {
+      closeEditor();
+      return;
+    }
+    if (action === "save-close") {
+      apply();
+      closeEditor();
+    }
+  });
+  side?.addEventListener("input", (ev) => {
+    const target = ev.target.closest("[data-action='param-input']");
+    if (!target) return;
+    applySidePanelParam(String(target.getAttribute("data-param-key") || ""), target.value, false);
+  });
+  side?.addEventListener("change", (ev) => {
+    const target = ev.target.closest("[data-action='param-input']");
+    if (!target) return;
+    applySidePanelParam(String(target.getAttribute("data-param-key") || ""), target.value, true);
+  });
+  const syncGridToggleButton = () => {
+    const visible = !!editor.showGrid;
+    patchUiButton(uiState.floatingButtons, "action", "toggle-grid", {
+      icon: visible ? ICON.eye : ICON.eye_dashed,
+      pressed: visible ? "true" : "false",
+      label: visible ? "Hide Grid" : "Show Grid",
+      tip: visible ? "Hide grid" : "Show grid",
+    });
+  };
+  syncGridToggleButton();
+  root.addEventListener("click", (ev) => {
+    if (ev.target?.matches?.("[data-confirm-overlay]")) {
+      const resolver = uiState.confirmDialog?.resolve;
+      uiState.confirmDialog = { visible: false, title: "", text: "", confirmLabel: "Confirm", resolve: null };
+      resolver?.(false);
+      return;
+    }
+    const viewTarget = ev.target.closest("[data-view]");
+    if (viewTarget) {
+      if (viewTarget.disabled) return;
+      editor.mode = String(viewTarget.getAttribute("data-view") || "pano");
       if (type === "cutout" && editor.mode === "frame" && getSelected() && isShotItem(getSelected())) {
         clearSelection({ preservePanelValues: true });
         updateSidePanel();
@@ -9793,191 +9181,231 @@ async function showEditor(node, type, options = {}) {
       forceCursorTool();
       syncViewToggleState();
       requestDraw();
-    };
-  });
-
-  function syncUndoRedoButtons() {
-    const { canUndo, canRedo } = getHistoryCapabilities();
-    root.querySelectorAll("[data-action='undo'], [data-tool-ui-action='undo']").forEach((btn) => {
-      btn.disabled = !canUndo;
-    });
-    root.querySelectorAll("[data-action='redo'], [data-tool-ui-action='redo']").forEach((btn) => {
-      btn.disabled = !canRedo;
-    });
-  }
-
-  const undoBtn = root.querySelector("[data-action='undo']");
-  if (undoBtn) {
-    undoBtn.onclick = () => {
-      if (readOnly || undoBtn.disabled) return;
-      restoreHistory(-1);
-    };
-  }
-  const redoBtn = root.querySelector("[data-action='redo']");
-  if (redoBtn) {
-    redoBtn.onclick = () => {
-      if (readOnly || redoBtn.disabled) return;
-      restoreHistory(1);
-    };
-  }
-  const addBtn = root.querySelector("[data-action='add']");
-  if (addBtn) {
-    addBtn.onclick = () => {
-      if (readOnly) return;
-      (type === "stickers" ? addImageSticker() : addCutoutFrame());
-    };
-  }
-  const clearBtn = root.querySelector("[data-action='clear']");
-  if (clearBtn) {
-    clearBtn.onclick = () => {
-      if (readOnly) return;
-      clearAll();
-    };
-  }
-  const applyBtn = root.querySelector("[data-action='save']");
-  if (applyBtn) applyBtn.onclick = () => {
-    if (readOnly) return;
-    apply();
-  };
-  root.querySelector("[data-action='reset-view']").onclick = () => {
-    startViewTween(0, 0, 100, 180, 680);
-  };
-  const gridBtn = root.querySelector("[data-action='toggle-grid']");
-  const syncGridToggleButton = () => {
-    if (!gridBtn) return;
-    const visible = !!editor.showGrid;
-    gridBtn.innerHTML = visible ? ICON.eye : ICON.eye_dashed;
-    gridBtn.setAttribute("aria-pressed", visible ? "true" : "false");
-    gridBtn.setAttribute("aria-label", visible ? "Hide Grid" : "Show Grid");
-    gridBtn.setAttribute("data-tip", visible ? "Hide grid" : "Show grid");
-  };
-  if (gridBtn) {
-    syncGridToggleButton();
-    gridBtn.onclick = () => {
-      editor.showGrid = !editor.showGrid;
-      setNodeGridVisibility(node?.id, editor.showGrid);
-      syncGridToggleButton();
-      requestDraw();
-    };
-  }
-  if (toolRail) {
-    toolRail.querySelectorAll("[data-tool-mode]").forEach((btn) => {
-      btn.onclick = () => {
-        if (readOnly) return;
-        const newTool = String(btn.getAttribute("data-tool-mode") || "cursor");
+      return;
+    }
+    const actionTarget = ev.target.closest("[data-action], [data-tool-ui-action], [data-tool-mode], [data-paint-tool], [data-mask-tool], [data-paint-layer-clear-current], [data-paint-color-swatch], [data-paint-color-custom]");
+    if (actionTarget && !readOnly) {
+      if (actionTarget.matches("[data-tool-mode]")) {
+        const newTool = String(actionTarget.getAttribute("data-tool-mode") || "cursor");
         editor.primaryTool = newTool;
-        if (newTool === "paint" || newTool === "mask") {
-          clearSelection({ preservePanelValues: true });
-        }
+        if (newTool === "paint" || newTool === "mask") clearSelection({ preservePanelValues: true });
         syncPaintUi();
         updateSidePanel();
         updateSelectionMenu();
         requestDraw();
-      };
-    });
-    toolRail.querySelectorAll("[data-tool-ui-action]").forEach((btn) => {
-      btn.onclick = () => {
-        if (readOnly) return;
-        const action = String(btn.getAttribute("data-tool-ui-action") || "");
-        if ((action === "undo" || action === "redo") && btn.disabled) return;
+        return;
+      }
+      if (actionTarget.matches("[data-tool-ui-action]")) {
+        const action = String(actionTarget.getAttribute("data-tool-ui-action") || "");
+        if ((action === "undo" || action === "redo") && actionTarget.disabled) return;
         if (action === "undo") restoreHistory(-1);
         else if (action === "redo") restoreHistory(1);
         else if (action === "clear") clearAll();
-        else if (action === "add") addImageSticker();
-        else if (action === "add-image") addImageSticker();
-        else if (action === "add-or-look") {
-          const activeShot = getActiveCutoutShot();
-          if ((state.shots || []).length === 0) {
-            addCutoutFrame();
-          } else {
-            const target = activeShot;
-            if (!target) return;
-            editor.selectedId = target.id || null;
-            editor.selectedIds = editor.selectedId ? [editor.selectedId] : [];
-            state.active.selected_shot_id = editor.selectedId;
-            const targetYaw = wrapYaw(Number(target.yaw_deg || 0));
-            const targetPitch = clamp(Number(target.pitch_deg || 0), -89.9, 89.9);
-            startViewTween(targetYaw, targetPitch, editor.viewFov);
-            updateSidePanel();
-            updateSelectionMenu();
-            requestDraw();
-          }
-        }
-      };
-    });
-  }
-  root.querySelectorAll("[data-paint-tool]").forEach((btn) => {
-    btn.onclick = () => {
-      editor.primaryTool = "paint";
-      const tool = String(btn.getAttribute("data-paint-tool") || "pen");
-      editor.paintTool = tool;
-      clearSelection({ preservePanelValues: true });
-      if (BRUSH_PRESETS[tool]) editor.activeBrushPresetId = tool;
-      syncPaintUi();
-      updateSidePanel();
-      updateSelectionMenu();
-      requestDraw();
-    };
-  });
-  root.querySelectorAll("[data-mask-tool]").forEach((btn) => {
-    btn.onclick = () => {
-      editor.primaryTool = "mask";
-      editor.maskTool = String(btn.getAttribute("data-mask-tool") || "pen");
-      clearSelection({ preservePanelValues: true });
-      syncPaintUi();
-      updateSidePanel();
-      updateSelectionMenu();
-      requestDraw();
-    };
-  });
-  paintLayerClearCurrentBtns.forEach((btn) => {
-    btn.onclick = () => {
-      const layerKind = String(btn.getAttribute("data-paint-layer-clear-current") || "paint") === "mask" ? "mask" : "paint";
-      clearPaintingLayer(layerKind);
-    };
-  });
-  paintSizeSliders.forEach((slider) => {
-    slider.oninput = () => {
-      if (slider.disabled) return;
-      const v = Math.max(1, Math.min(120, Math.round(Number(slider.value))));
-      const sizePresetId = getBrushPresetIdForTool(editor.primaryTool === "paint" ? editor.paintTool : editor.maskTool);
-      editor.brushSizes[sizePresetId] = v;
-      const pct = ((v - 1) / 119) * 100;
-      paintSizeSliders.forEach((otherSlider) => {
-        otherSlider.value = String(v);
-        otherSlider.style.setProperty("--v", `${clamp(pct, 0, 100)}%`);
-      });
-      paintSizeValues.forEach((valueEl) => {
-        valueEl.textContent = String(v);
-      });
-      showPaintSizePreview();
-    };
-    slider.onchange = () => hidePaintSizePreview();
-    slider.addEventListener("pointerup", hidePaintSizePreview);
-    slider.addEventListener("pointercancel", hidePaintSizePreview);
-    slider.addEventListener("blur", hidePaintSizePreview);
-  });
-  if (paintColorRow) {
-    paintColorRow.querySelectorAll("[data-paint-color-swatch]").forEach((btn) => {
-      btn.onclick = () => {
-        const swatch = PAINT_COLOR_SWATCHES.find((item) => item.id === btn.getAttribute("data-paint-color-swatch"));
+        else if (action === "add" || action === "add-image") addImageSticker();
+        return;
+      }
+      if (actionTarget.matches("[data-paint-tool]")) {
+        editor.primaryTool = "paint";
+        const tool = String(actionTarget.getAttribute("data-paint-tool") || "pen");
+        editor.paintTool = tool;
+        clearSelection({ preservePanelValues: true });
+        if (BRUSH_PRESETS[tool]) editor.activeBrushPresetId = tool;
+        syncPaintUi();
+        updateSidePanel();
+        updateSelectionMenu();
+        requestDraw();
+        return;
+      }
+      if (actionTarget.matches("[data-mask-tool]")) {
+        editor.primaryTool = "mask";
+        editor.maskTool = String(actionTarget.getAttribute("data-mask-tool") || "pen");
+        clearSelection({ preservePanelValues: true });
+        syncPaintUi();
+        updateSidePanel();
+        updateSelectionMenu();
+        requestDraw();
+        return;
+      }
+      if (actionTarget.matches("[data-paint-layer-clear-current]")) {
+        const layerKind = String(actionTarget.getAttribute("data-paint-layer-clear-current") || "paint") === "mask" ? "mask" : "paint";
+        clearPaintingLayer(layerKind);
+        return;
+      }
+      if (actionTarget.matches("[data-paint-color-swatch]")) {
+        const swatch = PAINT_COLOR_SWATCHES.find((item) => item.id === actionTarget.getAttribute("data-paint-color-swatch"));
         if (!swatch) return;
         editor.paintColor = cloneColor(swatch.color);
         closePaintColorPop(true);
         syncPaintUi();
-      };
-    });
-    const customBtn = paintColorRow.querySelector("[data-paint-color-custom]");
-    if (customBtn) {
-      customBtn.onclick = (ev) => {
+        return;
+      }
+      if (actionTarget.matches("[data-paint-color-custom]")) {
         ev.preventDefault();
         ev.stopPropagation();
         if (paintColorPop && !paintColorPop.hidden) closePaintColorPop(true);
         else openPaintColorPop();
         syncPaintUi();
-      };
+        return;
+      }
     }
-  }
+    const action = String(actionTarget?.getAttribute?.("data-action") || "");
+    if (!readOnly) {
+      if (action === "aspect") {
+        editor.cutoutAspectOpen = !editor.cutoutAspectOpen;
+        editor.menuSize.measured = false;
+        updateSelectionMenu();
+        requestDraw();
+        return;
+      }
+      if (action === "aspect-set") {
+        const selected = getSelected();
+        if (!selected) return;
+        const aspect = String(actionTarget.getAttribute("data-aspect") || "1:1");
+        applyCutoutAspect(selected, aspect);
+        editor.cutoutAspectOpen = false;
+        editor.menuSize.measured = false;
+        syncSidePanelControls();
+        pushHistory();
+        commitAndRefreshNode();
+        updateSelectionMenu();
+        requestDraw();
+        return;
+      }
+      if (action === "rotate-90") {
+        const selected = getSelected();
+        if (!selected) return;
+        rotateCutoutAspect90(selected);
+        editor.cutoutAspectOpen = false;
+        editor.menuSize.measured = false;
+        syncSidePanelControls();
+        pushHistory();
+        commitAndRefreshNode();
+        updateSelectionMenu();
+        requestDraw();
+        return;
+      }
+      if (action === "bring-front") {
+        bringSelectedToFront();
+        return;
+      }
+      if (action === "send-back") {
+        sendSelectedToBack();
+        return;
+      }
+      if (action === "duplicate") {
+        duplicateSelected();
+        return;
+      }
+      if (action === "replace-image") {
+        replaceSelectedImage();
+        return;
+      }
+      if (action === "toggle-lock") {
+        toggleSelectedLock();
+        return;
+      }
+      if (action === "back-initial") {
+        restoreSelectedToInitialPose();
+        return;
+      }
+      if (action === "toggle-visible") {
+        toggleSelectedExternalStickerVisibility();
+        return;
+      }
+      if (action === "delete") {
+        deleteSelected();
+        return;
+      }
+    }
+    if (action === "reset-view") {
+      startViewTween(0, 0, 100, 180, 680);
+      return;
+    }
+    if (action === "toggle-grid") {
+      editor.showGrid = !editor.showGrid;
+      setNodeGridVisibility(node?.id, editor.showGrid);
+      syncGridToggleButton();
+      requestDraw();
+      return;
+    }
+    if (action === "toggle-fullscreen") {
+      ev.preventDefault();
+      ev.stopPropagation();
+      toggleFullscreen();
+      return;
+    }
+    if (action === "toggle-output-preview-size") {
+      ev.preventDefault();
+      ev.stopPropagation();
+      const nextExpanded = !editor.outputPreviewExpanded;
+      editor.outputPreviewExpanded = nextExpanded;
+      editor.outputPreviewAnimFrom = editor.outputPreviewAnim;
+      editor.outputPreviewAnimTo = nextExpanded ? 1 : 0;
+      editor.outputPreviewAnimStartTs = performance.now();
+      syncOutputPreviewToggleButton();
+      requestDraw();
+      return;
+    }
+    const historyBtn = ev.target.closest("[data-paint-history-index]");
+    if (!historyBtn) return;
+    const idx = Number(historyBtn.getAttribute("data-paint-history-index"));
+    const color = editor.customPaintHistory[idx];
+    if (!color) return;
+    editor.customPaintColor = cloneColor(color);
+    editor.paintColor = cloneColor(color);
+    syncPaintUi();
+  });
+  root.addEventListener("input", (ev) => {
+    const slider = ev.target.closest("[data-paint-size-slider]");
+    if (slider) {
+      if (slider.disabled) return;
+      const v = Math.max(1, Math.min(120, Math.round(Number(slider.value))));
+      const sizePresetId = getBrushPresetIdForTool(editor.primaryTool === "paint" ? editor.paintTool : editor.maskTool);
+      editor.brushSizes[sizePresetId] = v;
+      syncPaintUi();
+      showPaintSizePreview();
+      return;
+    }
+    const alphaSlider = ev.target.closest("[data-paint-alpha-slider]");
+    if (alphaSlider) {
+      const next = { ...editor.customPaintColor, a: clamp(Number(alphaSlider.value) / 100, 0, 1) };
+      editor.customPaintColor = cloneColor(next);
+      editor.paintColor = cloneColor(next);
+      syncPaintUi();
+    }
+  });
+  root.addEventListener("change", (ev) => {
+    if (ev.target.closest("[data-paint-size-slider]")) hidePaintSizePreview();
+  });
+  root.addEventListener("pointerup", (ev) => {
+    if (ev.target.closest("[data-paint-size-slider]")) hidePaintSizePreview();
+  });
+  root.addEventListener("pointercancel", (ev) => {
+    if (ev.target.closest("[data-paint-size-slider]")) hidePaintSizePreview();
+  });
+  root.addEventListener("focusout", (ev) => {
+    if (ev.target.closest("[data-paint-size-slider]")) hidePaintSizePreview();
+  });
+  root.addEventListener("pointerover", (ev) => {
+    const target = ev.target.closest("[data-tip]");
+    if (!target || !root.contains(target)) return;
+    if (tooltip.target === target) return;
+    tooltip.target = target;
+    if (tooltip.timer) clearTimeout(tooltip.timer);
+    tooltip.timer = window.setTimeout(() => {
+      if (tooltip.target === target) showTooltipFor(target);
+    }, 220);
+  });
+  root.addEventListener("pointerout", (ev) => {
+    const target = ev.target.closest("[data-tip]");
+    if (!target || tooltip.target !== target) return;
+    const nextTarget = ev.relatedTarget instanceof Element ? ev.relatedTarget.closest?.("[data-tip]") : null;
+    if (nextTarget === target) return;
+    hideTooltip();
+  });
+  root.addEventListener("pointerdown", () => {
+    hideTooltip();
+  });
   const updatePaintColorFromSv = (clientX, clientY) => {
     if (!paintColorSv) return;
     const rect = paintColorSv.getBoundingClientRect();
@@ -10030,20 +9458,21 @@ async function showEditor(node, type, options = {}) {
       bindDrag(ev, (moveEvent) => updatePaintColorFromHue(moveEvent.clientX));
     };
   }
-  if (paintAlphaSlider) {
-    paintAlphaSlider.oninput = () => {
-      const next = { ...editor.customPaintColor, a: clamp(Number(paintAlphaSlider.value) / 100, 0, 1) };
-      editor.customPaintColor = cloneColor(next);
-      editor.paintColor = cloneColor(next);
-      syncPaintUi();
-    };
-  }
+  root.addEventListener("click", (ev) => {
+    const target = ev.target.closest("[data-action='confirm-cancel'], [data-action='confirm-accept']");
+    if (!target) return;
+    const ok = target.getAttribute("data-action") === "confirm-accept";
+    const resolver = uiState.confirmDialog?.resolve;
+    uiState.confirmDialog = { visible: false, title: "", text: "", confirmLabel: "Confirm", resolve: null };
+    resolver?.(ok);
+  });
   const syncFullscreenButton = () => {
-    if (!fullscreenBtn) return;
     const active = !!editor.fullscreen;
-    fullscreenBtn.innerHTML = active ? ICON.fullscreen_close : ICON.fullscreen;
-    fullscreenBtn.setAttribute("aria-label", active ? "Exit Fullscreen" : "Fullscreen");
-    fullscreenBtn.setAttribute("data-tip", active ? "Exit fullscreen" : "Fullscreen");
+    patchUiButton(uiState.floatingButtons, "action", "toggle-fullscreen", {
+      icon: active ? ICON.fullscreen_close : ICON.fullscreen,
+      label: active ? "Exit Fullscreen" : "Fullscreen",
+      tip: active ? "Exit fullscreen" : "Fullscreen",
+    });
   };
   const setFullscreenState = (active) => {
     const on = !!active;
@@ -10083,109 +9512,14 @@ async function showEditor(node, type, options = {}) {
     }
   };
   document.addEventListener("fullscreenchange", onFullscreenChange);
-  if (fullscreenBtn) {
-    syncFullscreenButton();
-    fullscreenBtn.onclick = (ev) => {
-      ev.preventDefault();
-      ev.stopPropagation();
-      toggleFullscreen();
-    };
-  }
+  syncFullscreenButton();
   const syncOutputPreviewToggleButton = () => {
-    if (!outputPreviewToggleBtn) return;
     const expanded = !!editor.outputPreviewExpanded;
-    outputPreviewToggleBtn.innerHTML = expanded ? ICON.fullscreen_close : ICON.fullscreen;
-    outputPreviewToggleBtn.setAttribute("aria-label", expanded ? "Reduce Preview" : "Expand Preview");
-    outputPreviewToggleBtn.setAttribute("data-tip", expanded ? "Reduce preview" : "Expand preview");
-  };
-  if (outputPreviewToggleBtn) {
-    syncOutputPreviewToggleButton();
-    outputPreviewToggleBtn.onclick = (ev) => {
-      ev.preventDefault();
-      ev.stopPropagation();
-      const nextExpanded = !editor.outputPreviewExpanded;
-      editor.outputPreviewExpanded = nextExpanded;
-      editor.outputPreviewAnimFrom = editor.outputPreviewAnim;
-      editor.outputPreviewAnimTo = nextExpanded ? 1 : 0;
-      editor.outputPreviewAnimStartTs = performance.now();
-      syncOutputPreviewToggleButton();
-      requestDraw();
-    };
+    uiState.outputPreviewToggle.icon = expanded ? ICON.fullscreen_close : ICON.fullscreen;
+    uiState.outputPreviewToggle.label = expanded ? "Reduce Preview" : "Expand Preview";
+    uiState.outputPreviewToggle.tip = expanded ? "Reduce preview" : "Expand preview";
   }
-  selectionMenu.addEventListener("click", (ev) => {
-    const target = ev.target.closest("[data-action]");
-    if (!target) return;
-    const action = target.getAttribute("data-action");
-    if (readOnly) return;
-    if (action === "aspect") {
-      editor.cutoutAspectOpen = !editor.cutoutAspectOpen;
-      editor.menuSize.measured = false;
-      updateSelectionMenu();
-      requestDraw();
-      return;
-    }
-    if (action === "aspect-set") {
-      const selected = getSelected();
-      if (!selected) return;
-      const aspect = String(target.getAttribute("data-aspect") || "1:1");
-      applyCutoutAspect(selected, aspect);
-      editor.cutoutAspectOpen = false;
-      editor.menuSize.measured = false;
-      syncSidePanelControls();
-      pushHistory();
-      commitAndRefreshNode();
-      updateSelectionMenu();
-      requestDraw();
-      return;
-    }
-    if (action === "rotate-90") {
-      const selected = getSelected();
-      if (!selected) return;
-      rotateCutoutAspect90(selected);
-      editor.cutoutAspectOpen = false;
-      editor.menuSize.measured = false;
-      syncSidePanelControls();
-      pushHistory();
-      commitAndRefreshNode();
-      updateSelectionMenu();
-      requestDraw();
-      return;
-    }
-    if (action === "bring-front") {
-      bringSelectedToFront();
-      return;
-    }
-    if (action === "send-back") {
-      sendSelectedToBack();
-      return;
-    }
-    if (action === "duplicate") {
-      duplicateSelected();
-      return;
-    }
-    if (action === "replace-image") {
-      replaceSelectedImage();
-      return;
-    }
-    if (action === "toggle-lock") {
-      toggleSelectedLock();
-      return;
-    }
-    if (action === "back-initial") {
-      restoreSelectedToInitialPose();
-      return;
-    }
-    if (action === "toggle-visible") {
-      toggleSelectedExternalStickerVisibility();
-      return;
-    }
-    if (action === "delete") {
-      deleteSelected();
-      return;
-    }
-    requestDraw();
-  });
-
+  syncOutputPreviewToggleButton();
   const modalPrevOnExecuted = node.onExecuted;
   const modalPrevOnConnectionsChange = node.onConnectionsChange;
   let modalOnExecuted = null;
@@ -10219,14 +9553,6 @@ async function showEditor(node, type, options = {}) {
   }
 
   const closeEditor = () => {
-    if (editor.cutoutPreviewSurfaceRaf) {
-      cancelAnimationFrame(editor.cutoutPreviewSurfaceRaf);
-      editor.cutoutPreviewSurfaceRaf = 0;
-    }
-    if (editor.cutoutPreviewSurfaceTimer) {
-      clearTimeout(editor.cutoutPreviewSurfaceTimer);
-      editor.cutoutPreviewSurfaceTimer = 0;
-    }
     _paintLayerSyncRegistry.delete(String(node.id ?? "0"));
     if (!readOnly) {
       syncPaintingLayerAsync();
@@ -10243,7 +9569,6 @@ async function showEditor(node, type, options = {}) {
     hideTooltip();
     stopRenderLoop();
     modalPanoCore?.dispose?.();
-    cutoutPreviewCore?.dispose?.();
     setDropCue(false);
     window.removeEventListener("keydown", onEscClose, true);
     window.removeEventListener("keydown", onDeleteKey, true);
@@ -10329,7 +9654,6 @@ async function showEditor(node, type, options = {}) {
     if (ev.target === overlay) closeEditor();
   });
 
-  installTooltipHandlers(root);
   applyInitialCutoutFocus();
   if (!readOnly && type === "stickers") {
     reconcileExternalStickerFromInputs("open");
@@ -10338,11 +9662,6 @@ async function showEditor(node, type, options = {}) {
   pushHistory();
   syncUndoRedoButtons();
   syncPaintUi();
-  if (paintDock) {
-    requestAnimationFrame(() => {
-      paintDock.classList.add("is-ready");
-    });
-  }
   updateSidePanel();
   syncLookAtFrameButtonState();
   syncCanvasSize();
