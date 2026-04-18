@@ -7046,6 +7046,20 @@ async function showEditor(node, type, options = {}) {
     node.setDirtyCanvas?.(true, true);
   }
 
+  function syncCoverageChangeToNodePreviews(options = {}) {
+    const syncPreview = options.syncPreview !== false;
+    const syncGraph = options.syncGraph !== false;
+    if (syncPreview) {
+      node.__panoPreviewNodeRuntime?.requestDraw?.();
+      node.__panoDomPreview?.requestDraw?.();
+      node.setDirtyCanvas?.(true, false);
+    }
+    if (syncGraph) {
+      node.graph?.setDirtyCanvas?.(true, true);
+      app?.canvas?.setDirty?.(true, true);
+    }
+  }
+
   function forceCursorTool() {
     if (editor.primaryTool === "cursor") return;
     editor.primaryTool = "cursor";
@@ -8112,37 +8126,43 @@ async function showEditor(node, type, options = {}) {
     const text = String(el.getAttribute("data-tip") || "").trim();
     if (!text) return;
     uiState.tooltip.text = text;
-    const hostRect = stageWrap.getBoundingClientRect();
-    const rect = el.getBoundingClientRect();
-    const pad = 8;
-    const mw = tooltipEl.offsetWidth || 100;
-    const mh = tooltipEl.offsetHeight || 24;
-    const inToolRail = !!el.closest(".pano-floating-left");
-    const inFooter = !!el.closest(".pano-paint-footer") || !!el.closest(".pano-paint-color-float");
-    let variant = "";
-    let x = rect.left - hostRect.left + rect.width * 0.5 - mw * 0.5;
-    let y = rect.top - hostRect.top - mh - 8;
-    if (inToolRail) {
-      variant = "tool-rail";
-      x = rect.right - hostRect.left + 10;
-      y = rect.top - hostRect.top + rect.height * 0.5 - mh * 0.5;
-      x = clamp(x, pad, Math.max(pad, hostRect.width - mw - pad));
-      y = clamp(y, pad, Math.max(pad, hostRect.height - mh - pad));
-    } else if (inFooter) {
-      variant = "footer";
-      const footerHost = el.closest(".pano-paint-footer");
-      const footerRect = footerHost ? footerHost.getBoundingClientRect() : rect;
-      x = footerRect.left - hostRect.left + footerRect.width * 0.5 - mw * 0.5;
-      y = footerRect.bottom - hostRect.top + 5;
+    uiState.tooltip.visible = true;
+    const expectedTarget = el;
+    requestAnimationFrame(() => {
+      if (tooltip.target !== expectedTarget || !tooltipEl || !expectedTarget?.isConnected) return;
+      const hostRect = stageWrap.getBoundingClientRect();
+      const rect = expectedTarget.getBoundingClientRect();
+      const pad = 8;
+      const topGap = 12;
+      const mw = Math.round(Number(tooltipEl.getBoundingClientRect()?.width || 0)) || 100;
+      const mh = Math.round(Number(tooltipEl.getBoundingClientRect()?.height || 0)) || 24;
+      const inToolRail = !!expectedTarget.closest(".pano-floating-left");
+      const inFooter = !!expectedTarget.closest(".pano-paint-footer") || !!expectedTarget.closest(".pano-paint-color-float");
+      let variant = "";
+      let x = rect.left - hostRect.left + rect.width * 0.5 - mw * 0.5;
+      let y = rect.top - hostRect.top - mh - topGap;
+      if (inToolRail) {
+        variant = "tool-rail";
+        x = rect.right - hostRect.left + 10;
+        y = rect.top - hostRect.top + rect.height * 0.5 - mh * 0.5;
+        x = clamp(x, pad, Math.max(pad, hostRect.width - mw - pad));
+        y = clamp(y, pad, Math.max(pad, hostRect.height - mh - pad));
+      } else if (inFooter) {
+        variant = "footer";
+        const footerHost = expectedTarget.closest(".pano-paint-footer");
+        const footerRect = footerHost ? footerHost.getBoundingClientRect() : rect;
+        x = footerRect.left - hostRect.left + footerRect.width * 0.5 - mw * 0.5;
+        y = footerRect.bottom - hostRect.top + 5;
+        x = clamp(x, pad, Math.max(pad, hostRect.width - mw - pad));
+        y = Math.max(pad, y);
+      }
       x = clamp(x, pad, Math.max(pad, hostRect.width - mw - pad));
       y = Math.max(pad, y);
-    }
-    x = clamp(x, pad, Math.max(pad, hostRect.width - mw - pad));
-    y = Math.max(pad, y);
-    uiState.tooltip.left = x;
-    uiState.tooltip.top = y;
-    uiState.tooltip.variant = variant;
-    uiState.tooltip.visible = true;
+      uiState.tooltip.left = x;
+      uiState.tooltip.top = y;
+      uiState.tooltip.variant = variant;
+      uiState.tooltip.visible = true;
+    });
   }
 
   const viewController = createPanoInteractionController({
@@ -8745,6 +8765,7 @@ async function showEditor(node, type, options = {}) {
       it.item.hFOV_deg = clamp(it.startHFOV * ratio, 1, 179);
       it.item.vFOV_deg = clamp(it.startVFOV * ratio, 1, 179);
       it.item.aspect_id = deriveCutoutAspectLabelFromFov(it.item);
+      if (isStickerItem(it.item)) markObjectVisualsDirty();
       requestDraw({ localOnly: true });
       return;
     }
@@ -8754,6 +8775,7 @@ async function showEditor(node, type, options = {}) {
       const ratio = d / it.startDist;
       it.item.hFOV_deg = clamp(it.startHFOV * ratio, 1, 179);
       it.item.aspect_id = deriveCutoutAspectLabelFromFov(it.item);
+      if (isStickerItem(it.item)) markObjectVisualsDirty();
       requestDraw({ localOnly: true });
       return;
     }
@@ -8763,6 +8785,7 @@ async function showEditor(node, type, options = {}) {
       const ratio = d / it.startDist;
       it.item.vFOV_deg = clamp(it.startVFOV * ratio, 1, 179);
       it.item.aspect_id = deriveCutoutAspectLabelFromFov(it.item);
+      if (isStickerItem(it.item)) markObjectVisualsDirty();
       requestDraw({ localOnly: true });
       return;
     }
@@ -8774,6 +8797,7 @@ async function showEditor(node, type, options = {}) {
       if (e.shiftKey) out = Math.round(out / 45) * 45;
       const key = isStickerItem(it.item) ? "rot_deg" : "roll_deg";
       it.item[key] = out;
+      if (isStickerItem(it.item)) markObjectVisualsDirty();
       requestDraw({ localOnly: true });
     }
   };
@@ -8996,12 +9020,15 @@ async function showEditor(node, type, options = {}) {
       editor.coverage = nextCoverage;
       if (coverageWidget) {
         coverageWidget.value = String(nextCoverage);
-        coverageWidget.callback?.(coverageWidget.value);
       }
-      if (previewMode) runtime.backgroundDirty = true;
-      else {
-        commitAndRefreshNode();
-        node.setDirtyCanvas?.(true, true);
+      if (previewMode) {
+        runtime.backgroundDirty = true;
+      } else {
+        commitState();
+        syncCoverageChangeToNodePreviews({
+          syncPreview: type !== "cutout",
+          syncGraph: type !== "cutout",
+        });
       }
       updateSidePanel();
       updateSelectionMenu();

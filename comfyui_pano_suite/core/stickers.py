@@ -127,6 +127,14 @@ def _alpha_over_straight(dst_rgb: np.ndarray, src_rgba: np.ndarray) -> np.ndarra
     return src_rgb * src_a + dst_rgb * (1.0 - src_a)
 
 
+def _alpha_over_rgba(dst_rgba: np.ndarray, src_rgba: np.ndarray) -> np.ndarray:
+    src_a = np.clip(src_rgba[..., 3:4], 0.0, 1.0)
+    dst_a = np.clip(dst_rgba[..., 3:4], 0.0, 1.0)
+    out_a = src_a + dst_a * (1.0 - src_a)
+    out_rgb = src_rgba[..., :3] * src_a + dst_rgba[..., :3] * (1.0 - src_a)
+    return np.concatenate([out_rgb, out_a], axis=-1)
+
+
 def _iter_u_ranges(center_u: float, half_u: int, w: int):
     start = int(math.floor(center_u - half_u))
     end = int(math.ceil(center_u + half_u))
@@ -157,6 +165,183 @@ def _prepare_background_for_coverage(bg_erp: np.ndarray | None, output_w: int, o
             dtype=np.float32,
         ) / 255.0
     return canvas
+
+
+def _normalize_runtime_sticker_image(st: dict, assets: dict, base_dir: Path | None = None) -> np.ndarray | None:
+    runtime_img = st.get("image_rgba")
+    if isinstance(runtime_img, np.ndarray):
+        img = np.clip(runtime_img.astype(np.float32), 0.0, 1.0)
+        if img.ndim != 3 or img.shape[0] <= 0 or img.shape[1] <= 0:
+            return None
+        if img.shape[-1] < 4:
+            if img.shape[-1] < 3:
+                return None
+            alpha = np.ones((img.shape[0], img.shape[1], 1), dtype=np.float32)
+            img = np.concatenate([img[..., :3], alpha], axis=-1)
+        elif img.shape[-1] > 4:
+            img = img[..., :4]
+        return img
+    asset_id = st.get("asset_id")
+    if asset_id not in assets:
+        return None
+    return _load_asset_rgba(assets[asset_id], base_dir=base_dir)
+
+
+def _compose_sticker_patch(
+    canvas: np.ndarray,
+    img: np.ndarray,
+    st: dict,
+    output_w: int,
+    output_h: int,
+    *,
+    quality: str = "export",
+    coverage: int = 360,
+):
+    yaw = float(st.get("yaw_deg", 0.0))
+    pitch = float(st.get("pitch_deg", 0.0))
+    h_fov = max(0.1, float(st.get("hFOV_deg", 20.0)))
+    v_fov = max(0.1, float(st.get("vFOV_deg", 20.0)))
+    rot = float(st.get("rot_deg", 0.0))
+    crop = st.get("crop", {"x0": 0.0, "y0": 0.0, "x1": 1.0, "y1": 1.0})
+
+    x0 = float(crop.get("x0", 0.0))
+    y0 = float(crop.get("y0", 0.0))
+    x1 = float(crop.get("x1", 1.0))
+    y1 = float(crop.get("y1", 1.0))
+    cx0 = max(0.0, min(1.0, min(x0, x1)))
+    cy0 = max(0.0, min(1.0, min(y0, y1)))
+    cx1 = max(0.0, min(1.0, max(x0, x1)))
+    cy1 = max(0.0, min(1.0, max(y0, y1)))
+    if cx1 - cx0 < 1e-6 or cy1 - cy0 < 1e-6:
+        return
+
+    cdir = yaw_pitch_to_dir(yaw, pitch)
+    right, up, fwd = orthonormal_basis_from_forward(cdir)
+
+    max_fov = max(h_fov, v_fov)
+    yaw_span = 180.0 if coverage == 180 else 360.0
+    half_u = int(math.ceil(output_w * (max_fov / yaw_span) * (1.5 if quality == "preview" else 1.2)))
+    half_v = int(math.ceil(output_h * (max_fov / 180.0) * (1.5 if quality == "preview" else 1.2)))
+
+    center_u = ((yaw / yaw_span) + 0.5) * output_w
+    center_v = (0.5 - (pitch / 180.0)) * output_h
+
+    y_min = max(0, int(center_v - half_v))
+    y_max = min(output_h, int(center_v + half_v))
+    if y_max <= y_min:
+        return
+
+    xs_lin = np.arange(output_w, dtype=np.float32) + 0.5
+    ys_lin = np.arange(y_min, y_max, dtype=np.float32) + 0.5
+
+    u_ranges = (
+        _iter_u_ranges(center_u, half_u, output_w)
+        if coverage == 360
+        else [(max(0, int(math.floor(center_u - half_u))), min(output_w, int(math.ceil(center_u + half_u))))]
+    )
+
+    for ux0, ux1 in u_ranges:
+        ux0 = max(0, ux0)
+        ux1 = min(output_w, ux1)
+        if ux1 <= ux0:
+            continue
+
+        xs = xs_lin[ux0:ux1]
+        ys = ys_lin
+        xg, yg = np.meshgrid(xs, ys)
+
+        lon = (xg / output_w - 0.5) * ((math.pi) if coverage == 180 else (2.0 * math.pi))
+        lat = (0.5 - yg / output_h) * math.pi
+        dirs = np.stack([
+            np.cos(lat) * np.sin(lon),
+            np.sin(lat),
+            np.cos(lat) * np.cos(lon),
+        ], axis=-1).astype(np.float32)
+
+        z = np.sum(dirs * fwd[None, None, :], axis=-1)
+        front = z > 1e-6
+        if not np.any(front):
+            continue
+
+        local_x = np.sum(dirs * right[None, None, :], axis=-1) / np.maximum(z, 1e-6)
+        local_y = np.sum(dirs * up[None, None, :], axis=-1) / np.maximum(z, 1e-6)
+
+        rr = -rot * DEG2RAD
+        cr = math.cos(rr)
+        sr = math.sin(rr)
+        xr = local_x * cr - local_y * sr
+        yr = local_x * sr + local_y * cr
+
+        xn = xr / math.tan(h_fov * 0.5 * DEG2RAD)
+        yn = yr / math.tan(v_fov * 0.5 * DEG2RAD)
+
+        inside = front & (np.abs(xn) <= 1.0) & (np.abs(yn) <= 1.0)
+        if not np.any(inside):
+            continue
+
+        su = (xn * 0.5 + 0.5)
+        sv = (0.5 - yn * 0.5)
+        su = cx0 + (cx1 - cx0) * su
+        sv = cy0 + (cy1 - cy0) * sv
+
+        ih, iw, _ = img.shape
+        px = su * (iw - 1)
+        py = sv * (ih - 1)
+        rgba = _sample_rgba_bilinear(img, px, py)
+
+        patch = canvas[y_min:y_max, ux0:ux1, ...]
+        if patch.shape[-1] == 4:
+            blended = _alpha_over_rgba(patch, rgba)
+        else:
+            blended = _alpha_over_straight(patch, rgba)
+        patch[inside] = blended[inside]
+        canvas[y_min:y_max, ux0:ux1, ...] = patch
+
+
+def render_stickers_to_rgba_erp(
+    state: dict,
+    output_w: int,
+    output_h: int,
+    *,
+    base_dir: Path | None = None,
+    quality: str = "export",
+    stickers_override: list[dict] | None = None,
+    assets_override: dict | None = None,
+    coverage_override: int | None = None,
+) -> np.ndarray:
+    coverage = _normalize_coverage(coverage_override if coverage_override is not None else state.get("coverage"))
+    canvas = np.zeros((output_h, output_w, 4), dtype=np.float32)
+    stickers = stickers_override if isinstance(stickers_override, list) else state.get("stickers", [])
+    assets = assets_override if isinstance(assets_override, dict) else state.get("assets", {})
+
+    def _safe_sticker_z_index(item) -> float:
+        try:
+            return float(item.get("z_index", 0))
+        except Exception:
+            return 0.0
+
+    stickers_sorted = sorted(
+        [item for item in stickers if isinstance(item, dict)],
+        key=_safe_sticker_z_index,
+    )
+
+    for st in stickers_sorted:
+        if st.get("visible", True) is False:
+            continue
+        img = _normalize_runtime_sticker_image(st, assets, base_dir=base_dir)
+        if img is None:
+            continue
+        _compose_sticker_patch(
+            canvas,
+            img,
+            st,
+            output_w,
+            output_h,
+            quality=quality,
+            coverage=coverage,
+        )
+
+    return np.clip(canvas, 0.0, 1.0).astype(np.float32)
 
 
 def compose_stickers_to_erp(
@@ -192,123 +377,17 @@ def compose_stickers_to_erp(
     for st in stickers_sorted:
         if st.get("visible", True) is False:
             continue
-        runtime_img = st.get("image_rgba")
-        if isinstance(runtime_img, np.ndarray):
-            img = np.clip(runtime_img.astype(np.float32), 0.0, 1.0)
-            if img.ndim != 3 or img.shape[0] <= 0 or img.shape[1] <= 0:
-                continue
-            if img.shape[-1] < 4:
-                if img.shape[-1] < 3:
-                    continue
-                alpha = np.ones((img.shape[0], img.shape[1], 1), dtype=np.float32)
-                img = np.concatenate([img[..., :3], alpha], axis=-1)
-            elif img.shape[-1] > 4:
-                img = img[..., :4]
-        else:
-            asset_id = st.get("asset_id")
-            if asset_id not in assets:
-                continue
-            img = _load_asset_rgba(assets[asset_id], base_dir=base_dir)
-            if img is None:
-                continue
+        img = _normalize_runtime_sticker_image(st, assets, base_dir=base_dir)
         if img is None:
             continue
-
-        yaw = float(st.get("yaw_deg", 0.0))
-        pitch = float(st.get("pitch_deg", 0.0))
-        h_fov = max(0.1, float(st.get("hFOV_deg", 20.0)))
-        v_fov = max(0.1, float(st.get("vFOV_deg", 20.0)))
-        rot = float(st.get("rot_deg", 0.0))
-        crop = st.get("crop", {"x0": 0.0, "y0": 0.0, "x1": 1.0, "y1": 1.0})
-
-        x0 = float(crop.get("x0", 0.0))
-        y0 = float(crop.get("y0", 0.0))
-        x1 = float(crop.get("x1", 1.0))
-        y1 = float(crop.get("y1", 1.0))
-        cx0 = max(0.0, min(1.0, min(x0, x1)))
-        cy0 = max(0.0, min(1.0, min(y0, y1)))
-        cx1 = max(0.0, min(1.0, max(x0, x1)))
-        cy1 = max(0.0, min(1.0, max(y0, y1)))
-        if cx1 - cx0 < 1e-6 or cy1 - cy0 < 1e-6:
-            continue
-
-        cdir = yaw_pitch_to_dir(yaw, pitch)
-        right, up, fwd = orthonormal_basis_from_forward(cdir)
-
-        max_fov = max(h_fov, v_fov)
-        yaw_span = 180.0 if coverage == 180 else 360.0
-        half_u = int(math.ceil(output_w * (max_fov / yaw_span) * (1.5 if quality == "preview" else 1.2)))
-        half_v = int(math.ceil(output_h * (max_fov / 180.0) * (1.5 if quality == "preview" else 1.2)))
-
-        center_u = ((yaw / yaw_span) + 0.5) * output_w
-        center_v = (0.5 - (pitch / 180.0)) * output_h
-
-        y_min = max(0, int(center_v - half_v))
-        y_max = min(output_h, int(center_v + half_v))
-        if y_max <= y_min:
-            continue
-
-        xs_lin = np.arange(output_w, dtype=np.float32) + 0.5
-        ys_lin = np.arange(y_min, y_max, dtype=np.float32) + 0.5
-
-        u_ranges = (
-            _iter_u_ranges(center_u, half_u, output_w)
-            if coverage == 360
-            else [(max(0, int(math.floor(center_u - half_u))), min(output_w, int(math.ceil(center_u + half_u))))]
+        _compose_sticker_patch(
+            canvas,
+            img,
+            st,
+            output_w,
+            output_h,
+            quality=quality,
+            coverage=coverage,
         )
-
-        for ux0, ux1 in u_ranges:
-            ux0 = max(0, ux0)
-            ux1 = min(output_w, ux1)
-            if ux1 <= ux0:
-                continue
-
-            xs = xs_lin[ux0:ux1]
-            ys = ys_lin
-            xg, yg = np.meshgrid(xs, ys)
-
-            lon = (xg / output_w - 0.5) * ((math.pi) if coverage == 180 else (2.0 * math.pi))
-            lat = (0.5 - yg / output_h) * math.pi
-            dirs = np.stack([
-                np.cos(lat) * np.sin(lon),
-                np.sin(lat),
-                np.cos(lat) * np.cos(lon),
-            ], axis=-1).astype(np.float32)
-
-            z = np.sum(dirs * fwd[None, None, :], axis=-1)
-            front = z > 1e-6
-            if not np.any(front):
-                continue
-
-            local_x = np.sum(dirs * right[None, None, :], axis=-1) / np.maximum(z, 1e-6)
-            local_y = np.sum(dirs * up[None, None, :], axis=-1) / np.maximum(z, 1e-6)
-
-            rr = -rot * DEG2RAD
-            cr = math.cos(rr)
-            sr = math.sin(rr)
-            xr = local_x * cr - local_y * sr
-            yr = local_x * sr + local_y * cr
-
-            xn = xr / math.tan(h_fov * 0.5 * DEG2RAD)
-            yn = yr / math.tan(v_fov * 0.5 * DEG2RAD)
-
-            inside = front & (np.abs(xn) <= 1.0) & (np.abs(yn) <= 1.0)
-            if not np.any(inside):
-                continue
-
-            su = (xn * 0.5 + 0.5)
-            sv = (0.5 - yn * 0.5)
-            su = cx0 + (cx1 - cx0) * su
-            sv = cy0 + (cy1 - cy0) * sv
-
-            ih, iw, _ = img.shape
-            px = su * (iw - 1)
-            py = sv * (ih - 1)
-            rgba = _sample_rgba_bilinear(img, px, py)
-
-            patch = canvas[y_min:y_max, ux0:ux1, :]
-            blended = _alpha_over_straight(patch, rgba)
-            patch[inside] = blended[inside]
-            canvas[y_min:y_max, ux0:ux1, :] = patch
 
     return np.clip(canvas, 0.0, 1.0).astype(np.float32)
