@@ -57,6 +57,8 @@ const LASSO_CURSOR_HOTSPOT_Y = 4;
 const _paintLayerUploadRegistry = new Map();
 const _paintLayerSyncRegistry = new Map();
 const _stickerAssetUploadRegistry = new Map();
+const _videoThumbnailCache = new Map();
+const VIDEO_THUMBNAIL_CACHE_LIMIT = 12;
 const ICON = {
   // Source: @geist-ui/icons globe.js (v1.0.2)
   globe: "<svg viewBox='0 0 24 24' aria-hidden='true' fill='none' stroke='currentColor' stroke-linecap='round' stroke-linejoin='round' stroke-width='1.5' shape-rendering='geometricPrecision'><circle cx='12' cy='12' r='10'/><path d='M2 12h20M12 2a15.3 15.3 0 014 10 15.3 15.3 0 01-4 10 15.3 15.3 0 01-4-10 15.3 15.3 0 014-10z'/></svg>",
@@ -117,6 +119,35 @@ function easeInOutCubic(t) {
 }
 function easeOutCubic(t) {
   return 1 - Math.pow(1 - t, 3);
+}
+
+function getCachedVideoThumbnails(src) {
+  const key = String(src || "").trim();
+  if (!key) return null;
+  const cached = _videoThumbnailCache.get(key);
+  if (!cached || !Array.isArray(cached.thumbnails) || !cached.thumbnails.length) return null;
+  _videoThumbnailCache.delete(key);
+  _videoThumbnailCache.set(key, cached);
+  return cached;
+}
+
+function setCachedVideoThumbnails(src, entry) {
+  const key = String(src || "").trim();
+  if (!key) return;
+  const thumbnails = Array.isArray(entry?.thumbnails) ? entry.thumbnails : [];
+  if (!thumbnails.length) return;
+  _videoThumbnailCache.delete(key);
+  _videoThumbnailCache.set(key, {
+    thumbnails,
+    thumbnailCount: Math.max(1, Number(entry?.thumbnailCount || thumbnails.length)),
+    duration: Math.max(0, Number(entry?.duration || 0)),
+    fps: Math.max(1, Number(entry?.fps || 24)),
+  });
+  while (_videoThumbnailCache.size > VIDEO_THUMBNAIL_CACHE_LIMIT) {
+    const oldestKey = _videoThumbnailCache.keys().next().value;
+    if (!oldestKey) break;
+    _videoThumbnailCache.delete(oldestKey);
+  }
 }
 function easeInCubic(t) {
   return t * t * t;
@@ -1706,6 +1737,26 @@ async function showEditor(node, type, options = {}) {
       clearVisible: { paint: true, mask: true },
       activeTools: { paint: "pen", mask: "pen" },
     },
+    videoTransport: {
+      visible: false,
+      ready: false,
+      playing: false,
+      duration: 0,
+      currentTime: 0,
+      progressPct: 0,
+      currentTimeLabel: "0:00",
+      durationLabel: "0:00",
+      frameCount: 0,
+      fps: 24,
+      mode: "playback",
+      hasAudio: false,
+      muted: false,
+      volume: 1,
+      volumePct: 100,
+      thumbnails: [],
+      thumbnailCount: 9,
+      shellMaxWidthPx: 640,
+    },
     sidePanel: {},
     selectionMenu: { visible: false, left: 0, top: 0, items: [] },
     tooltip: { visible: false, text: "", left: 0, top: 0, variant: "" },
@@ -1784,6 +1835,8 @@ async function showEditor(node, type, options = {}) {
   // Vue owns modal DOM structure. The references below are bridge-only:
   // canvas mounting, geometry measurement, low-level pointer wiring, and fullscreen integration.
   const side = root.querySelector("[data-side]");
+  const videoEl = root.querySelector("[data-video-element]");
+  const floatingRightEl = root.querySelector(".pano-floating-right");
   const selectionMenu = root.querySelector("[data-selection-menu]");
   const tooltipEl = root.querySelector("[data-tooltip]");
   const cutoutPreviewHost = root.querySelector("[data-camera-preview-host]");
@@ -1919,6 +1972,8 @@ async function showEditor(node, type, options = {}) {
   const rasterImageCache = new Map();
   const rasterImageAlphaCache = new Map();
   const rasterErpCanvasCache = new Map();
+  const stillCanvas = document.createElement("canvas");
+  stillCanvas.__panoFrameIdx = 0;
   const runtime = {
     dirty: true,
     rafId: 0,
@@ -1930,6 +1985,11 @@ async function showEditor(node, type, options = {}) {
     backgroundDirty: true,
     backgroundWasVisible: false,
   };
+  const setCanvasCursor = (nextCursor) => {
+    const cursor = String(nextCursor || "default");
+    if (canvas.style.cursor === cursor) return;
+    canvas.style.cursor = cursor;
+  };
   const tooltip = {
     timer: 0,
     target: null,
@@ -1938,6 +1998,382 @@ async function showEditor(node, type, options = {}) {
     active: false,
     depth: 0,
   };
+  const videoState = {
+    mode: "playback",
+    editorTime: 0,
+    requestedTime: null,
+    presentedTime: 0,
+    seeking: false,
+    resumeAfterScrub: false,
+    pendingPlaybackResume: false,
+    frameCounter: 0,
+    frameCache: new Map(),
+    frameCacheOrder: [],
+    currentFrameNumber: 0,
+    thumbnailJobId: 0,
+    thumbnailSrc: "",
+  };
+  const SCRUB_FRAME_CACHE_LIMIT = 4;
+  const VIDEO_THUMBNAIL_COUNT = 9;
+  const videoCleanupFns = [];
+  let videoTransportLayoutRaf = 0;
+  const syncVideoTransportLayout = () => {
+    const stageRect = stageWrap?.getBoundingClientRect?.();
+    const rightRect = floatingRightEl?.getBoundingClientRect?.();
+    const stageWidth = Math.max(0, Number(stageRect?.width || 0));
+    const rightWidth = rightRect ? Math.max(0, Number(rightRect.width || 0)) : 0;
+    const modalSideInset = 14;
+    const transportGap = 12;
+    const rightReserve = rightWidth > 0 ? (rightWidth + modalSideInset + transportGap) : 72;
+    const shellMaxWidthPx = Math.max(280, Math.floor(stageWidth - (rightReserve * 2)));
+    uiState.videoTransport.shellMaxWidthPx = shellMaxWidthPx;
+  };
+  const queueVideoTransportLayout = () => {
+    if (videoTransportLayoutRaf) return;
+    videoTransportLayoutRaf = window.requestAnimationFrame(() => {
+      videoTransportLayoutRaf = 0;
+      syncVideoTransportLayout();
+    });
+  };
+  const frameTolerance = () => {
+    const fps = Math.max(1, Number(uiState.videoTransport.fps || 24));
+    return Math.max(1 / 120, Math.min(0.05, 0.5 / fps));
+  };
+  const detectVideoHasAudio = (video) => {
+    if (!(video instanceof HTMLVideoElement)) return false;
+    try {
+      if (Array.isArray(video.audioTracks) && video.audioTracks.length > 0) return true;
+      if (video.audioTracks && typeof video.audioTracks.length === "number" && video.audioTracks.length > 0) return true;
+    } catch {
+      // Ignore browser-specific audioTracks access issues.
+    }
+    try {
+      if (typeof video.mozHasAudio === "boolean") return video.mozHasAudio;
+    } catch {
+      // Ignore Firefox-only property access issues.
+    }
+    try {
+      if (Number(video.webkitAudioDecodedByteCount || 0) > 0) return true;
+    } catch {
+      // Ignore WebKit-only property access issues.
+    }
+    return !!uiState.videoTransport.hasAudio;
+  };
+  const transportLayoutObserver = typeof ResizeObserver !== "undefined"
+    ? new ResizeObserver(() => queueVideoTransportLayout())
+    : null;
+  transportLayoutObserver?.observe(stageWrap);
+  if (floatingRightEl) transportLayoutObserver?.observe(floatingRightEl);
+  videoCleanupFns.push(() => {
+    if (videoTransportLayoutRaf) {
+      window.cancelAnimationFrame(videoTransportLayoutRaf);
+      videoTransportLayoutRaf = 0;
+    }
+    transportLayoutObserver?.disconnect?.();
+  });
+  queueVideoTransportLayout();
+  const resetVideoThumbnails = () => {
+    videoState.thumbnailJobId += 1;
+    videoState.thumbnailSrc = "";
+    uiState.videoTransport.thumbnails = [];
+    uiState.videoTransport.thumbnailCount = VIDEO_THUMBNAIL_COUNT;
+  };
+  const buildVideoThumbnails = async (src, duration, fps) => {
+    const safeSrc = String(src || "").trim();
+    if (!safeSrc) {
+      resetVideoThumbnails();
+      return;
+    }
+    const cached = getCachedVideoThumbnails(safeSrc);
+    if (cached) {
+      videoState.thumbnailSrc = safeSrc;
+      uiState.videoTransport.thumbnails = cached.thumbnails;
+      uiState.videoTransport.thumbnailCount = cached.thumbnailCount;
+      return;
+    }
+    if (videoState.thumbnailSrc === safeSrc && Array.isArray(uiState.videoTransport.thumbnails) && uiState.videoTransport.thumbnails.length) {
+      return;
+    }
+    const jobId = ++videoState.thumbnailJobId;
+    videoState.thumbnailSrc = safeSrc;
+    uiState.videoTransport.thumbnails = [];
+    uiState.videoTransport.thumbnailCount = VIDEO_THUMBNAIL_COUNT;
+    const thumbVideo = document.createElement("video");
+    thumbVideo.preload = "auto";
+    thumbVideo.muted = true;
+    thumbVideo.playsInline = true;
+    thumbVideo.crossOrigin = "anonymous";
+    const loaded = await new Promise((resolve) => {
+      let settled = false;
+      const finish = (ok) => {
+        if (settled) return;
+        settled = true;
+        resolve(ok);
+      };
+      thumbVideo.addEventListener("loadedmetadata", () => finish(true), { once: true });
+      thumbVideo.addEventListener("canplay", () => finish(true), { once: true });
+      thumbVideo.addEventListener("error", () => finish(false), { once: true });
+      thumbVideo.src = safeSrc;
+      thumbVideo.load();
+    });
+    if (!loaded || videoState.thumbnailJobId !== jobId) return;
+    const videoWidth = Math.max(1, Number(thumbVideo.videoWidth || 0));
+    const videoHeight = Math.max(1, Number(thumbVideo.videoHeight || 0));
+    if (videoWidth < 1 || videoHeight < 1) return;
+    const sampleDuration = Math.max(0, Number(thumbVideo.duration || duration || 0));
+    const canvas = document.createElement("canvas");
+    const thumbHeight = 46;
+    const thumbWidth = Math.max(72, Math.round((videoWidth / videoHeight) * thumbHeight));
+    canvas.width = thumbWidth;
+    canvas.height = thumbHeight;
+    const ctx2d = canvas.getContext("2d");
+    if (!ctx2d) return;
+    const thumbnails = [];
+    const seekTo = (time) => new Promise((resolve) => {
+      let settled = false;
+      const finish = () => {
+        if (settled) return;
+        settled = true;
+        resolve();
+      };
+      thumbVideo.addEventListener("seeked", finish, { once: true });
+      thumbVideo.addEventListener("error", finish, { once: true });
+      try {
+        thumbVideo.currentTime = time;
+      } catch {
+        finish();
+      }
+    });
+    for (let index = 0; index < VIDEO_THUMBNAIL_COUNT; index += 1) {
+      if (videoState.thumbnailJobId !== jobId) return;
+      const ratio = VIDEO_THUMBNAIL_COUNT <= 1 ? 0 : index / (VIDEO_THUMBNAIL_COUNT - 1);
+      const target = sampleDuration > 0
+        ? Math.max(0, Math.min(sampleDuration - Math.max(0.001, 0.5 / Math.max(1, Number(fps || 24))), sampleDuration * ratio))
+        : 0;
+      await seekTo(target);
+      if (videoState.thumbnailJobId !== jobId) return;
+      ctx2d.clearRect(0, 0, thumbWidth, thumbHeight);
+      ctx2d.drawImage(thumbVideo, 0, 0, thumbWidth, thumbHeight);
+      thumbnails.push({
+        id: `thumb-${index}`,
+        src: canvas.toDataURL("image/jpeg", 0.72),
+        time: target,
+        label: formatVideoTime(target),
+      });
+    }
+    if (videoState.thumbnailJobId !== jobId) return;
+    uiState.videoTransport.thumbnails = thumbnails;
+    uiState.videoTransport.thumbnailCount = thumbnails.length || VIDEO_THUMBNAIL_COUNT;
+    setCachedVideoThumbnails(safeSrc, {
+      thumbnails,
+      thumbnailCount: thumbnails.length || VIDEO_THUMBNAIL_COUNT,
+      duration: sampleDuration,
+      fps,
+    });
+  };
+  const frameNumberForTime = (time) => {
+    const fps = Math.max(1, Number(uiState.videoTransport.fps || 24));
+    return Math.max(0, Math.round(Math.max(0, Number(time || 0)) * fps));
+  };
+  const cacheFrameCanvas = (frameNumber) => {
+    if (!(videoEl instanceof HTMLVideoElement)) return null;
+    if (Number(videoEl.videoWidth || 0) < 1 || Number(videoEl.videoHeight || 0) < 1) return null;
+    const width = Number(videoEl.videoWidth || 0);
+    const height = Number(videoEl.videoHeight || 0);
+    const frameCanvas = document.createElement("canvas");
+    frameCanvas.width = width;
+    frameCanvas.height = height;
+    frameCanvas.__panoFrameIdx = Number(frameCanvas.__panoFrameIdx || 0) + 1;
+    const ctx2d = frameCanvas.getContext("2d");
+    if (!ctx2d) return null;
+    ctx2d.drawImage(videoEl, 0, 0, width, height);
+    videoState.frameCache.set(frameNumber, frameCanvas);
+    videoState.frameCacheOrder = videoState.frameCacheOrder.filter((entry) => entry !== frameNumber);
+    videoState.frameCacheOrder.push(frameNumber);
+    while (videoState.frameCacheOrder.length > SCRUB_FRAME_CACHE_LIMIT) {
+      const evict = videoState.frameCacheOrder.shift();
+      if (evict != null) videoState.frameCache.delete(evict);
+    }
+    return frameCanvas;
+  };
+  const copyCanvasIntoStill = (sourceCanvas, presentedTime = null) => {
+    if (!(sourceCanvas instanceof HTMLCanvasElement)) return false;
+    const width = Number(sourceCanvas.width || 0);
+    const height = Number(sourceCanvas.height || 0);
+    if (width < 1 || height < 1) return false;
+    if (stillCanvas.width !== width || stillCanvas.height !== height) {
+      stillCanvas.width = width;
+      stillCanvas.height = height;
+    }
+    const ctx2d = stillCanvas.getContext("2d");
+    if (!ctx2d) return false;
+    ctx2d.clearRect(0, 0, width, height);
+    ctx2d.drawImage(sourceCanvas, 0, 0, width, height);
+    stillCanvas.__panoFrameIdx = Number(stillCanvas.__panoFrameIdx || 0) + 1;
+    if (presentedTime != null) videoState.presentedTime = Number(presentedTime || 0);
+    return true;
+  };
+  const presentCachedFrameForTime = (time) => {
+    const frameNumber = frameNumberForTime(time);
+    const cachedCanvas = videoState.frameCache.get(frameNumber) || null;
+    if (!cachedCanvas) return false;
+    videoState.currentFrameNumber = frameNumber;
+    return copyCanvasIntoStill(cachedCanvas, time);
+  };
+  videoCleanupFns.push(() => {
+    resetVideoThumbnails();
+  });
+  if (videoEl instanceof HTMLVideoElement) {
+    const pumpVideoFrame = () => {
+      if (typeof videoEl.requestVideoFrameCallback !== "function") return;
+      if (videoEl.__panoFramePumpActive) return;
+      videoEl.__panoFramePumpActive = true;
+      const tickVideoFrame = (_now, metadata) => {
+        videoEl.__panoFramePumpActive = false;
+        const actualTime = Number(metadata?.mediaTime ?? videoEl.currentTime ?? 0);
+        const actualFrameNumber = frameNumberForTime(actualTime);
+        const tolerance = frameTolerance();
+        if (videoState.mode === "scrub") {
+          if (Math.abs(actualTime - Number(videoState.editorTime || 0)) <= tolerance) {
+            cacheFrameCanvas(actualFrameNumber);
+            presentCachedFrameForTime(videoState.editorTime);
+            runtime.backgroundDirty = true;
+            runtime.dirty = true;
+            syncVideoTransportState({
+              ready: true,
+              playing: false,
+              visible: getVideoTransportVisible(),
+              currentTime: videoState.editorTime,
+              duration: uiState.videoTransport.duration,
+              frameCount: uiState.videoTransport.frameCount,
+              fps: uiState.videoTransport.fps,
+              mode: "scrub",
+            });
+            requestDraw({ cause: "frame_view", localOnly: true });
+          }
+        } else {
+          videoState.editorTime = actualTime;
+          videoState.presentedTime = actualTime;
+          videoState.requestedTime = null;
+          videoState.currentFrameNumber = actualFrameNumber;
+          cacheFrameCanvas(actualFrameNumber);
+          videoState.frameCounter += 1;
+          videoEl.dataset.panoFrameIdx = String(videoState.frameCounter);
+          runtime.backgroundDirty = true;
+          runtime.dirty = true;
+          syncVideoTransportState({
+            ready: true,
+            playing: !videoEl.paused && !videoEl.ended,
+            visible: getVideoTransportVisible(),
+            currentTime: actualTime,
+            duration: uiState.videoTransport.duration,
+            frameCount: uiState.videoTransport.frameCount,
+            fps: uiState.videoTransport.fps,
+            mode: "playback",
+          });
+          requestDraw({ cause: "frame_view", localOnly: true });
+        }
+        if (runtime.running && (!videoEl.paused || videoState.mode === "scrub")) {
+          pumpVideoFrame();
+        }
+      };
+      try {
+        videoEl.requestVideoFrameCallback(tickVideoFrame);
+      } catch {
+        videoEl.__panoFramePumpActive = false;
+      }
+    };
+    const maybeResumePlayback = () => {
+      if (!videoState.pendingPlaybackResume) return;
+      videoState.pendingPlaybackResume = false;
+      videoState.mode = "playback";
+      videoState.requestedTime = null;
+      if (captureStillFrameFromVideo()) {
+        runtime.backgroundDirty = true;
+        runtime.dirty = true;
+      }
+      void videoEl.play().catch(() => {});
+    };
+    const onVideoReady = () => {
+      videoState.editorTime = Number(videoEl.currentTime || 0);
+      if (Number(videoEl.readyState || 0) >= 2 && captureStillFrameFromVideo()) {
+        runtime.backgroundDirty = true;
+        runtime.dirty = true;
+      }
+      refreshModalVideoSource();
+      pumpVideoFrame();
+      requestDraw({ cause: "frame_view", localOnly: true });
+    };
+    const onPlay = () => {
+      videoState.mode = "playback";
+      videoState.seeking = false;
+      videoState.requestedTime = null;
+      refreshModalVideoSource();
+      pumpVideoFrame();
+      requestDraw({ cause: "frame_view", localOnly: true });
+    };
+    const onPause = () => {
+      if (videoState.mode === "playback" && captureStillFrameFromVideo()) {
+        runtime.backgroundDirty = true;
+        runtime.dirty = true;
+      }
+      refreshModalVideoSource();
+      requestDraw({ cause: "frame_view", localOnly: true });
+    };
+    const onVolumeChange = () => {
+      syncVideoTransportState({
+        ready: !!videoEl.getAttribute("src"),
+        playing: !videoEl.paused && !videoEl.ended,
+        visible: getVideoTransportVisible(),
+        currentTime: videoState.editorTime,
+        duration: uiState.videoTransport.duration,
+        frameCount: uiState.videoTransport.frameCount,
+        fps: uiState.videoTransport.fps,
+        mode: videoState.mode,
+        hasAudio: uiState.videoTransport.hasAudio,
+        muted: videoEl.muted,
+        volume: Number(videoEl.volume ?? uiState.videoTransport.volume ?? 1),
+      });
+    };
+    const onSeeked = () => {
+      const hadExplicitSeek = videoState.seeking || videoState.pendingPlaybackResume || videoState.mode === "scrub";
+      videoState.seeking = false;
+      if (!hadExplicitSeek) {
+        videoState.requestedTime = null;
+        pumpVideoFrame();
+        return;
+      }
+      const targetTime = Number(videoState.requestedTime ?? videoState.editorTime ?? 0);
+      const actualTime = Number(videoEl.currentTime || 0);
+      if (Math.abs(actualTime - targetTime) > frameTolerance()) {
+        issueVideoSeek(targetTime);
+        return;
+      }
+      if (videoState.mode === "scrub") {
+        captureStillFrameFromVideo();
+        runtime.backgroundDirty = true;
+        runtime.dirty = true;
+        requestDraw({ cause: "frame_view", localOnly: true });
+      }
+      videoState.requestedTime = null;
+      maybeResumePlayback();
+      pumpVideoFrame();
+    };
+    videoEl.addEventListener("loadedmetadata", onVideoReady);
+    videoEl.addEventListener("loadeddata", onVideoReady);
+    videoEl.addEventListener("canplay", onVideoReady);
+    videoEl.addEventListener("play", onPlay);
+    videoEl.addEventListener("pause", onPause);
+    videoEl.addEventListener("volumechange", onVolumeChange);
+    videoEl.addEventListener("seeked", onSeeked);
+    videoCleanupFns.push(() => videoEl.removeEventListener("loadedmetadata", onVideoReady));
+    videoCleanupFns.push(() => videoEl.removeEventListener("loadeddata", onVideoReady));
+    videoCleanupFns.push(() => videoEl.removeEventListener("canplay", onVideoReady));
+    videoCleanupFns.push(() => videoEl.removeEventListener("play", onPlay));
+    videoCleanupFns.push(() => videoEl.removeEventListener("pause", onPause));
+    videoCleanupFns.push(() => videoEl.removeEventListener("volumechange", onVolumeChange));
+    videoCleanupFns.push(() => videoEl.removeEventListener("seeked", onSeeked));
+  }
 
   function syncToolButtonModels() {
     uiState.toolButtons.forEach((button) => {
@@ -2872,6 +3308,205 @@ async function showEditor(node, type, options = {}) {
     if (outputs && Object.prototype.hasOwnProperty.call(outputs, key)) return outputs[key];
     return null;
   }
+  function getModalVideoUiKeys() {
+    const nodeName = String(node?.comfyClass || node?.type || node?.title || "");
+    if (isPanoramaPreviewNodeName(nodeName)) {
+      return { videoKey: "pano_videos", metaKey: "pano_video_meta" };
+    }
+    if (type === "stickers" || type === "cutout") {
+      return { videoKey: "pano_input_videos", metaKey: "pano_input_video_meta" };
+    }
+    return { videoKey: "pano_videos", metaKey: "pano_video_meta" };
+  }
+  function getVideoMetaEntry() {
+    const { metaKey } = getModalVideoUiKeys();
+    const meta = getNodeUiValue(metaKey);
+    if (Array.isArray(meta) && meta.length > 0 && meta[0] && typeof meta[0] === "object") return meta[0];
+    if (meta && typeof meta === "object") return meta;
+    return null;
+  }
+  function getMediaRevisionToken(media) {
+    if (!media) return "none";
+    if (media instanceof HTMLVideoElement) {
+      return [
+        String(media.currentSrc || media.src || ""),
+        Number(media.videoWidth || 0),
+        Number(media.videoHeight || 0),
+        String(media.dataset?.panoFrameIdx || "0"),
+      ].join("|");
+    }
+    if (media instanceof HTMLCanvasElement) {
+      return [
+        "canvas",
+        Number(media.width || 0),
+        Number(media.height || 0),
+        String(media.__panoFrameIdx || 0),
+      ].join("|");
+    }
+    return [
+      String(media.currentSrc || media.src || ""),
+      Number(media.naturalWidth || media.width || 0),
+      Number(media.naturalHeight || media.height || 0),
+    ].join("|");
+  }
+  function formatVideoTime(seconds) {
+    const total = Math.max(0, Math.floor(Number(seconds || 0)));
+    const mins = Math.floor(total / 60);
+    const secs = total % 60;
+    return `${mins}:${String(secs).padStart(2, "0")}`;
+  }
+  function syncVideoTransportState(extra = {}) {
+    const current = Number(extra.currentTime ?? videoState.editorTime ?? 0);
+    const duration = Number(extra.duration ?? uiState.videoTransport.duration ?? 0);
+    const ready = Object.prototype.hasOwnProperty.call(extra, "ready")
+      ? !!extra.ready
+      : !!uiState.videoTransport.ready;
+    const playing = Object.prototype.hasOwnProperty.call(extra, "playing")
+      ? !!extra.playing
+      : !!uiState.videoTransport.playing;
+    const visible = Object.prototype.hasOwnProperty.call(extra, "visible")
+      ? !!extra.visible
+      : !!uiState.videoTransport.visible;
+    const muted = Object.prototype.hasOwnProperty.call(extra, "muted")
+      ? !!extra.muted
+      : !!(videoEl instanceof HTMLVideoElement ? videoEl.muted : uiState.videoTransport.muted);
+    const volume = Number(
+      Object.prototype.hasOwnProperty.call(extra, "volume")
+        ? extra.volume
+        : (videoEl instanceof HTMLVideoElement ? videoEl.volume : uiState.videoTransport.volume)
+    );
+    const hasAudio = Object.prototype.hasOwnProperty.call(extra, "hasAudio")
+      ? !!extra.hasAudio
+      : detectVideoHasAudio(videoEl);
+    Object.assign(uiState.videoTransport, {
+      ready,
+      playing,
+      visible,
+      currentTime: Number.isFinite(current) ? current : 0,
+      duration: Number.isFinite(duration) ? duration : 0,
+      progressPct: duration > 1e-6 ? Math.max(0, Math.min(100, (current / duration) * 100)) : 0,
+      currentTimeLabel: formatVideoTime(current),
+      durationLabel: formatVideoTime(duration),
+      frameCount: Math.max(0, Number(extra.frameCount ?? uiState.videoTransport.frameCount ?? 0)),
+      fps: Math.max(1, Number(extra.fps ?? uiState.videoTransport.fps ?? 24)),
+      mode: String(extra.mode || videoState.mode || "playback"),
+      hasAudio,
+      muted,
+      volume: Math.max(0, Math.min(1, Number.isFinite(volume) ? volume : 1)),
+      volumePct: Math.round(Math.max(0, Math.min(1, Number.isFinite(volume) ? volume : 1)) * 100),
+      thumbnails: Array.isArray(extra.thumbnails) ? extra.thumbnails : uiState.videoTransport.thumbnails,
+      thumbnailCount: Math.max(1, Number(extra.thumbnailCount ?? uiState.videoTransport.thumbnailCount ?? VIDEO_THUMBNAIL_COUNT)),
+    });
+  }
+  function getVideoTransportVisible() {
+    return !!(videoEl instanceof HTMLVideoElement
+      && videoEl.getAttribute("src")
+      && editor.primaryTool !== "paint"
+      && editor.primaryTool !== "mask");
+  }
+  function syncVideoTransportVisibility() {
+    syncVideoTransportState({
+      visible: getVideoTransportVisible(),
+    });
+  }
+  function captureStillFrameFromVideo() {
+    if (!(videoEl instanceof HTMLVideoElement)) return false;
+    if (Number(videoEl.videoWidth || 0) < 1 || Number(videoEl.videoHeight || 0) < 1) return false;
+    const width = Number(videoEl.videoWidth || 0);
+    const height = Number(videoEl.videoHeight || 0);
+    if (stillCanvas.width !== width || stillCanvas.height !== height) {
+      stillCanvas.width = width;
+      stillCanvas.height = height;
+    }
+    const ctx2d = stillCanvas.getContext("2d");
+    if (!ctx2d) return false;
+    ctx2d.clearRect(0, 0, width, height);
+    ctx2d.drawImage(videoEl, 0, 0, width, height);
+    stillCanvas.__panoFrameIdx = Number(stillCanvas.__panoFrameIdx || 0) + 1;
+    videoState.presentedTime = Number(videoState.editorTime || videoEl.currentTime || 0);
+    return true;
+  }
+  function getDisplayBackgroundSource() {
+    if (
+      videoState.mode === "scrub"
+      && Number(stillCanvas.width || 0) > 0
+      && Number(stillCanvas.height || 0) > 0
+      && Number(stillCanvas.__panoFrameIdx || 0) > 0
+    ) {
+      return stillCanvas;
+    }
+    if (
+      videoEl instanceof HTMLVideoElement
+      && Number(videoEl.videoWidth || 0) > 0
+      && Number(videoEl.videoHeight || 0) > 0
+      && Number(videoEl.readyState || 0) >= 2
+    ) {
+      return videoEl;
+    }
+    return null;
+  }
+  function issueVideoSeek(targetTime) {
+    if (!(videoEl instanceof HTMLVideoElement)) return;
+    if (Number(videoEl.videoWidth || 0) < 1 || Number(videoEl.videoHeight || 0) < 1) return;
+    const nextTime = Math.max(0, Number(targetTime || 0));
+    videoState.requestedTime = nextTime;
+    if (videoState.seeking) return;
+    if (Math.abs(Number(videoEl.currentTime || 0) - nextTime) <= 0.0005) return;
+    videoState.seeking = true;
+    try {
+      videoEl.currentTime = nextTime;
+    } catch {
+      videoState.seeking = false;
+    }
+  }
+  function refreshModalVideoSource() {
+    if (!(videoEl instanceof HTMLVideoElement)) return null;
+    const { videoKey } = getModalVideoUiKeys();
+    const entry = getNodeUiList(videoKey)[0] || null;
+    const nextSrc = entry && typeof entry === "object" ? comfyImageEntryToUrl(entry) : imageSourceFromCandidate(entry);
+    const meta = getVideoMetaEntry();
+    const frameCount = Math.max(0, Number(meta?.frames || 0));
+    const fps = Math.max(1, Number(meta?.fps || 24));
+    const duration = Number(meta?.duration || (frameCount > 0 ? frameCount / fps : 0));
+    const hasAudio = !!meta?.has_audio || detectVideoHasAudio(videoEl);
+    if (nextSrc && videoEl.dataset.panoSrc !== nextSrc) {
+      videoEl.pause();
+      videoEl.dataset.panoSrc = nextSrc;
+      videoEl.dataset.panoFrameIdx = "0";
+      videoEl.loop = true;
+      videoEl.muted = !!uiState.videoTransport.muted;
+      videoEl.volume = Math.max(0, Math.min(1, Number(uiState.videoTransport.volume ?? 1)));
+      videoEl.src = nextSrc;
+      videoEl.load();
+      void buildVideoThumbnails(nextSrc, duration, fps);
+    } else if (!nextSrc && videoEl.getAttribute("src")) {
+      videoEl.pause();
+      videoEl.removeAttribute("src");
+      videoEl.load();
+      resetVideoThumbnails();
+    }
+    if (nextSrc && (!Array.isArray(uiState.videoTransport.thumbnails) || uiState.videoTransport.thumbnails.length === 0)) {
+      void buildVideoThumbnails(nextSrc, duration, fps);
+    }
+    if (!nextSrc) {
+      resetVideoThumbnails();
+    }
+    syncVideoTransportState({
+      ready: !!nextSrc,
+      playing: !videoEl.paused && !videoEl.ended,
+      visible: !!nextSrc && editor.primaryTool !== "paint" && editor.primaryTool !== "mask",
+      currentTime: videoState.editorTime,
+      duration,
+      frameCount,
+      fps,
+      mode: videoState.mode,
+      hasAudio,
+      muted: !!videoEl.muted,
+      volume: Number(videoEl.volume ?? uiState.videoTransport.volume ?? 1),
+      thumbnailCount: uiState.videoTransport.thumbnailCount,
+    });
+    return nextSrc || null;
+  }
   function normalizeInputPoseValue(value, debugValue = null) {
     if (value && typeof value === "object" && !Array.isArray(value)) return value;
     if (Array.isArray(value) && value.length > 0) {
@@ -3211,7 +3846,7 @@ async function showEditor(node, type, options = {}) {
         && runtime.hasPresentedFrame;
     }
     if (isPaintCursorEnabled()) updateCursor(editor.pointerPos);
-    else canvas.style.cursor = editor.mode === "pano" ? "grab" : "default";
+    else setCanvasCursor(editor.mode === "pano" ? "grab" : "default");
   }
 
   function stickerCornerOrderSanity() {
@@ -3637,10 +4272,7 @@ async function showEditor(node, type, options = {}) {
   function drawOrderedDisplayListInView(ctx, rect, view, bgImg, cachePrefix = "modal_object_view") {
     if (!ctx || !rect || !view) return false;
     const mode = String(view?.mode || "");
-    const bgReady = !!bgImg
-      && !!bgImg.complete
-      && Number(bgImg.naturalWidth || bgImg.width || 0) > 1
-      && Number(bgImg.naturalHeight || bgImg.height || 0) > 1;
+    const bgReady = isDecodedImageReady(bgImg);
     const useModalBackgroundLayer = shouldUseModalBackgroundLayer(rect, view);
     if (useModalBackgroundLayer) {
       return renderModalBackgroundLayer(
@@ -3659,14 +4291,12 @@ async function showEditor(node, type, options = {}) {
     const descriptor = buildPanoramaCompositeDescriptor({
       stateRevision: [
         cachePrefix,
-        bgReady ? String(bgImg.currentSrc || bgImg.src || "") : "no_bg",
-        bgReady ? Number(bgImg.naturalWidth || bgImg.width || 0) : 0,
-        bgReady ? Number(bgImg.naturalHeight || bgImg.height || 0) : 0,
+        bgReady ? getMediaRevisionToken(bgImg) : "no_bg",
         Array.isArray(textures) ? textures.map((item) => `${String(item?.assetId || "")}:${String(item?.revision || "")}`).join(",") : "none",
         interleavedLayerEntries.length ? interleavedLayerEntries.map((entry) => `${String(entry?.id || "")}:${String(entry?.revision || "")}:${Number(entry?.zIndex || 0)}`).join(",") : "paint:none",
       ].join("|"),
       backgroundSource: bgReady && editor.showPanorama ? bgImg : null,
-      backgroundRevision: bgReady ? `${cachePrefix}:bg` : "",
+      backgroundRevision: bgReady ? `${cachePrefix}:${getMediaRevisionToken(bgImg)}` : "",
       coverageDeg: normalizeCoverageValue(state.coverage),
       scene,
       textures,
@@ -3838,6 +4468,21 @@ async function showEditor(node, type, options = {}) {
   }
 
   function getConnectedErpImage() {
+    if (type === "cutout") {
+      const displaySource = getDisplayBackgroundSource();
+      if (displaySource) return displaySource;
+      const linked = getPreferredExactLinkedInputImage(
+        node,
+        ["erp_image", "bg_erp"],
+        () => requestDraw(),
+        "background:cutout:erp_image|bg_erp",
+      );
+      if (linked) return linked;
+      const uiImg = getFirstNodeUiImage(node, "pano_input_images", imageCache, () => requestDraw());
+      return uiImg || null;
+    }
+    const displaySource = getDisplayBackgroundSource();
+    if (displaySource) return displaySource;
     const uiImg = getFirstNodeUiImage(node, "pano_input_images", imageCache, () => requestDraw());
     if (uiImg) return uiImg;
     const inputNames = Array.isArray(node?.inputs)
@@ -3861,6 +4506,11 @@ async function showEditor(node, type, options = {}) {
       return !!img.complete
         && Number(img.naturalWidth || img.width || 0) > 0
         && Number(img.naturalHeight || img.height || 0) > 0;
+    }
+    if (img instanceof HTMLVideoElement) {
+      return Number(img.videoWidth || 0) > 0
+        && Number(img.videoHeight || 0) > 0
+        && Number(img.readyState || 0) >= 2;
     }
     return Number(img.width || img.naturalWidth || 0) > 0
       && Number(img.height || img.naturalHeight || 0) > 0;
@@ -4256,17 +4906,8 @@ async function showEditor(node, type, options = {}) {
   function buildModalPanoramaDescriptor(bgImg, cachePrefix = "modal_bg_gl") {
     const scene = buildModalBackgroundScene();
     const textures = buildModalBackgroundTextures(scene);
-    const bgReady = !!bgImg
-      && !!bgImg.complete
-      && Number(bgImg.naturalWidth || bgImg.width || 0) > 1
-      && Number(bgImg.naturalHeight || bgImg.height || 0) > 1;
-    const bgRevision = bgReady
-      ? [
-        String(bgImg.currentSrc || bgImg.src || ""),
-        Number(bgImg.naturalWidth || bgImg.width || 0),
-        Number(bgImg.naturalHeight || bgImg.height || 0),
-      ].join("|")
-      : "none";
+    const bgReady = isDecodedImageReady(bgImg);
+    const bgRevision = bgReady ? getMediaRevisionToken(bgImg) : "none";
     const interleavedLayerEntries = editor.showObjects
       ? buildModalInterleavedLayerEntries()
       : appendMaskDisplayLayerEntry([]);
@@ -5155,46 +5796,14 @@ async function showEditor(node, type, options = {}) {
   }
 
   function getCutoutPreviewObjectRevision() {
-    const stickers = Array.isArray(state.stickers) ? state.stickers : [];
-    const rasters = Array.isArray(state.painting?.raster_objects) ? state.painting.raster_objects : [];
-    return JSON.stringify({
-      stickers: stickers.map((item) => ({
-        id: String(item?.id || ""),
-        asset_id: String(item?.asset_id || item?.assetId || ""),
-        source_kind: String(item?.source_kind || ""),
-        source_link_id: Number(item?.source_link_id ?? -1),
-        source_state_hash: String(item?.source_state_hash || ""),
-        visible: item?.visible !== false,
-        z_index: Number(item?.z_index || 0),
-        yaw_deg: Number(item?.yaw_deg || 0),
-        pitch_deg: Number(item?.pitch_deg || 0),
-        hFOV_deg: Number(item?.hFOV_deg || 0),
-        vFOV_deg: Number(item?.vFOV_deg || 0),
-        rot_deg: Number(item?.rot_deg || 0),
-        roll_deg: Number(item?.roll_deg || 0),
-        crop: item?.crop || null,
-      })),
-      rasters: rasters
-        .filter((item) => String(item?.layerKind || "paint") === "paint")
-        .map((item) => ({
-          id: String(item?.id || ""),
-          visible: item?.visible !== false,
-          z_index: Number(item?.z_index || 0),
-          transform: item?.transform || null,
-          bbox: item?.bbox || null,
-        })),
-    });
+    return `obj:${Number(editor.objectVisualRevision || 0)}`;
   }
 
   function getCutoutPreviewSurfaceRevision(shot, options = {}) {
     if (!shot) return "";
     const bgImage = getConnectedErpImage();
-    const bgKey = bgImage && (bgImage.complete || bgImage.naturalWidth || bgImage.width)
-      ? [
-        String(bgImage.currentSrc || bgImage.src || ""),
-        Number(bgImage.naturalWidth || bgImage.width || 0),
-        Number(bgImage.naturalHeight || bgImage.height || 0),
-      ].join("|")
+    const bgKey = bgImage && isDecodedImageReady(bgImage)
+      ? getMediaRevisionToken(bgImage)
       : "no_bg";
     const size = getCutoutPreviewSurfaceSize(shot);
     return [
@@ -5252,17 +5861,8 @@ async function showEditor(node, type, options = {}) {
     uiState.cameraPreview.expanded = !!editor.outputPreviewExpanded;
     const scene = buildModalBackgroundScene();
     const textures = buildModalBackgroundTextures(scene);
-    const bgReady = !!bgImg
-      && !!bgImg.complete
-      && Number(bgImg.naturalWidth || bgImg.width || 0) > 1
-      && Number(bgImg.naturalHeight || bgImg.height || 0) > 1;
-    const bgRevision = bgReady
-      ? [
-        String(bgImg.currentSrc || bgImg.src || ""),
-        Number(bgImg.naturalWidth || bgImg.width || 0),
-        Number(bgImg.naturalHeight || bgImg.height || 0),
-      ].join("|")
-      : "none";
+    const bgReady = isDecodedImageReady(bgImg);
+    const bgRevision = bgReady ? getMediaRevisionToken(bgImg) : "none";
     const rasterEntries = editor.showObjects
       ? buildModalInterleavedLayerEntries()
       : appendMaskDisplayLayerEntry([]);
@@ -5322,10 +5922,7 @@ async function showEditor(node, type, options = {}) {
     const bgImg = getConnectedErpImage();
     const scene = buildModalBackgroundScene();
     const textures = buildModalBackgroundTextures(scene);
-    const bgReady = !!bgImg
-      && !!bgImg.complete
-      && Number(bgImg.naturalWidth || bgImg.width || 0) > 1
-      && Number(bgImg.naturalHeight || bgImg.height || 0) > 1;
+    const bgReady = isDecodedImageReady(bgImg);
     const rasterEntries = editor.showObjects
       ? buildModalInterleavedLayerEntries()
       : appendMaskDisplayLayerEntry([]);
@@ -5334,7 +5931,7 @@ async function showEditor(node, type, options = {}) {
     cutoutPreviewCamera.syncScene(buildPanoramaCompositeDescriptor({
       stateRevision: getCutoutPreviewSurfaceRevision(shot, options),
       backgroundSource: bgReady && editor.showPanorama ? bgImg : null,
-      backgroundRevision: bgReady ? String(bgImg.currentSrc || bgImg.src || "") : "",
+      backgroundRevision: bgReady ? `cutout_frame:${getMediaRevisionToken(bgImg)}` : "",
       coverageDeg: normalizeCoverageValue(state.coverage),
       scene,
       textures,
@@ -5583,6 +6180,13 @@ async function showEditor(node, type, options = {}) {
     editor.paintEngineRevisionKey = getPaintingRevisionKey();
   }
 
+  function invalidatePaintingLayerState() {
+    if (state.painting_layer !== null) {
+      state.painting_layer = null;
+    }
+    _paintLayerSyncRevision = "";
+  }
+
   function markObjectVisualsDirty() {
     editor.objectVisualRevision = Number(editor.objectVisualRevision || 0) + 1;
     invalidateObjectVisualCaches();
@@ -5591,6 +6195,7 @@ async function showEditor(node, type, options = {}) {
   }
 
   function markPaintStrokeVisualsDirty({ rebuildPaintEngine = false } = {}) {
+    invalidatePaintingLayerState();
     bumpPaintingStrokeRevision();
     markObjectVisualsDirty();
     if (rebuildPaintEngine) {
@@ -5599,6 +6204,7 @@ async function showEditor(node, type, options = {}) {
   }
 
   function markPaintCompositeVisualsDirty() {
+    invalidatePaintingLayerState();
     bumpPaintingCompositeRevision();
     markObjectVisualsDirty();
   }
@@ -6456,6 +7062,7 @@ async function showEditor(node, type, options = {}) {
       isActiveLassoTool,
     });
     Object.assign(uiState.paintDock, nextPaintDock);
+    syncVideoTransportVisibility();
     if (!nextPaintDock.visible) {
       if (paintColorPop) paintColorPop.hidden = true;
       return;
@@ -6864,7 +7471,19 @@ async function showEditor(node, type, options = {}) {
       requestDraw({ cause: "cutout_frame" });
       return;
     }
-    const aspect = Math.max(0.1, Number(canvas?.width || 1) / Math.max(1, Number(canvas?.height || 1)));
+    const bgImg = getConnectedErpImage();
+    const bgReady = isDecodedImageReady(bgImg);
+    const srcWidth = Math.max(1, Number(
+      (bgReady ? (bgImg?.videoWidth || bgImg?.naturalWidth || bgImg?.width) : 0)
+      || canvas?.width
+      || 1
+    ));
+    const srcHeight = Math.max(1, Number(
+      (bgReady ? (bgImg?.videoHeight || bgImg?.naturalHeight || bgImg?.height) : 0)
+      || canvas?.height
+      || 1
+    ));
+    const aspect = Math.max(0.1, srcWidth / srcHeight);
     // New frames should appear clearly inside the current panorama view,
     // not consume the whole visible area on spawn.
     const baseViewFov = clamp(Number(editor.viewFov || 90), 1, 179);
@@ -7428,6 +8047,8 @@ async function showEditor(node, type, options = {}) {
       x: (Number(pos.x) - rect.x) / Math.max(1, rect.w),
       y: (Number(pos.y) - rect.y) / Math.max(1, rect.h),
     };
+    // Out-of-frame: caller must handle null (do not project outside the frame's FOV)
+    if (framePoint.x < 0 || framePoint.x > 1 || framePoint.y < 0 || framePoint.y > 1) return null;
     const dir = frameLocalPointToWorldDir(shot, framePoint);
     if (!dir) return null;
     const { lon, lat } = dirToLonLat(dir);
@@ -7757,9 +8378,11 @@ async function showEditor(node, type, options = {}) {
       const shot = getActiveCutoutShot();
       if (!shot) return false;
       next = screenPosToFrameAsErpPoint(pos, shot, ts);
+      if (!next) return false; // out-of-frame — caller (pointermove) handles segmentation
     } else {
       next = screenPosToErpPoint(pos, ts);
     }
+    if (!next) return false;
     const rawPoints = interaction.stroke.geometry.rawPoints || interaction.stroke.geometry.points;
     const points = interaction.stroke.geometry.points;
     // Dedup against raw coords so OEF smoothing doesn't cause points to be incorrectly skipped
@@ -8094,6 +8717,56 @@ async function showEditor(node, type, options = {}) {
     return true;
   }
 
+  // Commit the current frame-stroke segment to state and start a fresh stroke with the
+  // same action group.  Called when the pointer crosses the frame boundary mid-drag so
+  // that the segment drawn inside the frame is preserved without a "teleport" line to
+  // wherever the pointer re-enters.
+  function _segmentFrameStroke(it) {
+    const rawPoints = it.stroke?.geometry?.rawPoints || it.stroke?.geometry?.points || [];
+    if (rawPoints.length >= 1) {
+      // Save the completed inside-frame segment.
+      commitPaintInteraction(it);
+      const targetDescriptor = getActivePaintTargetDescriptor(it);
+      if (targetDescriptor) {
+        if (String(it.stroke?.toolKind || "") === "eraser") {
+          editor.paintEngine.cancelActiveStroke(targetDescriptor);
+        } else {
+          editor.paintEngine.commitActiveStroke(it.stroke, targetDescriptor);
+        }
+      }
+      it._hasCommittedSegments = true;
+    }
+    // Start a new blank stroke — same tool/layer/style but fresh geometry.
+    const prev = it.stroke;
+    const targetSpace = { kind: "ERP_GLOBAL", viewMode: String(editor.mode || "frame") };
+    const newStroke = buildFreehandStrokeRecord(it.layerKind, prev.toolKind, [], targetSpace);
+    newStroke.actionGroupId = prev.actionGroupId; // keep same undo group
+    it.stroke = newStroke;
+    const targetDescriptor = getActivePaintTargetDescriptor(it);
+    if (targetDescriptor) {
+      editor.paintEngine.beginStroke(newStroke, targetDescriptor);
+    }
+  }
+
+  function _segmentFrameLassoFill(it) {
+    const points = it.stroke?.geometry?.points || [];
+    if (points.length >= 3) {
+      commitPaintInteraction(it);
+      const targetDescriptor = getActivePaintTargetDescriptor(it);
+      if (targetDescriptor) editor.paintEngine.commitActiveStroke(it.stroke, targetDescriptor);
+      it._hasCommittedSegments = true;
+    }
+    const prev = it.stroke;
+    const targetSpace = { kind: "ERP_GLOBAL", viewMode: String(editor.mode || "frame") };
+    const newStroke = buildLassoFillStrokeRecord(it.layerKind, prev.toolKind, [], targetSpace);
+    newStroke.actionGroupId = prev.actionGroupId;
+    it.stroke = newStroke;
+    const targetDescriptor = getActivePaintTargetDescriptor(it);
+    if (targetDescriptor) {
+      editor.paintEngine.beginStroke(newStroke, targetDescriptor);
+    }
+  }
+
   function commitPaintInteraction(interaction) {
     const geometry = interaction?.stroke?.geometry || null;
     if (!geometry) return false;
@@ -8313,27 +8986,27 @@ async function showEditor(node, type, options = {}) {
   function updateCursor(p) {
     syncPaintCursorElement();
     if (editor.interaction) {
-      if (editor.interaction.kind === "paint_stroke" || editor.interaction.kind === "paint_lasso_fill") canvas.style.cursor = "none";
-      else if (editor.interaction.kind === "view") canvas.style.cursor = "grabbing";
-      else if (editor.interaction.kind === "pan_frame") canvas.style.cursor = "grabbing";
-    else if (editor.interaction.kind === "move" || editor.interaction.kind === "move_multi" || editor.interaction.kind === "move_stroke_group" || editor.interaction.kind === "move_raster_object") canvas.style.cursor = "move";
-      else if (editor.interaction.kind === "scale" || editor.interaction.kind === "scale_x" || editor.interaction.kind === "scale_y" || editor.interaction.kind === "scale_raster_object") canvas.style.cursor = editor.interaction.cursor || "nwse-resize";
-      else if (editor.interaction.kind === "rotate") canvas.style.cursor = "grabbing";
-      else canvas.style.cursor = "default";
+      if (editor.interaction.kind === "paint_stroke" || editor.interaction.kind === "paint_lasso_fill") setCanvasCursor("none");
+      else if (editor.interaction.kind === "view") setCanvasCursor("grabbing");
+      else if (editor.interaction.kind === "pan_frame") setCanvasCursor("grabbing");
+    else if (editor.interaction.kind === "move" || editor.interaction.kind === "move_multi" || editor.interaction.kind === "move_stroke_group" || editor.interaction.kind === "move_raster_object") setCanvasCursor("move");
+      else if (editor.interaction.kind === "scale" || editor.interaction.kind === "scale_x" || editor.interaction.kind === "scale_y" || editor.interaction.kind === "scale_raster_object") setCanvasCursor(editor.interaction.cursor || "nwse-resize");
+      else if (editor.interaction.kind === "rotate") setCanvasCursor("grabbing");
+      else setCanvasCursor("default");
       return;
     }
     if (isActivePaintCursorVisible()) {
-      canvas.style.cursor = "none";
+      setCanvasCursor("none");
       return;
     }
     if (editor.mode === "frame") {
       if (editor.primaryTool !== "cursor") {
-        canvas.style.cursor = "default";
+        setCanvasCursor("default");
         return;
       }
     }
     if (editor.primaryTool === "cursor" && editor.marqueeModifier) {
-      canvas.style.cursor = "default";
+      setCanvasCursor("default");
       return;
     }
     const selected = getSelected();
@@ -8341,17 +9014,17 @@ async function showEditor(node, type, options = {}) {
     const selectedLocked = selected ? isItemLocked(selected) : false;
     const h = selectedLocked ? { kind: "none", cursor: "default" } : handleHit(geom, p);
     if (!selectedLocked && h.kind !== "none") {
-      canvas.style.cursor = h.cursor;
+      setCanvasCursor(h.cursor);
       return;
     }
     if (editor.primaryTool === "cursor") {
       const hit = hitObjectAt(p);
       if (hit) {
-        canvas.style.cursor = "default";
+        setCanvasCursor("default");
         return;
       }
     }
-    canvas.style.cursor = editor.mode === "pano" ? "grab" : "default";
+    setCanvasCursor(editor.mode === "pano" ? "grab" : "default");
   }
 
   function updateSelectionMenu() {
@@ -8531,6 +9204,10 @@ async function showEditor(node, type, options = {}) {
       const startPoint = activeShot
         ? screenPosToFrameAsErpPoint(p, activeShot, performance.now())
         : screenPosToErpPoint(p, performance.now());
+      if (!startPoint) {
+        updateCursor(p);
+        return;
+      }
       editor.interaction = {
         kind: toolKind === "lasso_fill" ? "paint_lasso_fill" : "paint_stroke",
         layerKind,
@@ -8814,6 +9491,25 @@ async function showEditor(node, type, options = {}) {
       let changed = false;
       samples.forEach((sample) => {
         const sp = screenPos(sample);
+        if (editor.mode === "frame") {
+          // Frame-boundary guard: segment the stroke on exit, restart on re-entry.
+          const shot = getActiveCutoutShot();
+          const rect = shot ? getFrameViewRect(shot) : null;
+          if (rect) {
+            const fx = (sp.x - rect.x) / Math.max(1, rect.w);
+            const fy = (sp.y - rect.y) / Math.max(1, rect.h);
+            const inFrame = fx >= 0 && fx <= 1 && fy >= 0 && fy <= 1;
+            if (!inFrame) {
+              it._outOfFrame = true;
+              return; // drop point — no artifact
+            }
+            if (it._outOfFrame) {
+              // Re-entered: commit previous inside-frame segment, start fresh
+              it._outOfFrame = false;
+              _segmentFrameStroke(it);
+            }
+          }
+        }
         // appendPaintPoint now calls appendStrokePoint internally (O(1) incremental rendering)
         if (appendPaintPoint(it, sp, performance.now())) changed = true;
       });
@@ -8826,6 +9522,23 @@ async function showEditor(node, type, options = {}) {
       let changed = false;
       samples.forEach((sample) => {
         const sp = screenPos(sample);
+        if (editor.mode === "frame") {
+          const shot = getActiveCutoutShot();
+          const rect = shot ? getFrameViewRect(shot) : null;
+          if (rect) {
+            const fx = (sp.x - rect.x) / Math.max(1, rect.w);
+            const fy = (sp.y - rect.y) / Math.max(1, rect.h);
+            const inFrame = fx >= 0 && fx <= 1 && fy >= 0 && fy <= 1;
+            if (!inFrame) {
+              it._outOfFrame = true;
+              return;
+            }
+            if (it._outOfFrame) {
+              it._outOfFrame = false;
+              _segmentFrameLassoFill(it);
+            }
+          }
+        }
         if (appendLassoPoint(it, sp, performance.now())) changed = true;
       });
       if (changed) {
@@ -9104,7 +9817,12 @@ async function showEditor(node, type, options = {}) {
     const ended = editor.interaction;
     if (editor.interaction?.kind === "paint_stroke" || editor.interaction?.kind === "paint_lasso_fill") {
       invalidateLivePaintPreviewCaches();
-      if (commitPaintInteraction(editor.interaction)) {
+      const didCommit = commitPaintInteraction(editor.interaction);
+      // _hasCommittedSegments: set when frame boundary segmented a stroke mid-drag.
+      // Even if the final segment is empty (pointer ended outside frame), we still need
+      // to push history for the previously committed inside-frame segments.
+      const hadSegments = Boolean(editor.interaction._hasCommittedSegments);
+      if (didCommit || hadSegments) {
         markPaintStrokeVisualsDirty();
         // Invalidate the persistent frame so objectGeom() recomputes bbox on next select.
         const committedGroupId = String(editor.interaction.stroke?.actionGroupId || "").trim();
@@ -9114,7 +9832,10 @@ async function showEditor(node, type, options = {}) {
         }
         const targetDescriptor = getActivePaintTargetDescriptor(editor.interaction);
         if (targetDescriptor) {
-          if (String(editor.interaction.stroke?.toolKind || "") === "eraser") {
+          if (!didCommit) {
+            // Final segment was empty (stroke ended outside frame); cancel engine stroke.
+            editor.paintEngine.cancelActiveStroke(targetDescriptor);
+          } else if (String(editor.interaction.stroke?.toolKind || "") === "eraser") {
             editor.paintEngine.cancelActiveStroke(targetDescriptor);
             refreshPaintEngineRevisionCache();
           } else {
@@ -9548,6 +10269,74 @@ async function showEditor(node, type, options = {}) {
       }
     }
     const action = String(actionTarget?.getAttribute?.("data-action") || "");
+    if (action === "video-play-toggle") {
+      ev.preventDefault();
+      ev.stopPropagation();
+      if (!(videoEl instanceof HTMLVideoElement)) return;
+      refreshModalVideoSource();
+      if (videoEl.paused) {
+        videoState.mode = "playback";
+        videoState.pendingPlaybackResume = false;
+        videoState.resumeAfterScrub = false;
+        const duration = Number(uiState.videoTransport.duration || videoEl.duration || 0);
+        const currentTime = Number(videoEl.currentTime || videoState.editorTime || 0);
+        const restartFrom = (duration > 0 && currentTime >= (duration - 0.001)) ? 0 : Number(videoState.editorTime || currentTime || 0);
+        const playSeekTolerance = Math.max(frameTolerance(), 0.04);
+        videoState.editorTime = restartFrom;
+        if (Math.abs(currentTime - restartFrom) > playSeekTolerance) {
+          videoState.seeking = false;
+          videoState.pendingPlaybackResume = true;
+          issueVideoSeek(restartFrom);
+        } else {
+          void videoEl.play().catch(() => {});
+        }
+      } else {
+        videoEl.pause();
+        videoState.mode = "scrub";
+        videoState.resumeAfterScrub = false;
+        videoState.pendingPlaybackResume = false;
+        videoState.editorTime = Number(videoEl.currentTime || 0);
+        captureStillFrameFromVideo();
+      }
+      syncVideoTransportState({
+        ready: !!videoEl.getAttribute("src"),
+        playing: !videoEl.paused && !videoEl.ended,
+        visible: getVideoTransportVisible(),
+        currentTime: videoState.editorTime,
+        duration: uiState.videoTransport.duration,
+        frameCount: uiState.videoTransport.frameCount,
+        fps: uiState.videoTransport.fps,
+        mode: videoState.mode,
+      });
+      requestDraw({ cause: "frame_view", localOnly: true });
+      return;
+    }
+    if (action === "video-audio-toggle") {
+      ev.preventDefault();
+      ev.stopPropagation();
+      if (!(videoEl instanceof HTMLVideoElement)) return;
+      if (!uiState.videoTransport.hasAudio) return;
+      const nextMuted = !videoEl.muted;
+      videoEl.muted = nextMuted;
+      if (!nextMuted && Number(videoEl.volume || 0) <= 0) {
+        videoEl.volume = Math.max(0.01, Number(uiState.videoTransport.volume || 1));
+      }
+      syncVideoTransportState({
+        ready: !!videoEl.getAttribute("src"),
+        playing: !videoEl.paused && !videoEl.ended,
+        visible: getVideoTransportVisible(),
+        currentTime: videoState.editorTime,
+        duration: uiState.videoTransport.duration,
+        frameCount: uiState.videoTransport.frameCount,
+        fps: uiState.videoTransport.fps,
+        mode: videoState.mode,
+        hasAudio: uiState.videoTransport.hasAudio,
+        muted: videoEl.muted,
+        volume: Number(videoEl.volume ?? uiState.videoTransport.volume ?? 1),
+      });
+      if (typeof actionTarget?.blur === "function") actionTarget.blur();
+      return;
+    }
     if (!readOnly) {
       if (action === "aspect") {
         editor.cutoutAspectOpen = !editor.cutoutAspectOpen;
@@ -9655,6 +10444,57 @@ async function showEditor(node, type, options = {}) {
     syncPaintUi();
   });
   root.addEventListener("input", (ev) => {
+    const videoSeek = ev.target.closest("[data-video-seek]");
+    if (videoSeek) {
+      if (!(videoEl instanceof HTMLVideoElement)) return;
+      refreshModalVideoSource();
+      const nextTime = clamp(Number(videoSeek.value || 0), 0, Number(uiState.videoTransport.duration || 0));
+      videoState.mode = "scrub";
+      if (!videoState.seeking && !videoEl.paused && !videoEl.ended) {
+        videoState.resumeAfterScrub = true;
+        videoEl.pause();
+      }
+      videoState.editorTime = nextTime;
+      presentCachedFrameForTime(nextTime);
+      syncVideoTransportState({
+        ready: !!videoEl.getAttribute("src"),
+        playing: false,
+        visible: getVideoTransportVisible(),
+        currentTime: nextTime,
+        duration: uiState.videoTransport.duration,
+        frameCount: uiState.videoTransport.frameCount,
+        fps: uiState.videoTransport.fps,
+        mode: "scrub",
+      });
+      if (Number(stillCanvas.__panoFrameIdx || 0) > 0) {
+        runtime.backgroundDirty = true;
+        runtime.dirty = true;
+        requestDraw({ cause: "frame_view", localOnly: true });
+      }
+      issueVideoSeek(nextTime);
+      return;
+    }
+    const videoVolume = ev.target.closest("[data-video-volume]");
+    if (videoVolume) {
+      if (!(videoEl instanceof HTMLVideoElement)) return;
+      const nextVolume = clamp(Number(videoVolume.value || 0), 0, 1);
+      videoEl.volume = nextVolume;
+      videoEl.muted = nextVolume <= 0.0001;
+      syncVideoTransportState({
+        ready: !!videoEl.getAttribute("src"),
+        playing: !videoEl.paused && !videoEl.ended,
+        visible: getVideoTransportVisible(),
+        currentTime: videoState.editorTime,
+        duration: uiState.videoTransport.duration,
+        frameCount: uiState.videoTransport.frameCount,
+        fps: uiState.videoTransport.fps,
+        mode: videoState.mode,
+        hasAudio: uiState.videoTransport.hasAudio,
+        muted: videoEl.muted,
+        volume: nextVolume,
+      });
+      return;
+    }
     const slider = ev.target.closest("[data-paint-size-slider]");
     if (slider) {
       if (slider.disabled) return;
@@ -9674,12 +10514,43 @@ async function showEditor(node, type, options = {}) {
     }
   });
   root.addEventListener("change", (ev) => {
+    if (ev.target.closest("[data-video-seek]")) {
+      if (!(videoEl instanceof HTMLVideoElement)) return;
+      videoState.pendingPlaybackResume = !!videoState.resumeAfterScrub;
+      videoState.resumeAfterScrub = false;
+      if (!videoState.pendingPlaybackResume) {
+        videoState.mode = "scrub";
+      }
+      if (!videoState.seeking) {
+        if (videoState.pendingPlaybackResume) {
+          videoState.pendingPlaybackResume = false;
+          videoState.mode = "playback";
+          void videoEl.play().catch(() => {});
+        } else {
+          captureStillFrameFromVideo();
+          requestDraw({ cause: "frame_view", localOnly: true });
+        }
+      }
+      return;
+    }
+    if (ev.target.closest("[data-video-volume]")) {
+      if (typeof ev.target?.blur === "function") ev.target.blur();
+      return;
+    }
     if (ev.target.closest("[data-paint-size-slider]")) hidePaintSizePreview();
   });
   root.addEventListener("pointerup", (ev) => {
+    if (ev.target.closest("[data-video-volume]")) {
+      if (typeof ev.target?.blur === "function") ev.target.blur();
+      return;
+    }
     if (ev.target.closest("[data-paint-size-slider]")) hidePaintSizePreview();
   });
   root.addEventListener("pointercancel", (ev) => {
+    if (ev.target.closest("[data-video-volume]")) {
+      if (typeof ev.target?.blur === "function") ev.target.blur();
+      return;
+    }
     if (ev.target.closest("[data-paint-size-slider]")) hidePaintSizePreview();
   });
   root.addEventListener("focusout", (ev) => {
@@ -9865,6 +10736,10 @@ async function showEditor(node, type, options = {}) {
       app?.canvas?.setDirty?.(true, true);
       hideTooltip();
       stopRenderLoop();
+      if (videoEl instanceof HTMLVideoElement) videoEl.pause();
+      videoCleanupFns.forEach((fn) => {
+        try { fn(); } catch { }
+      });
       modalPanoCore?.dispose?.();
       cutoutPreviewMount?.unmount?.();
       cutoutPreviewCamera?.dispose?.();
@@ -9972,6 +10847,7 @@ async function showEditor(node, type, options = {}) {
   syncPaintUi();
   updateSidePanel();
   syncLookAtFrameButtonState();
+  refreshModalVideoSource();
   syncCanvasSize();
   updateCursor(editor.pointerPos);
   requestDraw();
@@ -10013,13 +10889,12 @@ function installEditorButton(nodeType, nodeData, matchType, buttonText) {
         return r;
       };
     }
-    const bg = getWidget(node, "bg_color");
-    if (bg && (bg.value == null || String(bg.value).trim() === "" || String(bg.value).toLowerCase() === "#000000")) {
-      bg.value = "#00ff00";
-      bg.callback?.("#00ff00");
-    }
-
     if (matchType === "PanoramaStickers") {
+      const bg = getWidget(node, "bg_color");
+      if (bg && (bg.value == null || String(bg.value).trim() === "" || String(bg.value).toLowerCase() === "#000000")) {
+        bg.value = "#00ff00";
+        bg.callback?.("#00ff00");
+      }
       ensureActionButtonWidget(node, buttonText, () => showEditor(node, "stickers"));
       if (ENABLE_STICKERS_NODE_PREVIEW) {
         attachStickersNodePreview(node, {
@@ -10081,19 +10956,13 @@ function installEditorButton(nodeType, nodeData, matchType, buttonText) {
 function installStandalonePreviewNode(nodeType) {
   if (!nodeType?.prototype) return;
   const ensurePreviewSize = function () {
-    if (!Array.isArray(this.size) || this.size[0] < 100 || this.size[1] < 100) {
+    if (!Array.isArray(this.size) || this.size[0] < 10 || this.size[1] < 10) {
       this.size = [360, 260];
     }
   };
   const prev = nodeType.prototype.onNodeCreated;
   nodeType.prototype.onNodeCreated = function () {
     const r = prev ? prev.apply(this, arguments) : undefined;
-    ensurePreviewSize.call(this);
-    return r;
-  };
-  const prevConfigure = nodeType.prototype.onConfigure;
-  nodeType.prototype.onConfigure = function () {
-    const r = prevConfigure ? prevConfigure.apply(this, arguments) : undefined;
     ensurePreviewSize.call(this);
     return r;
   };
