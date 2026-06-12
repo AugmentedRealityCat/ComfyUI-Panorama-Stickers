@@ -75,6 +75,11 @@ function easeOutCubic(t) {
   return 1 - Math.pow(1 - t, 3);
 }
 
+function smoothstep(edge0, edge1, x) {
+  const t = clamp((Number(x || 0) - edge0) / Math.max(edge1 - edge0, 1e-6), 0, 1);
+  return t * t * (3 - 2 * t);
+}
+
 function getCachedVideoThumbnails(src) {
   const key = String(src || "").trim();
   if (!key) return null;
@@ -798,7 +803,14 @@ function drawPanoramaNodePreview(node, ctx) {
   const stateWidget = getWidget(node, STATE_WIDGET);
   const raw = String(stateWidget?.value || "");
   const bg = String(getWidget(node, "bg_color")?.value || "#00ff00");
-  const preset = parseOutputPresetValue(getWidget(node, "output_preset")?.value, 2048);
+  const preset = resolveNodeOutputPresetWidth(
+    node,
+    getWidget(node, "output_preset")?.value,
+    2048,
+    ["bg_erp", "erp_image"],
+    () => node.setDirtyCanvas?.(true, true),
+    "node_preview:auto:bg_erp|erp_image",
+  );
   const coverage = normalizeCoverageValue(getWidget(node, "coverage")?.value);
   const state = parseState(raw, preset, bg, coverage);
 
@@ -1109,6 +1121,22 @@ function parseOutputPresetValue(v, fallback = 2048) {
   const head = s.includes("x") ? s.split("x", 1)[0].trim() : s;
   const n = Number(head);
   return Number.isFinite(n) ? Math.round(n) : fallback;
+}
+
+function isAutoOutputPresetValue(v) {
+  const s = String(v ?? "").trim().toLowerCase();
+  return s === "auto" || s === "bg" || s === "background";
+}
+
+function getMediaWidthForSizing(media) {
+  const width = Number(media?.naturalWidth || media?.videoWidth || media?.width || 0);
+  return Number.isFinite(width) && width > 0 ? Math.round(width) : null;
+}
+
+function resolveNodeOutputPresetWidth(node, rawPreset, fallback = 2048, inputNames = ["bg_erp", "erp_image"], onLoad = null, cacheKey = "output_preset_auto_bg") {
+  if (!isAutoOutputPresetValue(rawPreset)) return parseOutputPresetValue(rawPreset, fallback);
+  const img = getPreferredExactLinkedInputImage(node, inputNames, onLoad, cacheKey);
+  return getMediaWidthForSizing(img) || Math.max(1, Math.round(Number(fallback || 2048)));
 }
 
 function panoPaintDebugEnabled() {
@@ -1615,9 +1643,32 @@ async function showEditor(node, type, options = {}) {
   const bgWidget = getWidget(node, "bg_color");
   const stateWidget = getWidget(node, STATE_WIDGET);
 
+  const getLinkedBackgroundImageForSizing = () => {
+    const inputNames = type === "stickers" ? ["bg_erp", "erp_image"] : ["erp_image", "bg_erp"];
+    return getPreferredExactLinkedInputImage(
+      node,
+      inputNames,
+      () => requestDraw(),
+      `background:size:${inputNames.join("|")}`,
+    );
+  };
+
+  const getLinkedBackgroundWidthForAuto = () => {
+    const img = getLinkedBackgroundImageForSizing();
+    return getMediaWidthForSizing(img);
+  };
+
+  const resolveEditorOutputPresetWidth = (fallback = 2048) => {
+    const raw = presetWidget?.value;
+    if (isAutoOutputPresetValue(raw)) {
+      return getLinkedBackgroundWidthForAuto() || Math.max(1, Math.round(Number(fallback || 2048)));
+    }
+    return parseOutputPresetValue(raw, fallback);
+  };
+
   const state = parseState(
     String(stateWidget?.value || ""),
-    parseOutputPresetValue(presetWidget?.value, 2048),
+    resolveEditorOutputPresetWidth(2048),
     String(bgWidget?.value || "#00ff00"),
     normalizeCoverageValue(coverageWidget?.value),
   );
@@ -5193,7 +5244,7 @@ async function showEditor(node, type, options = {}) {
     return geom;
   }
 
-  function projectSceneItemDir(dir, refX = null, frameShot = null, frameRect = null) {
+  function projectSceneItemDir(dir, refX = null, frameShot = null, frameRect = null, options = {}) {
     if (editor.mode === "frame") {
       const shot = frameShot || getActiveCutoutShot();
       const rect = frameRect || getFrameViewRect(shot);
@@ -5210,40 +5261,56 @@ async function showEditor(node, type, options = {}) {
     const cx = dot(dir, right);
     const cy = dot(dir, up);
     const cz = dot(dir, fwd);
+    const nearZ = 1e-4;
+    if (!Number.isFinite(cz)) return null;
+    if (cz <= nearZ && !options?.clipBehind) return null;
+    const z = Math.max(cz, nearZ);
     const w = canvas.width;
     const h = canvas.height;
     const hfov = editor.viewFov * DEG2RAD;
     const vfov = 2 * Math.atan(Math.tan(hfov / 2) * (h / Math.max(w, 1)));
     const sx = (w / 2) / Math.tan(hfov / 2);
     const sy = (h / 2) / Math.tan(vfov / 2);
-    const z = Math.max(cz, 1e-4);
     const guard = Math.max(w, h) * 2.0;
     return {
       x: clamp(w / 2 + (cx / z) * sx, -guard, w + guard),
       y: clamp(h / 2 - (cy / z) * sy, -guard, h + guard),
       z,
+      rawZ: cz,
+      clipped: cz <= nearZ,
     };
+  }
+
+  function sceneItemVisibilityAlpha(item, points = []) {
+    if (editor.mode !== "pano" || isStickerItem(item)) return 1;
+    const depths = points
+      .map((point) => Number(point?.rawZ ?? point?.z))
+      .filter((z) => Number.isFinite(z));
+    if (!depths.length) return 1;
+    return smoothstep(0.035, 0.2, Math.min(...depths));
   }
 
   function buildSceneItemGeom(item) {
     const centerDir = yawPitchToDir(Number(item.yaw_deg || 0), Number(item.pitch_deg || 0));
     const frameShot = editor.mode === "frame" ? getActiveCutoutShot() : null;
     const frameRect = frameShot ? getFrameViewRect(frameShot) : null;
+    const clipBehind = editor.mode === "pano" && (isStickerItem(item) || isShotItem(item));
+    const projectOptions = clipBehind ? { clipBehind: true } : null;
     const center = (() => {
-      return projectSceneItemDir(centerDir, null, frameShot, frameRect);
+      return projectSceneItemDir(centerDir, null, frameShot, frameRect, projectOptions);
     })();
     if (!center) return { visible: false };
     const frame = getStickerFrame(item);
     const cornersDir = stickerCornersDir(item);
     const corners = cornersDir
-      .map((d) => projectSceneItemDir(d, center.x, frameShot, frameRect))
+      .map((d) => projectSceneItemDir(d, center.x, frameShot, frameRect, projectOptions))
       .filter((p) => Number.isFinite(p?.x) && Number.isFinite(p?.y));
     if (corners.length < 4) return { visible: false };
     const rotateStemBaseDir = stickerDirFromFrame(frame, 0, frame.tanY);
     const rotateHandleDir = stickerDirFromFrame(frame, 0, frame.tanY + Math.max(frame.tanY * 0.43, 0.053));
-    const rotateStemBase = projectSceneItemDir(rotateStemBaseDir, center.x, frameShot, frameRect);
+    const rotateStemBase = projectSceneItemDir(rotateStemBaseDir, center.x, frameShot, frameRect, projectOptions);
     if (!rotateStemBase) return { visible: false };
-    const rotateHandleHint = projectSceneItemDir(rotateHandleDir, rotateStemBase?.x ?? center.x, frameShot, frameRect);
+    const rotateHandleHint = projectSceneItemDir(rotateHandleDir, rotateStemBase?.x ?? center.x, frameShot, frameRect, projectOptions);
     const handleDx = (rotateHandleHint?.x ?? rotateStemBase.x) - rotateStemBase.x;
     const handleDy = (rotateHandleHint?.y ?? rotateStemBase.y) - rotateStemBase.y;
     const handleLen = Math.hypot(handleDx, handleDy) || 1;
@@ -5251,11 +5318,23 @@ async function showEditor(node, type, options = {}) {
       x: rotateStemBase.x + (handleDx / handleLen) * 30,
       y: rotateStemBase.y + (handleDy / handleLen) * 30,
     };
-    const topEdgeCenter = projectSceneItemDir(stickerDirFromFrame(frame, 0, frame.tanY), center.x, frameShot, frameRect);
-    const rightEdgeCenter = projectSceneItemDir(stickerDirFromFrame(frame, frame.tanX, 0), center.x, frameShot, frameRect);
-    const bottomEdgeCenter = projectSceneItemDir(stickerDirFromFrame(frame, 0, -frame.tanY), center.x, frameShot, frameRect);
-    const leftEdgeCenter = projectSceneItemDir(stickerDirFromFrame(frame, -frame.tanX, 0), center.x, frameShot, frameRect);
+    const topEdgeCenter = projectSceneItemDir(stickerDirFromFrame(frame, 0, frame.tanY), center.x, frameShot, frameRect, projectOptions);
+    const rightEdgeCenter = projectSceneItemDir(stickerDirFromFrame(frame, frame.tanX, 0), center.x, frameShot, frameRect, projectOptions);
+    const bottomEdgeCenter = projectSceneItemDir(stickerDirFromFrame(frame, 0, -frame.tanY), center.x, frameShot, frameRect, projectOptions);
+    const leftEdgeCenter = projectSceneItemDir(stickerDirFromFrame(frame, -frame.tanX, 0), center.x, frameShot, frameRect, projectOptions);
     if (!topEdgeCenter || !rightEdgeCenter || !bottomEdgeCenter || !leftEdgeCenter) return { visible: false };
+    const projectedPoints = [
+      center,
+      ...corners,
+      rotateStemBase,
+      rotateHandleHint,
+      topEdgeCenter,
+      rightEdgeCenter,
+      bottomEdgeCenter,
+      leftEdgeCenter,
+    ];
+    if (clipBehind && !projectedPoints.some((point) => Number(point?.rawZ ?? point?.z) > 1e-4)) return { visible: false };
+    const visibilityAlpha = sceneItemVisibilityAlpha(item, projectedPoints);
     const edgeMidpoints = [
       {
         edge: "top",
@@ -5293,6 +5372,7 @@ async function showEditor(node, type, options = {}) {
       rotateStemBase: { x: rotateStemBase.x, y: rotateStemBase.y },
       rotateHandle,
       topEdge: { a: 0, b: 1 },
+      visibilityAlpha,
       visible: true,
     };
   }
@@ -5505,6 +5585,10 @@ async function showEditor(node, type, options = {}) {
   function drawCameraFrameBody(geom, selected, locked) {
     const corners = Array.isArray(geom?.corners) ? geom.corners : [];
     if (corners.length < 4) return;
+    const visibilityAlpha = clamp(Number(geom?.visibilityAlpha ?? 1), 0, 1);
+    if (visibilityAlpha <= 0.01) return;
+    const prevAlpha = ctx.globalAlpha;
+    ctx.globalAlpha = prevAlpha * visibilityAlpha;
     const accent = locked
       ? "rgba(255, 116, 116, 0.96)"
       : (selected ? "rgba(255, 221, 87, 0.98)" : "rgba(255, 214, 64, 0.92)");
@@ -5512,8 +5596,6 @@ async function showEditor(node, type, options = {}) {
       ? "rgba(255, 89, 89, 0.08)"
       : (selected ? "rgba(255, 221, 87, 0.08)" : "rgba(255, 214, 64, 0.05)");
     const edgeStroke = selected ? 3.2 : 2.6;
-    const bracketStroke = selected ? 4.4 : 3.4;
-    const cornerLen = selected ? 24 : 20;
     traceQuad(ctx, corners);
     ctx.fillStyle = fill;
     ctx.fill();
@@ -5523,26 +5605,8 @@ async function showEditor(node, type, options = {}) {
 
     ctx.save();
     ctx.strokeStyle = accent;
-    ctx.lineWidth = bracketStroke;
+    ctx.lineWidth = selected ? 3.2 : 2.6;
     ctx.lineCap = "round";
-    for (let i = 0; i < 4; i += 1) {
-      const current = corners[i];
-      const prev = corners[(i + 3) % 4];
-      const next = corners[(i + 1) % 4];
-      const vx0 = current.x - prev.x;
-      const vy0 = current.y - prev.y;
-      const len0 = Math.hypot(vx0, vy0) || 1;
-      const vx1 = next.x - current.x;
-      const vy1 = next.y - current.y;
-      const len1 = Math.hypot(vx1, vy1) || 1;
-      ctx.beginPath();
-      ctx.moveTo(current.x, current.y);
-      ctx.lineTo(current.x - (vx0 / len0) * cornerLen, current.y - (vy0 / len0) * cornerLen);
-      ctx.moveTo(current.x, current.y);
-      ctx.lineTo(current.x + (vx1 / len1) * cornerLen, current.y + (vy1 / len1) * cornerLen);
-      ctx.stroke();
-    }
-
     const edgeMidpoints = Array.isArray(geom?.edgeMidpoints) && geom.edgeMidpoints.length >= 4
       ? geom.edgeMidpoints
       : [
@@ -5551,14 +5615,16 @@ async function showEditor(node, type, options = {}) {
         { edge: "bottom", x: (corners[2].x + corners[3].x) * 0.5, y: (corners[2].y + corners[3].y) * 0.5 },
         { edge: "left", x: (corners[3].x + corners[0].x) * 0.5, y: (corners[3].y + corners[0].y) * 0.5 },
       ];
-    const center = {
-      x: (corners[0].x + corners[1].x + corners[2].x + corners[3].x) * 0.25,
-      y: (corners[0].y + corners[1].y + corners[2].y + corners[3].y) * 0.25,
-    };
+    const oppositeEdge = { top: "bottom", right: "left", bottom: "top", left: "right" };
     const indicatorLen = selected ? 12 : 9;
     edgeMidpoints.forEach((mid) => {
-      const vx = center.x - mid.x;
-      const vy = center.y - mid.y;
+      const opposite = edgeMidpoints.find((candidate) => candidate?.edge === oppositeEdge[mid?.edge]);
+      const target = opposite || {
+        x: (corners[0].x + corners[1].x + corners[2].x + corners[3].x) * 0.25,
+        y: (corners[0].y + corners[1].y + corners[2].y + corners[3].y) * 0.25,
+      };
+      const vx = target.x - mid.x;
+      const vy = target.y - mid.y;
       const len = Math.hypot(vx, vy) || 1;
       ctx.beginPath();
       ctx.moveTo(mid.x, mid.y);
@@ -5566,16 +5632,19 @@ async function showEditor(node, type, options = {}) {
       ctx.stroke();
     });
     ctx.restore();
+    ctx.globalAlpha = prevAlpha;
   }
 
   function drawObjectBody(item, geom, selected, locked) {
+    const visibilityAlpha = clamp(Number(geom?.visibilityAlpha ?? 1), 0, 1);
+    if (visibilityAlpha <= 0.01) return;
     if (isShotItem(item)) {
       drawCameraFrameBody(geom, selected, locked);
       return;
     }
     if (isStickerItem(item)) {
       const prevAlpha = ctx.globalAlpha;
-      ctx.globalAlpha = getStickerDisplayAlpha(item);
+      ctx.globalAlpha = prevAlpha * getStickerDisplayAlpha(item) * visibilityAlpha;
       if (editor.mode === "frame") {
         ctx.strokeStyle = selected
           ? "rgba(250, 250, 250, 0.9)"
@@ -5590,6 +5659,8 @@ async function showEditor(node, type, options = {}) {
       return;
     }
 
+    const prevAlpha = ctx.globalAlpha;
+    ctx.globalAlpha = prevAlpha * visibilityAlpha;
     ctx.fillStyle = selected
       ? "rgba(0, 112, 243, 0.24)"
       : (locked ? "rgba(255, 89, 89, 0.12)" : "rgba(255, 255, 255, 0.12)");
@@ -5601,6 +5672,7 @@ async function showEditor(node, type, options = {}) {
     ctx.lineWidth = selected ? 2.8 : 1.9;
     traceQuad(ctx, geom.corners);
     ctx.stroke();
+    ctx.globalAlpha = prevAlpha;
   }
 
   function drawSelectedObjectAffordances(item, geom, accent) {
@@ -5666,11 +5738,16 @@ async function showEditor(node, type, options = {}) {
       if (type !== "stickers" && !g.visible) {
         continue;
       }
+      const visibilityAlpha = clamp(Number(g?.visibilityAlpha ?? 1), 0, 1);
+      if (visibilityAlpha <= 0.01) continue;
       drawObjectBody(item, g, selected, itemLocked);
 
       if (selected && g.visible) {
         const accent = itemLocked ? "#ff4d4f" : ((itemIsSticker && isExternalSticker(item)) ? "#f59e0b" : "#0070f3");
+        const prevAlpha = ctx.globalAlpha;
+        ctx.globalAlpha = prevAlpha * visibilityAlpha;
         drawSelectedObjectAffordances(item, g, accent);
+        ctx.globalAlpha = prevAlpha;
       }
     }
 
@@ -6193,7 +6270,7 @@ async function showEditor(node, type, options = {}) {
     // Root treatment: the ERP paint/mask workspace is its own coordinate space.
     // It must not inherit arbitrary connected-image dimensions, otherwise non-ERP
     // inputs can distort all panorama paint rendering.
-    const presetWidth = Math.max(1, Number(state?.output_preset || 2048));
+    const presetWidth = Math.max(1, resolveEditorOutputPresetWidth(Number(state?.output_preset || 2048)));
     return {
       kind: "ERP_GLOBAL",
       width: presetWidth,
@@ -7880,7 +7957,7 @@ async function showEditor(node, type, options = {}) {
     if (readOnly) return;
     state.projection_model = "pinhole_rectilinear";
     state.alpha_mode = "straight";
-    if (presetWidget) state.output_preset = parseOutputPresetValue(presetWidget.value, Number(state.output_preset || 2048));
+    if (presetWidget) state.output_preset = resolveEditorOutputPresetWidth(Number(state.output_preset || 2048));
     if (coverageWidget) state.coverage = normalizeCoverageValue(coverageWidget.value);
     if (bgWidget) state.bg_color = String(bgWidget.value || state.bg_color || "#00ff00");
     commitState();
@@ -9037,10 +9114,33 @@ async function showEditor(node, type, options = {}) {
       uiState.selectionMenu = { visible: false, left: 0, top: 0, items: [] };
       return;
     }
+
+    const placeSelectionMenu = (menuW, menuH, { requireFitsBelow = true } = {}) => {
+      const pad = 14;
+      const minX = Number(model.anchor?.minX);
+      const maxX = Number(model.anchor?.maxX);
+      const maxY = Number(model.anchor?.maxY);
+      if (![minX, maxX, maxY].every(Number.isFinite)) return null;
+      const maxLeft = Math.max(pad, canvas.width - menuW - pad);
+      const x = clamp(((minX + maxX) * 0.5) - menuW * 0.5, pad, maxLeft);
+      const y = maxY + 18;
+      if (!Number.isFinite(x) || !Number.isFinite(y)) return null;
+      if (requireFitsBelow && y + menuH > canvas.height - pad) return null;
+      return { left: x, top: y };
+    };
+
+    const estimatedW = Math.max(1, Number(editor.menuSize?.w || 220));
+    const estimatedH = Math.max(1, Number(editor.menuSize?.h || 40));
+    const initialPlacement = placeSelectionMenu(estimatedW, estimatedH, { requireFitsBelow: false });
+    if (!initialPlacement) {
+      uiState.selectionMenu = { visible: false, left: 0, top: 0, items: [] };
+      return;
+    }
+
     uiState.selectionMenu = {
       visible: true,
-      left: uiState.selectionMenu?.left ?? model.left ?? 0,
-      top: uiState.selectionMenu?.top ?? model.top ?? 0,
+      left: initialPlacement.left,
+      top: initialPlacement.top,
       items: model.items,
     };
     requestAnimationFrame(() => {
@@ -9048,15 +9148,14 @@ async function showEditor(node, type, options = {}) {
       const rect = selectionMenu.getBoundingClientRect();
       const menuW = Math.round(Number(rect?.width || 0)) || 220;
       const menuH = Math.round(Number(rect?.height || 0)) || 40;
-      const pad = 14;
-      let x = clamp((Number(model.anchor?.minX || 0) + Number(model.anchor?.maxX || 0)) * 0.5 - menuW * 0.5, pad, canvas.width - menuW - pad);
-      let y = Number(model.anchor?.maxY || 0) + 18;
-      if (!Number.isFinite(x) || !Number.isFinite(y) || y + menuH > canvas.height - pad) {
+      editor.menuSize = { w: menuW, h: menuH, measured: true };
+      const measuredPlacement = placeSelectionMenu(menuW, menuH);
+      if (!measuredPlacement) {
         uiState.selectionMenu.visible = false;
         return;
       }
-      uiState.selectionMenu.left = x;
-      uiState.selectionMenu.top = y;
+      uiState.selectionMenu.left = measuredPlacement.left;
+      uiState.selectionMenu.top = measuredPlacement.top;
     });
   }
 

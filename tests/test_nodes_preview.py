@@ -86,6 +86,7 @@ class TestNodesPreview(unittest.TestCase):
             Float=_PortFactory("FLOAT"),
             Int=_PortFactory("INT"),
             Mask=_PortFactory("MASK"),
+            Audio=_PortFactory("AUDIO"),
             Hidden=SimpleNamespace(unique_id="UNIQUE_ID"),
         )
         comfy_api_module = ModuleType("comfy_api")
@@ -188,6 +189,22 @@ class TestNodesPreview(unittest.TestCase):
             assert isinstance(res, dict)
             assert res["ui"] == {}
 
+    def test_stickers_auto_180_keeps_overlay_workspace_2_to_1(self):
+        PanoramaStickersNode = self.nodes_module.PanoramaStickersNode
+        bg_erp = SimpleNamespace(shape=(1, 2048, 4096, 3))
+
+        out_w, out_h, output_uses_bg_size = PanoramaStickersNode._resolve_output_size(
+            "auto",
+            "180",
+            bg_erp=bg_erp,
+        )
+        workspace_w, workspace_h = PanoramaStickersNode._resolve_overlay_workspace_size(out_w, out_h, "180")
+
+        assert (out_w, out_h) == (4096, 4096)
+        assert output_uses_bg_size is True
+        assert workspace_w == 4096
+        assert workspace_h == 2048
+
     def test_cutout_node_saves_preview(self):
         PanoramaCutoutNode = self.nodes_module.PanoramaCutoutNode
         assert PanoramaCutoutNode.OUTPUT_NODE is True
@@ -238,7 +255,9 @@ class TestNodesPreview(unittest.TestCase):
 
     def test_preview_frontend_route_is_isolated(self):
         preview_wire = self._web_source_path("pano_node_preview.js").read_text(encoding="utf-8")
+        assert 'from "./pano_preview_previewnode.js"' in preview_wire
         assert "attachPreviewNodeRuntime" in preview_wire
+        assert "attachStandalonePreviewAuto" not in preview_wire
         assert 'mode: "stickers"' not in preview_wire.split("export function attachPreviewNode", 1)[1].split("export function attachStickersNodePreview", 1)[0]
         assert "runtimeAttachPanoramaPreview(target" not in preview_wire
 
@@ -258,6 +277,12 @@ class TestNodesPreview(unittest.TestCase):
         preview_js = self._web_source_path("pano_preview_previewnode.js").read_text(encoding="utf-8")
         assert 'document.createElement("button")' not in preview_js
         assert "getLegacyButtonRect" not in preview_js
+
+    def test_preview_node_prefers_self_rendered_input_over_upstream_preview(self):
+        preview_js = self._web_source_path("pano_preview_previewnode.js").read_text(encoding="utf-8")
+        candidate_block = preview_js.split("const candidateGroups = [", 1)[1].split("];", 1)[0]
+        assert candidate_block.index("selfOutput?.ui?.pano_input_images") < candidate_block.index("outputs?.ui?.pano_input_images")
+        assert candidate_block.index("selfOutput?.pano_input_images") < candidate_block.index("outputs?.pano_input_images")
 
     def test_webgl_preview_renderer_is_present(self):
         gl_renderer_js = self._web_source_path("pano_gl_renderer.js").read_text(encoding="utf-8")
