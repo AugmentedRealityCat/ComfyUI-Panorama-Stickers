@@ -2,7 +2,6 @@
 
 [![LoRA 4B](https://img.shields.io/badge/LoRA-4B-f0b429.svg)](https://huggingface.co/nomadoor/flux-2-klein-4B-360-erp-outpaint-lora)
 [![LoRA 9B](https://img.shields.io/badge/LoRA-9B-f59e0b.svg)](https://huggingface.co/nomadoor/flux-2-klein-9B-360-erp-outpaint-lora)
-[![Live Demo](https://img.shields.io/badge/Spaces-Live%20Demo-orange)](https://huggingface.co/spaces/nomadoor/flux2-klein-4b-erp-outpaint-lora-demo)
 [![Guide](https://img.shields.io/badge/Guide-English-3b82f6.svg)](https://comfyui.nomadoor.net/en/notes/panorama-stickers/)
 
 ComfyUI Panorama Stickers is a small node set and frontend extension for handling 360 equirectangular panoramas inside ComfyUI, including interactive preview, framed cutouts, and compositing.
