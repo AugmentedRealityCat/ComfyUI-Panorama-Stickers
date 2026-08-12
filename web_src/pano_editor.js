@@ -23,6 +23,18 @@ import {
 } from "./pano_gl_scene.js";
 import { drawCutoutProjectionPreview } from "./pano_cutout_projection.js";
 import { createCutoutCamera } from "./pano_cutout_camera.js";
+import {
+  contextHalfExtentsPx,
+  deriveHorizontalFovDeg,
+  aspectFitGateSize,
+  fitFocalPx,
+  fovPairForGate,
+  gateRectFromFocal,
+  getCutoutCameraParams,
+  resolveFrameRollDeg,
+  scaleCutoutFovPair,
+  shortestAngleDeltaRad,
+} from "./pano_cutout_view_math.js";
 import { buildPanoramaCompositeDescriptor } from "./pano_render_descriptors.js";
 import {
   buildEditorSidePanelModel,
@@ -61,6 +73,25 @@ const PAINT_COLOR_SWATCHES = [
 ];
 const DEG2RAD = Math.PI / 180;
 const RAD2DEG = 180 / Math.PI;
+// Fraction of the UI-safe rect the camera gate fills. The gate is always
+// aspect-fitted to that rect, so every aspect gets the largest frame the
+// viewport allows. 1 means "touch the safe edges"; the safe rect already
+// carries the padding that keeps the gate clear of the floating UI.
+const FRAME_GATE_OCCUPANCY = 1;
+const CUTOUT_FRAME_ACCENT = "rgb(255, 221, 87)";
+const FRAME_ROLL_CURSOR = `url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='24' height='24' viewBox='0 0 24 24'%3E%3Cpath d='M19 8a8 8 0 1 0 1 6M19 3v5h-5' fill='none' stroke='black' stroke-opacity='.7' stroke-width='4' stroke-linecap='round' stroke-linejoin='round'/%3E%3Cpath d='M19 8a8 8 0 1 0 1 6M19 3v5h-5' fill='none' stroke='white' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E") 12 12, crosshair`;
+// Vertical room kept for `.pano-floating-right` when measuring the Frame safe
+// rect: its CSS bottom offset plus its collapsed min-height. Deliberately a
+// constant, see measureFrameSafeRect().
+const FLOATING_RIGHT_RESERVED_PX = 64;
+// Breathing room between the camera gate and the surrounding floating UI. The
+// side rails sit right next to the gate edges, so they get a wider gap than the
+// top/bottom chrome.
+const FRAME_GATE_SIDE_GAP_PX = 40;
+const FRAME_GATE_EDGE_GAP_PX = 16;
+const CUTOUT_PANO_DIM_ALPHA = 0.45;
+const CUTOUT_PANO_DIM_TRANSITION_MS = 180;
+const FRAME_ROLL_OVERLAY_TRANSITION_MS = 160;
 const LASSO_CURSOR_SIZE = 24;
 const LASSO_CURSOR_HOTSPOT_X = 4;
 const LASSO_CURSOR_HOTSPOT_Y = 4;
@@ -1738,6 +1769,23 @@ async function showEditor(node, type, options = {}) {
       ...(shellPreset.floatingButtons || []).map((button) => ({ ...button, disabled: false })),
       ...(previewMode ? [{ action: "toggle-fullscreen", label: "Fullscreen", tip: "Fullscreen", pressed: null, icon: ICON.fullscreen, disabled: false }] : []),
     ],
+    frameRail: {
+      visible: false,
+      disabled: readOnly,
+      aspectOpen: false,
+      aspectIcon: ICON.aspect,
+      rotateIcon: ICON.rotate_90,
+      aspectChoices: [],
+      rollKnob: null,
+    },
+    frameRollKnob: {
+      visible: false,
+      disabled: readOnly,
+      rollDeg: 0,
+      displayValue: "0",
+      dragging: false,
+      armed: false,
+    },
     fovValue: "100°",
     outputPreviewToggle: {
       visible: false,
@@ -1874,6 +1922,12 @@ async function showEditor(node, type, options = {}) {
   const side = root.querySelector("[data-side]");
   const videoEl = root.querySelector("[data-video-element]");
   const floatingRightEl = root.querySelector(".pano-floating-right");
+  const floatingTopEl = root.querySelector(".pano-floating-top");
+  const toolRailEl = root.querySelector("[data-tool-rail]");
+  const frameRailEl = root.querySelector("[data-frame-rail]");
+  const frameRollKnobEl = root.querySelector("[data-frame-roll-knob]");
+  const paintDockEl = root.querySelector("[data-paint-dock]");
+  const videoTransportEl = root.querySelector(".pano-video-transport");
   const selectionMenu = root.querySelector("[data-selection-menu]");
   const tooltipEl = root.querySelector("[data-tooltip]");
   const cutoutPreviewHost = root.querySelector("[data-camera-preview-host]");
@@ -1924,7 +1978,7 @@ async function showEditor(node, type, options = {}) {
     uiState.paintDock.colorPopOpen = true;
   };
   root.addEventListener("pointerdown", (ev) => {
-    hideTooltip();
+    if (!ev.target.closest("[data-frame-roll-knob]")) hideTooltip();
     if (ev.target.closest(".pano-picker")) return;
     if (ev.target.closest("[data-paint-color-row]")) return;
     root.querySelectorAll(".pano-picker-pop").forEach((el) => {
@@ -1937,6 +1991,9 @@ async function showEditor(node, type, options = {}) {
       editor.menuSize.measured = false;
       updateSelectionMenu();
       requestDraw();
+    }
+    if (uiState.frameRail?.aspectOpen && !ev.target.closest(".pano-frame-aspect-control")) {
+      uiState.frameRail.aspectOpen = false;
     }
   });
 
@@ -1979,7 +2036,23 @@ async function showEditor(node, type, options = {}) {
     outputPreviewAnimStartTs: 0,
     outputPreviewAnimDurationMs: 180,
     outputPreviewRect: null,
-    frameView: { zoom: 1, panX: 0, panY: 0 },
+    cutoutPanoDimAlpha: 0,
+    cutoutPanoDimFrom: 0,
+    cutoutPanoDimTarget: 0,
+    cutoutPanoDimStartTs: 0,
+    cutoutPanoDimCorners: null,
+    cutoutPanoFrameVisual: null,
+    cutoutPanoFrameAlpha: 0,
+    cutoutPanoFrameFrom: 0,
+    cutoutPanoFrameTarget: 0,
+    cutoutPanoFrameStartTs: 0,
+    frameRollOverlayVisual: null,
+    frameRollOverlayAlpha: 0,
+    frameRollOverlayFrom: 0,
+    frameRollOverlayTarget: 0,
+    frameRollOverlayStartTs: 0,
+    frameWheelCommitTimer: 0,
+    frameWheelChanged: false,
     paintEngine: createPaintEngineManager(),
     paintEngineDescriptorKey: "",
     paintEngineRevisionKey: "",
@@ -1991,6 +2064,7 @@ async function showEditor(node, type, options = {}) {
     _sortedItemsCache: null,
     _strokeGeomCache: new Map(),
     marqueeModifier: false,
+    altModifier: false,
     panelLastValues: null,
     panelWasEnabled: false,
     viewTween: null,
@@ -2021,8 +2095,13 @@ async function showEditor(node, type, options = {}) {
     hasPresentedFrame: false,
     backgroundDirty: true,
     backgroundWasVisible: false,
+    frameSafeRect: null,
+    frameCanvasScale: 1,
     tickErrorSignature: "",
   };
+  const frameGateCssRadius = Number.parseFloat(
+    getComputedStyle(root).getPropertyValue("--pano-float-radius"),
+  ) || 10;
   const setCanvasCursor = (nextCursor) => {
     const cursor = String(nextCursor || "default");
     if (canvas.style.cursor === cursor) return;
@@ -2894,7 +2973,7 @@ async function showEditor(node, type, options = {}) {
       const shot = getActiveCutoutShot();
       const shotId = String(shot?.id || "");
       const rect = shot ? getFrameViewRect(shot) : null;
-      return `${base}:frame:${shotId}:${Math.round(Number(rect?.x || 0))}:${Math.round(Number(rect?.y || 0))}:${Math.round(Number(rect?.w || 0))}:${Math.round(Number(rect?.h || 0))}:${Math.round(Number(editor.frameView?.zoom || 1) * 1000)}:${Math.round(Number(editor.frameView?.panX || 0))}:${Math.round(Number(editor.frameView?.panY || 0))}`;
+      return `${base}:frame:${shotId}:${Math.round(Number(shot?.yaw_deg || 0) * 1000)}:${Math.round(Number(shot?.pitch_deg || 0) * 1000)}:${Math.round(Number(shot?.roll_deg ?? shot?.rot_deg ?? 0) * 1000)}:${Math.round(Number(shot?.hFOV_deg || 0) * 1000)}:${Math.round(Number(shot?.vFOV_deg || 0) * 1000)}:${Math.round(Number(rect?.x || 0))}:${Math.round(Number(rect?.y || 0))}:${Math.round(Number(rect?.w || 0))}:${Math.round(Number(rect?.h || 0))}`;
     }
     return `${base}:view:${Math.round(Number(editor.viewYaw || 0) * 100)}:${Math.round(Number(editor.viewPitch || 0) * 100)}:${Math.round(Number(editor.viewFov || 0) * 100)}:${Math.round(Number(canvas?.width || 0))}:${Math.round(Number(canvas?.height || 0))}`;
   }
@@ -3877,7 +3956,8 @@ async function showEditor(node, type, options = {}) {
     if (type !== "cutout") return;
     const activeShot = getActiveCutoutShot();
     if (!activeShot) return;
-    setSelectedItem(activeShot);
+    editor.selectedId = String(activeShot.id || "") || null;
+    editor.selectedIds = editor.selectedId ? [editor.selectedId] : [];
   }
   function syncLookAtFrameButtonState() {
     if (type !== "cutout") return;
@@ -3891,6 +3971,21 @@ async function showEditor(node, type, options = {}) {
     });
   }
 
+  function syncFloatingViewButtonState() {
+    const frameMode = type === "cutout" && editor.mode === "frame";
+    const gridVisible = !frameMode && !!editor.showGrid;
+    patchUiButton(uiState.floatingButtons, "action", "reset-view", {
+      disabled: readOnly || frameMode,
+    });
+    patchUiButton(uiState.floatingButtons, "action", "toggle-grid", {
+      icon: gridVisible ? ICON.eye : ICON.eye_dashed,
+      pressed: gridVisible ? "true" : "false",
+      label: gridVisible ? "Hide Grid" : "Show Grid",
+      tip: gridVisible ? "Hide grid" : "Show grid",
+      disabled: readOnly || frameMode,
+    });
+  }
+
   function syncViewToggleState() {
     const hasFrame = !!getActiveCutoutShot();
     if (editor.mode === "frame" && !hasFrame) editor.mode = "pano";
@@ -3901,14 +3996,37 @@ async function showEditor(node, type, options = {}) {
       button.visible = !(button.key === "frame" && type !== "cutout");
       button.disabled = button.key === "frame" ? !hasFrame : false;
     });
-    uiState.outputPreviewToggle.visible = type === "cutout" && !!getActiveCutoutShot();
+    const frameShot = type === "cutout" && editor.mode === "frame" ? getActiveCutoutShot() : null;
+    uiState.frameRail.visible = !!frameShot;
+    uiState.frameRail.disabled = readOnly;
+    uiState.frameRollKnob.visible = !!frameShot && !readOnly;
+    uiState.frameRollKnob.disabled = readOnly;
+    uiState.frameRollKnob.rollDeg = Number(frameShot?.roll_deg ?? frameShot?.rot_deg ?? 0);
+    uiState.frameRollKnob.displayValue = formatParamValue(uiState.frameRollKnob.rollDeg);
+    uiState.frameRollKnob.dragging = editor.interaction?.kind === "roll_frame";
+    uiState.frameRollKnob.armed = !!frameShot && editor.altModifier === true;
+    uiState.frameRail.rollKnob = uiState.frameRollKnob;
+    uiState.frameRail.aspectChoices = ["1:1", "4:3", "3:2", "16:9"].map((value) => ({
+      value,
+      label: value,
+      active: !!frameShot && String(getCutoutAspectLabel(frameShot)) === value,
+    }));
+    if (!frameShot) uiState.frameRail.aspectOpen = false;
+    uiState.outputPreviewToggle.visible = type === "cutout" && editor.mode !== "frame" && !!getActiveCutoutShot();
     if (type === "cutout" && uiState.cameraPreview) {
-      uiState.cameraPreview.visible = true;
+      // Frame view already shows the exact output inside the gate, so the
+      // floating preview is redundant there. Keeping it in sync with
+      // drawCutoutOutputPreview() also matters for correctness: its box height
+      // follows the shot aspect, and it is measured by measureFrameSafeRect().
+      // Letting it appear in Frame — even for one frame — feeds the shot back
+      // into the safe rect and therefore into the background scale.
+      uiState.cameraPreview.visible = editor.mode !== "frame";
       uiState.cameraPreview.expanded = !!editor.outputPreviewExpanded;
       uiState.cameraPreview.settled = uiState.cameraPreview.settled === true
         && runtime.pendingStableLayoutFrames <= 0
         && runtime.hasPresentedFrame;
     }
+    syncFloatingViewButtonState();
     if (isPaintCursorEnabled()) updateCursor(editor.pointerPos);
     else setCanvasCursor(editor.mode === "pano" ? "grab" : "default");
   }
@@ -5764,7 +5882,7 @@ async function showEditor(node, type, options = {}) {
 
   function drawObjects() {
     const [usedNu, usedNv] = getMeshDivisions();
-    const selectedItems = getSelectedItems();
+    const selectedItems = editor.mode === "frame" ? [] : getSelectedItems();
     const multiSelected = selectedItems.length > 1;
     const rawList = type === "cutout" ? getCutoutSelectableItemsForDisplay() : getList();
     const orderKey = rawList.map((item) => `${String(item?.id || "")}:${isShotItem(item) ? "frame" : Number(item?.z_index || 0)}`).join("|");
@@ -5777,7 +5895,7 @@ async function showEditor(node, type, options = {}) {
     }
     const items = editor._sortedItemsCache.sorted;
     for (const item of items) {
-      const selected = !multiSelected && isItemSelected(item);
+      const selected = editor.mode !== "frame" && !multiSelected && isItemSelected(item);
       if (editor.mode === "frame" && !selected) continue;
       if (!editor.showObjects && !isShotItem(item)) continue;
       const itemIsSticker = isStickerItem(item);
@@ -5792,6 +5910,11 @@ async function showEditor(node, type, options = {}) {
       }
       const visibilityAlpha = clamp(Number(g?.visibilityAlpha ?? 1), 0, 1);
       if (visibilityAlpha <= 0.01) continue;
+      const frameTransitionAlpha = itemIsShot && type === "cutout" && editor.mode === "pano"
+        ? clamp(Number(editor.cutoutPanoFrameAlpha || 0), 0, 1)
+        : 1;
+      ctx.save();
+      ctx.globalAlpha *= frameTransitionAlpha;
       drawObjectBody(item, g, selected, itemLocked);
 
       if (selected && g.visible) {
@@ -5801,6 +5924,24 @@ async function showEditor(node, type, options = {}) {
         drawSelectedObjectAffordances(item, g, accent);
         ctx.globalAlpha = prevAlpha;
       }
+      ctx.restore();
+    }
+
+    if (type === "cutout" && editor.mode === "pano" && !getActiveCutoutShot()
+      && editor.cutoutPanoFrameVisual && editor.cutoutPanoFrameAlpha > 1e-4) {
+      const visual = editor.cutoutPanoFrameVisual;
+      const fade = clamp(Number(editor.cutoutPanoFrameAlpha || 0), 0, 1);
+      ctx.save();
+      ctx.globalAlpha *= fade;
+      drawCameraFrameBody(visual.geom, visual.selected, visual.locked);
+      if (visual.selected) {
+        drawSelectedObjectAffordances(
+          visual.item,
+          visual.geom,
+          visual.locked ? "#ff4d4f" : "#0070f3",
+        );
+      }
+      ctx.restore();
     }
 
     if (multiSelected) {
@@ -6852,35 +6993,71 @@ async function showEditor(node, type, options = {}) {
 
   function drawFrameViewBackground() {
     const shot = getActiveCutoutShot();
-    const rect = getFrameViewRect(shot);
-    if (!shot || !rect) return false;
+    const layout = getFrameViewLayout(shot);
+    if (!shot || !layout) return false;
+    const rect = { x: layout.x, y: layout.y, w: layout.w, h: layout.h };
+    const focal = Math.max(1, Number(layout.focalPx || 1));
+    const centerX = rect.x + rect.w * 0.5;
+    const centerY = rect.y + rect.h * 0.5;
+    // The context fills the whole canvas. The only bound is the absolute field
+    // angle: a rectilinear continuation degenerates as it approaches 90 degrees
+    // off-axis, so stop there and leave the remainder as neutral background.
+    // Do NOT bound this relative to the gate — that makes the rendered area
+    // shrink together with the gate and leaves unpainted margins.
+    const { halfW, halfH } = contextHalfExtentsPx(
+      { width: canvas.width, height: canvas.height },
+      focal,
+    );
+    const contextRect = { x: centerX - halfW, y: centerY - halfH, w: halfW * 2, h: halfH * 2 };
+    const contextShot = {
+      ...shot,
+      hFOV_deg: 2 * Math.atan(halfW / focal) * RAD2DEG,
+      vFOV_deg: 2 * Math.atan(halfH / focal) * RAD2DEG,
+    };
+    const gateRadius = getFrameGateRadius(rect);
     ctx.save();
-    ctx.fillStyle = "#050505";
+    // Opaque base every frame. Without this the region outside contextRect keeps
+    // last frame's pixels and the passepartout below multiplies it toward black,
+    // which reads as a growing black border around the view.
+    ctx.fillStyle = "#0a0a0a";
     ctx.fillRect(0, 0, canvas.width, canvas.height);
-    ctx.shadowColor = "rgba(0, 0, 0, 0.45)";
-    ctx.shadowBlur = 24;
-    ctx.shadowOffsetX = 0;
-    ctx.shadowOffsetY = 10;
-    ctx.fillStyle = "rgba(14, 14, 14, 1)";
-    ctx.fillRect(rect.x, rect.y, rect.w, rect.h);
-    ctx.restore();
-    ctx.save();
-    ctx.beginPath();
-    ctx.rect(rect.x, rect.y, rect.w, rect.h);
-    ctx.clip();
     const previewQuality = editor.interaction ? "draft" : String(state.ui_settings?.preview_quality || "balanced");
-    const drew = renderCutoutPreviewToContext(ctx, rect, shot, { quality: previewQuality }) === true;
+    const drew = renderCutoutPreviewToContext(ctx, contextRect, contextShot, { quality: previewQuality }) === true;
     if (!drew) {
       ctx.fillStyle = "rgba(255, 255, 255, 0.03)";
-      ctx.fillRect(rect.x, rect.y, rect.w, rect.h);
+      ctx.fillRect(contextRect.x, contextRect.y, contextRect.w, contextRect.h);
     }
     ctx.restore();
     ctx.save();
-    ctx.strokeStyle = "rgba(255, 255, 255, 0.12)";
-    ctx.lineWidth = 1;
-    ctx.strokeRect(rect.x + 0.5, rect.y + 0.5, rect.w - 1, rect.h - 1);
+    ctx.fillStyle = "rgba(0, 0, 0, 0.58)";
+    ctx.beginPath();
+    ctx.rect(0, 0, canvas.width, canvas.height);
+    ctx.roundRect(rect.x, rect.y, rect.w, rect.h, gateRadius);
+    ctx.fill("evenodd");
+    ctx.restore();
+    ctx.save();
+    ctx.strokeStyle = CUTOUT_FRAME_ACCENT;
+    ctx.globalAlpha = 0.62;
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.roundRect(rect.x + 1, rect.y + 1, rect.w - 2, rect.h - 2, Math.max(0, gateRadius - 1));
+    ctx.stroke();
     ctx.restore();
     return true;
+  }
+
+  function getFrameGateRadius(rect) {
+    const radiusScale = Math.max(1e-6, Number(runtime.frameCanvasScale || 1));
+    return Math.min(frameGateCssRadius * radiusScale, Number(rect?.w || 0) * 0.5, Number(rect?.h || 0) * 0.5);
+  }
+
+  function syncFrameRollKnob() {
+    const shot = editor.mode === "frame" ? getActiveCutoutShot() : null;
+    uiState.frameRollKnob.visible = !!shot && !readOnly;
+    uiState.frameRollKnob.rollDeg = Number(shot?.roll_deg ?? shot?.rot_deg ?? 0);
+    uiState.frameRollKnob.displayValue = formatParamValue(uiState.frameRollKnob.rollDeg);
+    uiState.frameRollKnob.dragging = editor.interaction?.kind === "roll_frame";
+    uiState.frameRollKnob.armed = !!shot && editor.altModifier === true;
   }
 
   // Draw dashed outline for the lasso fill region while the user is still drawing.
@@ -6932,13 +7109,105 @@ async function showEditor(node, type, options = {}) {
     ctx.restore();
   }
 
+  function drawFrameRollOverlay() {
+    const visual = editor.frameRollOverlayVisual;
+    const alpha = clamp(Number(editor.frameRollOverlayAlpha || 0), 0, 1);
+    if (editor.mode !== "frame" || !visual?.shot || alpha <= 1e-4) return;
+    const rect = getFrameViewRect(visual.shot);
+    if (!rect) return;
+    const center = { x: rect.x + rect.w * 0.5, y: rect.y + rect.h * 0.5 };
+    const angle = Number(visual.shot.roll_deg ?? visual.shot.rot_deg ?? 0) * DEG2RAD;
+    const radius = Math.hypot(rect.w, rect.h) * 0.55;
+    const dx = Math.cos(angle) * radius;
+    const dy = Math.sin(angle) * radius;
+    ctx.save();
+    ctx.globalAlpha *= alpha;
+    ctx.beginPath();
+    ctx.rect(rect.x, rect.y, rect.w, rect.h);
+    ctx.clip();
+    ctx.translate(center.x, center.y);
+    ctx.rotate(angle);
+    const spacing = Math.max(12, Math.min(rect.w, rect.h) / 6);
+    ctx.beginPath();
+    for (let x = -radius; x <= radius; x += spacing) {
+      ctx.moveTo(x, -radius);
+      ctx.lineTo(x, radius);
+    }
+    for (let y = -radius; y <= radius; y += spacing) {
+      ctx.moveTo(-radius, y);
+      ctx.lineTo(radius, y);
+    }
+    ctx.lineWidth = 1;
+    ctx.strokeStyle = "rgba(255, 255, 255, 0.22)";
+    ctx.stroke();
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+    ctx.beginPath();
+    ctx.moveTo(center.x - dx, center.y - dy);
+    ctx.lineTo(center.x + dx, center.y + dy);
+    ctx.lineWidth = 1.5;
+    ctx.setLineDash([8, 6]);
+    ctx.strokeStyle = "rgba(255, 255, 255, 0.92)";
+    ctx.shadowColor = "rgba(0, 0, 0, 0.8)";
+    ctx.shadowBlur = 3;
+    ctx.stroke();
+    ctx.setLineDash([]);
+    ctx.restore();
+  }
+
+  function getCutoutPanoDimTarget() {
+    if (type !== "cutout" || !getActiveCutoutShot()) return 0;
+    return CUTOUT_PANO_DIM_ALPHA;
+  }
+
+  function drawCutoutPanoPassepartout() {
+    const alpha = clamp(Number(editor.cutoutPanoDimAlpha || 0), 0, 1);
+    if (alpha <= 1e-4 || type !== "cutout" || editor.mode !== "pano") return;
+    const shot = getActiveCutoutShot();
+    const geom = shot ? objectGeom(shot) : null;
+    const liveCorners = Array.isArray(geom?.corners) && geom.corners.length >= 4
+      ? geom.corners.map((point) => ({ x: Number(point.x || 0), y: Number(point.y || 0) }))
+      : null;
+    if (geom?.visible && liveCorners) editor.cutoutPanoDimCorners = liveCorners;
+    if (shot && geom?.visible && liveCorners) {
+      editor.cutoutPanoFrameVisual = {
+        item: shot,
+        geom,
+        selected: isItemSelected(shot),
+        locked: isItemLocked(shot),
+      };
+    }
+    // Cached corners exist only to preserve the hole while a deleted frame
+    // fades out. A live but offscreen frame must produce uniform dimming.
+    const fadingOut = Number(editor.cutoutPanoDimTarget || 0) <= 1e-6;
+    const corners = geom?.visible
+      ? liveCorners
+      : (fadingOut ? (editor.cutoutPanoDimCorners || []) : []);
+    ctx.save();
+    ctx.fillStyle = `rgba(0, 0, 0, ${alpha})`;
+    ctx.beginPath();
+    ctx.rect(0, 0, canvas.width, canvas.height);
+    if (corners.length >= 4) {
+      ctx.moveTo(corners[0].x, corners[0].y);
+      for (let i = 1; i < 4; i += 1) ctx.lineTo(corners[i].x, corners[i].y);
+      ctx.closePath();
+    }
+    ctx.fill("evenodd");
+    ctx.restore();
+  }
+
   function drawScene() {
-    if (editor.mode === "frame") drawFrameViewBackground();
+    if (editor.mode === "frame") {
+      runtime.frameSafeRect = measureFrameSafeRect();
+      drawFrameViewBackground();
+    }
     else if (editor.mode === "unwrap") drawGridUnwrap(false);
     else drawGridPano(false);
+    drawCutoutPanoPassepartout();
     if (type === "cutout") drawCutoutOutputPreview();
     drawObjects();
+    syncFrameRollKnob();
     drawLassoOutlineOverlay();
+    drawFrameRollOverlay();
     uiState.fovValue = `${Math.round(editor.viewFov)}°`;
     if (Math.abs(Number(editor.outputPreviewAnim || 0) - Number(editor.outputPreviewAnimTo || 0)) < 1e-6) {
       updateSelectionMenu();
@@ -7049,6 +7318,79 @@ async function showEditor(node, type, options = {}) {
   function tickFrame(ts = performance.now()) {
     const dt = runtime.lastTickTs > 0 ? Math.max(0.001, (ts - runtime.lastTickTs) / 1000) : (1 / 60);
     runtime.lastTickTs = ts;
+    const activeRoll = editor.mode === "frame" && editor.interaction?.kind === "roll_frame"
+      ? editor.interaction
+      : null;
+    if (activeRoll?.shot) editor.frameRollOverlayVisual = { shot: activeRoll.shot };
+    const nextRollOverlayTarget = activeRoll ? 1 : 0;
+    if (Math.abs(nextRollOverlayTarget - Number(editor.frameRollOverlayTarget || 0)) > 1e-6) {
+      editor.frameRollOverlayFrom = Number(editor.frameRollOverlayAlpha || 0);
+      editor.frameRollOverlayTarget = nextRollOverlayTarget;
+      editor.frameRollOverlayStartTs = ts;
+    }
+    if (Math.abs(Number(editor.frameRollOverlayAlpha || 0) - nextRollOverlayTarget) > 1e-6) {
+      const t = clamp(
+        (ts - Number(editor.frameRollOverlayStartTs || ts)) / FRAME_ROLL_OVERLAY_TRANSITION_MS,
+        0,
+        1,
+      );
+      editor.frameRollOverlayAlpha = lerp(
+        Number(editor.frameRollOverlayFrom || 0),
+        nextRollOverlayTarget,
+        easeInOutCubic(t),
+      );
+      if (t >= 1) {
+        editor.frameRollOverlayAlpha = nextRollOverlayTarget;
+        if (nextRollOverlayTarget === 0) editor.frameRollOverlayVisual = null;
+      }
+      runtime.dirty = true;
+    }
+    const nextDimTarget = getCutoutPanoDimTarget();
+    if (Math.abs(nextDimTarget - Number(editor.cutoutPanoDimTarget || 0)) > 1e-6) {
+      editor.cutoutPanoDimFrom = Number(editor.cutoutPanoDimAlpha || 0);
+      editor.cutoutPanoDimTarget = nextDimTarget;
+      editor.cutoutPanoDimStartTs = ts;
+    }
+    if (Math.abs(Number(editor.cutoutPanoDimAlpha || 0) - nextDimTarget) > 1e-6) {
+      const t = clamp(
+        (ts - Number(editor.cutoutPanoDimStartTs || ts)) / CUTOUT_PANO_DIM_TRANSITION_MS,
+        0,
+        1,
+      );
+      editor.cutoutPanoDimAlpha = lerp(
+        Number(editor.cutoutPanoDimFrom || 0),
+        nextDimTarget,
+        easeInOutCubic(t),
+      );
+      if (t >= 1) editor.cutoutPanoDimAlpha = nextDimTarget;
+      if (t >= 1 && nextDimTarget === 0) {
+        editor.cutoutPanoDimCorners = null;
+      }
+      runtime.dirty = true;
+    }
+    const nextFrameTarget = type === "cutout" && getActiveCutoutShot() ? 1 : 0;
+    if (Math.abs(nextFrameTarget - Number(editor.cutoutPanoFrameTarget || 0)) > 1e-6) {
+      editor.cutoutPanoFrameFrom = Number(editor.cutoutPanoFrameAlpha || 0);
+      editor.cutoutPanoFrameTarget = nextFrameTarget;
+      editor.cutoutPanoFrameStartTs = ts;
+    }
+    if (Math.abs(Number(editor.cutoutPanoFrameAlpha || 0) - nextFrameTarget) > 1e-6) {
+      const t = clamp(
+        (ts - Number(editor.cutoutPanoFrameStartTs || ts)) / CUTOUT_PANO_DIM_TRANSITION_MS,
+        0,
+        1,
+      );
+      editor.cutoutPanoFrameAlpha = lerp(
+        Number(editor.cutoutPanoFrameFrom || 0),
+        nextFrameTarget,
+        easeInOutCubic(t),
+      );
+      if (t >= 1) {
+        editor.cutoutPanoFrameAlpha = nextFrameTarget;
+        if (nextFrameTarget === 0) editor.cutoutPanoFrameVisual = null;
+      }
+      runtime.dirty = true;
+    }
     if (editor.outputPreviewAnim !== editor.outputPreviewAnimTo) {
       const dur = Math.max(1, Number(editor.outputPreviewAnimDurationMs || 180));
       const t = clamp((ts - Number(editor.outputPreviewAnimStartTs || 0)) / dur, 0, 1);
@@ -7209,7 +7551,7 @@ async function showEditor(node, type, options = {}) {
   }
 
   function syncSidePanelControls() {
-    const selected = getSelected();
+    const selected = type === "cutout" && editor.mode === "frame" ? getActiveCutoutShot() : getSelected();
     if (!selected) return;
     editor.panelLastValues = {
       yaw_deg: Number(selected.yaw_deg || 0),
@@ -7237,9 +7579,11 @@ async function showEditor(node, type, options = {}) {
       return;
     }
 
-    const selected = getSelected();
-    const selectedItems = getSelectedItems();
-    const selectedKind = getSelectedKind();
+    const canvasSelected = getSelected();
+    const frameInspectorShot = type === "cutout" && editor.mode === "frame" ? getActiveCutoutShot() : null;
+    const selected = frameInspectorShot || canvasSelected;
+    const selectedItems = frameInspectorShot ? [frameInspectorShot] : getSelectedItems();
+    const selectedKind = frameInspectorShot ? "shot" : getSelectedKind();
     if (selectedItems.length > 1) {
       editor.panelLastValues = editor.panelLastValues || { yaw_deg: 0, pitch_deg: 0, hFOV_deg: 30, vFOV_deg: 30, rot_deg: 0 };
     }
@@ -7264,7 +7608,22 @@ async function showEditor(node, type, options = {}) {
     syncLookAtFrameButtonState();
 
     let selectionPicker = null;
-    if (type === "stickers" || type === "cutout") {
+    if (frameInspectorShot) {
+      const labelData = getSelectionItemLabelData({ item: frameInspectorShot, kind: "shot", label: "Frame" });
+      selectionPicker = {
+        label: "Selection",
+        open: false,
+        disabled: true,
+        currentLabel: labelData.label,
+        currentIcon: labelData.icon || null,
+        items: [{
+          id: String(frameInspectorShot.id || ""),
+          label: labelData.label,
+          icon: labelData.icon || null,
+          active: true,
+        }],
+      };
+    } else if (type === "stickers" || type === "cutout") {
       const items = [{
         id: "",
         label: type === "stickers" ? "No image" : "Nothing selected",
@@ -7870,6 +8229,29 @@ async function showEditor(node, type, options = {}) {
     clearCutoutFrame();
   }
 
+  // Resize the crop to the largest box of `ratio` the viewport allows, without
+  // moving the ERP behind it.
+  //
+  // The presentation scale is `gate size / FOV`, so those three cannot all be
+  // chosen freely. Holding the FOV makes the scale follow the aspect, which is
+  // the background zooming on every aspect switch. Holding the scale and
+  // re-deriving the FOV keeps the background nailed down and still gives each
+  // aspect its maximal frame: landscape fills the width, portrait fills the
+  // height. The captured solid angle changes, which is the right trade for
+  // Frame view — it exists to compose a crop, not to conserve an area.
+  //
+  // Returns false when there is no measured viewport (aspect edits made from
+  // the Panorama tab), so the caller can fall back to a plain FOV derivation.
+  function applyGateAspectAtCurrentScale(selected, ratio) {
+    const safeRect = runtime.frameSafeRect;
+    if (!selected || !safeRect || editor.mode !== "frame") return false;
+    const focal = FRAME_GATE_OCCUPANCY * fitFocalPx(safeRect, selected);
+    const next = fovPairForGate(aspectFitGateSize(safeRect, ratio), focal);
+    selected.hFOV_deg = next.hFOV_deg;
+    selected.vFOV_deg = next.vFOV_deg;
+    return true;
+  }
+
   function applyCutoutAspect(selected, aspect) {
     if (!selected) return;
     const pairs = {
@@ -7892,14 +8274,12 @@ async function showEditor(node, type, options = {}) {
     let [aw, ah] = pairs[String(aspect)] || pairs["1:1"];
     if ((aw >= ah) !== currentLandscape) [aw, ah] = [ah, aw];
     const ratio = aw / ah;
-    const hf = clamp(Number(selected.hFOV_deg || 64), 1, 179);
-    const vf = clamp(Number(selected.vFOV_deg || 40), 1, 179);
-    const span = Math.sqrt(Math.max(1, hf * vf));
-    const targetHF = clamp(span * Math.sqrt(ratio), 1, 179);
-    const targetVF = clamp(span / Math.sqrt(ratio), 1, 179);
-    selected.hFOV_deg = targetHF;
-    selected.vFOV_deg = targetVF;
-    selected.aspect_id = String(aspect);
+    if (!applyGateAspectAtCurrentScale(selected, ratio)) {
+      const vf = clamp(Number(selected.vFOV_deg || 40), 1, 179);
+      selected.vFOV_deg = vf;
+      selected.hFOV_deg = deriveHorizontalFovDeg(vf, ratio);
+    }
+    selected.aspect_id = `${aw}:${ah}`;
   }
 
   function applyCutoutAspectCustom(selected, w, h) {
@@ -7922,22 +8302,41 @@ async function showEditor(node, type, options = {}) {
     let ah = rh;
     if ((aw >= ah) !== currentLandscape) [aw, ah] = [ah, aw];
     const ratio = aw / ah;
-    const hf = clamp(Number(selected.hFOV_deg || 64), 1, 179);
-    const vf = clamp(Number(selected.vFOV_deg || 40), 1, 179);
-    const span = Math.sqrt(Math.max(1, hf * vf));
-    selected.hFOV_deg = clamp(span * Math.sqrt(ratio), 1, 179);
-    selected.vFOV_deg = clamp(span / Math.sqrt(ratio), 1, 179);
-    selected.aspect_id = `${Math.round(rw)}:${Math.round(rh)}`;
+    if (!applyGateAspectAtCurrentScale(selected, ratio)) {
+      const vf = clamp(Number(selected.vFOV_deg || 40), 1, 179);
+      selected.vFOV_deg = vf;
+      selected.hFOV_deg = deriveHorizontalFovDeg(vf, ratio);
+    }
+    selected.aspect_id = `${Math.round(aw)}:${Math.round(ah)}`;
     return true;
   }
 
+  // Portrait/landscape toggle inverts the aspect while holding vFOV, exactly
+  // like the aspect presets do.
+  //
+  // Swapping hFOV and vFOV instead would preserve the captured solid angle, but
+  // a transposed landscape frame is taller than the viewport, so the whole view
+  // has to zoom out to show it. Frame view is about the crop you are composing,
+  // not about conserving the captured area, so hold the vertical extent and
+  // narrow the horizontal one. The gate keeps filling the height, and the ERP
+  // behind it does not move.
   function rotateCutoutAspect90(selected) {
     if (!selected) return;
-    const hf = Math.max(1, Number(selected.hFOV_deg || 90));
-    const vf = Math.max(1, Number(selected.vFOV_deg || 60));
-    selected.hFOV_deg = vf;
-    selected.vFOV_deg = hf;
-    selected.aspect_id = deriveCutoutAspectLabelFromFov(selected);
+    const storedAspect = String(selected.aspect_id || "").trim();
+    const camera = getCutoutCameraParams(selected);
+    const aspect = camera.tanHalfX / Math.max(1e-12, camera.tanHalfY);
+    const inverted = 1 / Math.max(1e-12, aspect);
+    if (!applyGateAspectAtCurrentScale(selected, inverted)) {
+      const vf = clamp(Number(selected.vFOV_deg || 60), 1, 179);
+      selected.vFOV_deg = vf;
+      selected.hFOV_deg = deriveHorizontalFovDeg(vf, inverted);
+    }
+    if (/^\d+:\d+$/.test(storedAspect)) {
+      const [w, h] = storedAspect.split(":");
+      selected.aspect_id = `${h}:${w}`;
+    } else {
+      selected.aspect_id = deriveCutoutAspectLabelFromFov(selected);
+    }
   }
 
   function normalizeDisplayZIndices() {
@@ -8113,30 +8512,87 @@ async function showEditor(node, type, options = {}) {
     return shots.find((item) => String(item?.id || "") === selectedId) || shots[0] || null;
   }
 
-  function getFrameViewRect(shot = getActiveCutoutShot()) {
+  function measureFrameSafeRect() {
+    if (!canvas) return null;
+    const canvasBounds = canvas.getBoundingClientRect?.();
+    const scaleX = Number(canvasBounds?.width || 0) > 0 ? canvas.width / canvasBounds.width : 1;
+    const scaleY = Number(canvasBounds?.height || 0) > 0 ? canvas.height / canvasBounds.height : 1;
+    runtime.frameCanvasScale = Math.min(scaleX, scaleY);
+    let left = 24;
+    let top = 24;
+    const right = Math.max(left + 1, canvas.width - 24);
+    let bottom = Math.max(top + 1, canvas.height - 24);
+    const railBounds = toolRailEl?.getBoundingClientRect?.();
+    const frameRailBounds = frameRailEl?.getBoundingClientRect?.();
+    let reservedSide = 24;
+    if (railBounds && canvasBounds && railBounds.width > 0 && railBounds.height > 0) {
+      reservedSide = Math.max(reservedSide, (railBounds.right - canvasBounds.left) * scaleX + FRAME_GATE_SIDE_GAP_PX);
+    }
+    if (frameRailBounds && canvasBounds && frameRailBounds.width > 0 && frameRailBounds.height > 0
+      && uiState.frameRail?.visible === true) {
+      reservedSide = Math.max(reservedSide, (canvasBounds.right - frameRailBounds.left) * scaleX + FRAME_GATE_SIDE_GAP_PX);
+    }
+    left = Math.max(left, reservedSide);
+    const symmetricRight = Math.min(right, canvas.width - reservedSide);
+    let reservedVertical = 24;
+    const topBounds = floatingTopEl?.getBoundingClientRect?.();
+    if (topBounds && canvasBounds && topBounds.width > 0 && topBounds.height > 0) {
+      reservedVertical = Math.max(reservedVertical, (topBounds.bottom - canvasBounds.top) * scaleY + FRAME_GATE_EDGE_GAP_PX);
+    }
+    // Only measure chrome whose size is independent of the active shot. The
+    // gate scale is derived from this rect, so anything shot-dependent here
+    // closes a feedback loop (shot -> layout -> safe rect -> scale -> the ERP
+    // visibly zooming whenever the aspect changes). `.pano-floating-right`
+    // hosts the cutout camera preview, whose box follows the shot aspect, so it
+    // is reserved by its fixed collapsed height instead of its measured one.
+    [paintDockEl, videoTransportEl].forEach((element) => {
+      if (!element || !canvasBounds) return;
+      const style = getComputedStyle(element);
+      if (style.display === "none" || style.visibility === "hidden" || Number(style.opacity) <= 0) return;
+      const bounds = element.getBoundingClientRect?.();
+      if (!bounds || bounds.width <= 0 || bounds.height <= 0) return;
+      reservedVertical = Math.max(reservedVertical, (canvasBounds.bottom - bounds.top) * scaleY + FRAME_GATE_EDGE_GAP_PX);
+    });
+    if (floatingRightEl && canvasBounds) {
+      const style = getComputedStyle(floatingRightEl);
+      const visible = style.display !== "none" && style.visibility !== "hidden" && Number(style.opacity) > 0;
+      if (visible) {
+        reservedVertical = Math.max(reservedVertical, (FLOATING_RIGHT_RESERVED_PX + FRAME_GATE_EDGE_GAP_PX) * scaleY);
+      }
+    }
+    top = Math.max(top, reservedVertical);
+    bottom = Math.max(top + 1, Math.min(bottom, canvas.height - reservedVertical));
+    return {
+      x: left,
+      y: top,
+      w: Math.max(1, symmetricRight - left),
+      h: Math.max(1, bottom - top),
+    };
+  }
+
+  // The presentation scale is a pure function of the UI-safe rect and the shot:
+  // the gate is always the largest rectangle of the shot's aspect that fits.
+  // There is no stored scale, so nothing can drift, ratchet, or go stale.
+  //
+  // Two useful properties fall out of this and need no special-case code:
+  //   - Aspect changes hold vFOV, and every supported aspect is height-bound in
+  //     a landscape viewport, so the fit is unchanged and the ERP does not move.
+  //   - Wheel scales both tangents by k, which scales the fit by 1/k, so the
+  //     gate keeps its screen size while the ERP behind it zooms.
+  function getFrameViewLayout(shot = getActiveCutoutShot()) {
     if (!shot || !canvas) return null;
-    const outer = {
+    const safeRect = runtime.frameSafeRect || {
       x: 24,
       y: 24,
-      w: Math.max(1, Number(canvas.width || 0) - 48),
-      h: Math.max(1, Number(canvas.height || 0) - 48),
+      w: Math.max(1, canvas.width - 48),
+      h: Math.max(1, canvas.height - 48),
     };
-    const aspect = clamp(deriveCutoutAspectFromFov(shot), 0.1, 10.0);
-    let width = outer.w;
-    let height = Math.max(1, Math.round(width / aspect));
-    if (height > outer.h) {
-      height = outer.h;
-      width = Math.max(1, Math.round(height * aspect));
-    }
-    const zoom = Math.max(0.1, Number(editor.frameView?.zoom || 1));
-    width *= zoom;
-    height *= zoom;
-    return {
-      x: Math.round(outer.x + (outer.w - width) * 0.5 + Number(editor.frameView?.panX || 0)),
-      y: Math.round(outer.y + (outer.h - height) * 0.5 + Number(editor.frameView?.panY || 0)),
-      w: Math.max(1, Math.round(width)),
-      h: Math.max(1, Math.round(height)),
-    };
+    return gateRectFromFocal(safeRect, shot, FRAME_GATE_OCCUPANCY * fitFocalPx(safeRect, shot));
+  }
+
+  function getFrameViewRect(shot = getActiveCutoutShot()) {
+    const layout = getFrameViewLayout(shot);
+    return layout ? { x: layout.x, y: layout.y, w: layout.w, h: layout.h } : null;
   }
 
   function supportsFramePainting() {
@@ -8190,18 +8646,73 @@ async function showEditor(node, type, options = {}) {
 
   function zoomFrameViewAt(anchor, factor) {
     const shot = getActiveCutoutShot();
-    const before = getFrameViewRect(shot);
-    if (!shot || !before) return false;
-    const prevZoom = Math.max(0.1, Number(editor.frameView?.zoom || 1));
-    const nextZoom = clamp(prevZoom * Number(factor || 1), 0.25, 12);
-    if (Math.abs(nextZoom - prevZoom) < 1e-6) return false;
-    const nx = (Number(anchor.x) - before.x) / Math.max(1e-6, before.w);
-    const ny = (Number(anchor.y) - before.y) / Math.max(1e-6, before.h);
-    editor.frameView.zoom = nextZoom;
-    const after = getFrameViewRect(shot);
-    if (!after) return false;
-    editor.frameView.panX += Number(anchor.x) - (after.x + (after.w * nx));
-    editor.frameView.panY += Number(anchor.y) - (after.y + (after.h * ny));
+    if (!shot) return false;
+    const zoomingOut = Number(factor || 1) < 1;
+    const next = scaleCutoutFovPair(shot, 1 / Number(factor || 1));
+    if (!next) return false;
+    // The gate keeps its screen size on its own: scaling both tangents by k
+    // scales the aspect fit by 1/k, so no presentation compensation is needed.
+    // The ERP behind the gate zooms instead, which is the intent.
+    //
+    // The one hard stop is the projection itself: a rectilinear context can no
+    // longer cover the canvas once it nears 90 degrees off-axis, and pushing
+    // past that would reopen dark margins. Refuse the step there.
+    if (zoomingOut) {
+      const projectedFocal = FRAME_GATE_OCCUPANCY * fitFocalPx(
+        runtime.frameSafeRect || { w: canvas.width, h: canvas.height },
+        next,
+      );
+      const reach = contextHalfExtentsPx({ width: canvas.width, height: canvas.height }, projectedFocal);
+      if (reach.halfW < canvas.width * 0.5 - 1e-6 || reach.halfH < canvas.height * 0.5 - 1e-6) return false;
+    }
+    shot.hFOV_deg = next.hFOV_deg;
+    shot.vFOV_deg = next.vFOV_deg;
+    void anchor;
+    editor.frameWheelChanged = true;
+    if (editor.frameWheelCommitTimer) window.clearTimeout(editor.frameWheelCommitTimer);
+    editor.frameWheelCommitTimer = window.setTimeout(() => {
+      editor.frameWheelCommitTimer = 0;
+      if (!editor.frameWheelChanged) return;
+      editor.frameWheelChanged = false;
+      pushHistory();
+      commitAndRefreshNode();
+      updateSidePanel();
+    }, 180);
+    updateSidePanel();
+    return true;
+  }
+
+  function flushFrameWheelCommit() {
+    if (editor.frameWheelCommitTimer) {
+      window.clearTimeout(editor.frameWheelCommitTimer);
+      editor.frameWheelCommitTimer = 0;
+    }
+    if (!editor.frameWheelChanged) return false;
+    editor.frameWheelChanged = false;
+    pushHistory();
+    commitAndRefreshNode();
+    updateSidePanel();
+    return true;
+  }
+
+  function cancelFrameCameraGesture() {
+    const interaction = editor.interaction;
+    if (!interaction?.shot || !interaction.start
+      || (interaction.kind !== "pan_frame" && interaction.kind !== "roll_frame")) return false;
+    const cancelledRoll = interaction.kind === "roll_frame";
+    if (interaction.kind === "pan_frame") {
+      interaction.shot.yaw_deg = interaction.start.yaw_deg;
+      interaction.shot.pitch_deg = interaction.start.pitch_deg;
+    } else {
+      interaction.shot.roll_deg = interaction.start.roll_deg;
+    }
+    if (cancelledRoll) hideTooltip();
+    editor.interaction = null;
+    invalidateLivePaintPreviewCaches();
+    syncViewToggleState();
+    updateSidePanel();
+    updateCursor(editor.pointerPos);
+    requestDraw({ localOnly: true });
     return true;
   }
 
@@ -9117,6 +9628,7 @@ async function showEditor(node, type, options = {}) {
       if (editor.interaction.kind === "paint_stroke" || editor.interaction.kind === "paint_lasso_fill") setCanvasCursor("none");
       else if (editor.interaction.kind === "view") setCanvasCursor("grabbing");
       else if (editor.interaction.kind === "pan_frame") setCanvasCursor("grabbing");
+      else if (editor.interaction.kind === "roll_frame") setCanvasCursor("grabbing");
     else if (editor.interaction.kind === "move" || editor.interaction.kind === "move_multi" || editor.interaction.kind === "move_stroke_group" || editor.interaction.kind === "move_raster_object") setCanvasCursor("move");
       else if (editor.interaction.kind === "scale" || editor.interaction.kind === "scale_x" || editor.interaction.kind === "scale_y" || editor.interaction.kind === "scale_raster_object") setCanvasCursor(editor.interaction.cursor || "nwse-resize");
       else if (editor.interaction.kind === "rotate") setCanvasCursor("grabbing");
@@ -9128,10 +9640,16 @@ async function showEditor(node, type, options = {}) {
       return;
     }
     if (editor.mode === "frame") {
+      if (editor.altModifier && !readOnly) {
+        setCanvasCursor(FRAME_ROLL_CURSOR);
+        return;
+      }
       if (editor.primaryTool !== "cursor") {
         setCanvasCursor("default");
         return;
       }
+      setCanvasCursor("grab");
+      return;
     }
     if (editor.primaryTool === "cursor" && editor.marqueeModifier) {
       setCanvasCursor("default");
@@ -9157,6 +9675,10 @@ async function showEditor(node, type, options = {}) {
 
   function updateSelectionMenu() {
     if (!selectionMenu) return;
+    if (editor.mode === "frame") {
+      uiState.selectionMenu = { visible: false, left: 0, top: 0, items: [] };
+      return;
+    }
     const selected = getSelected();
     const selectedItems = getSelectedItems();
     if ((!selected && selectedItems.length === 0) || editor.interaction) {
@@ -9236,8 +9758,6 @@ async function showEditor(node, type, options = {}) {
     }
     tooltip.target = null;
     uiState.tooltip.visible = false;
-    uiState.tooltip.text = "";
-    uiState.tooltip.variant = "";
   }
 
   function showTooltipFor(el) {
@@ -9256,6 +9776,7 @@ async function showEditor(node, type, options = {}) {
       const mw = Math.round(Number(tooltipEl.getBoundingClientRect()?.width || 0)) || 100;
       const mh = Math.round(Number(tooltipEl.getBoundingClientRect()?.height || 0)) || 24;
       const inToolRail = !!expectedTarget.closest(".pano-floating-left");
+      const inFrameRail = !!expectedTarget.closest(".pano-frame-rail");
       const inFooter = !!expectedTarget.closest(".pano-paint-footer") || !!expectedTarget.closest(".pano-paint-color-float");
       let variant = "";
       let x = rect.left - hostRect.left + rect.width * 0.5 - mw * 0.5;
@@ -9263,6 +9784,12 @@ async function showEditor(node, type, options = {}) {
       if (inToolRail) {
         variant = "tool-rail";
         x = rect.right - hostRect.left + 10;
+        y = rect.top - hostRect.top + rect.height * 0.5 - mh * 0.5;
+        x = clamp(x, pad, Math.max(pad, hostRect.width - mw - pad));
+        y = clamp(y, pad, Math.max(pad, hostRect.height - mh - pad));
+      } else if (inFrameRail) {
+        variant = "frame-rail";
+        x = rect.left - hostRect.left - mw - 10;
         y = rect.top - hostRect.top + rect.height * 0.5 - mh * 0.5;
         x = clamp(x, pad, Math.max(pad, hostRect.width - mw - pad));
         y = clamp(y, pad, Math.max(pad, hostRect.height - mh - pad));
@@ -9309,6 +9836,108 @@ async function showEditor(node, type, options = {}) {
     },
   });
 
+  function applyRollInteractionAngle(interaction, angle, event = {}) {
+    if (interaction?.kind !== "roll_frame" || !interaction.shot) return;
+    interaction.accumulatedRad += shortestAngleDeltaRad(angle, interaction.lastAngle);
+    interaction.lastAngle = angle;
+    const roll = resolveFrameRollDeg(interaction.start.roll_deg, interaction.accumulatedRad, {
+      shiftKey: event.shiftKey,
+      altKey: interaction.altStarted ? false : event.altKey,
+    });
+    interaction.shot.roll_deg = roll;
+    interaction.changed = interaction.changed || Math.abs(interaction.accumulatedRad) > 1e-9;
+    const rollParam = (uiState.sidePanel?.params || []).find((param) => param.key === "roll_deg");
+    if (rollParam) {
+      rollParam.value = roll;
+      rollParam.displayValue = formatParamValue(roll);
+      rollParam.fillPct = ((roll + 180) / 360) * 100;
+    }
+    syncFrameRollKnob();
+    syncFrameRollTooltip(interaction);
+    requestDraw({ localOnly: true });
+  }
+
+  const frameRollAngleForEvent = (event, center) => {
+    const point = screenPos(event);
+    return Math.atan2(point.y - center.y, point.x - center.x);
+  };
+  function syncFrameRollTooltip(interaction) {
+    if (interaction?.kind !== "roll_frame" || !interaction.shot) return;
+    if (tooltip.timer) {
+      clearTimeout(tooltip.timer);
+      tooltip.timer = 0;
+    }
+    tooltip.target = null;
+    const rect = getFrameViewRect(interaction.shot);
+    const canvasBounds = canvas.getBoundingClientRect?.();
+    const hostBounds = stageWrap.getBoundingClientRect?.();
+    if (!rect || !canvasBounds || !hostBounds || canvas.width <= 0 || canvas.height <= 0) return;
+    const scaleX = canvasBounds.width / canvas.width;
+    const scaleY = canvasBounds.height / canvas.height;
+    uiState.tooltip.text = `${formatParamValue(interaction.shot.roll_deg)}°`;
+    uiState.tooltip.left = canvasBounds.left - hostBounds.left + (rect.x + rect.w * 0.5) * scaleX;
+    uiState.tooltip.top = canvasBounds.top - hostBounds.top + (rect.y + rect.h * 0.5) * scaleY + 12;
+    uiState.tooltip.variant = "roll";
+    uiState.tooltip.visible = true;
+  };
+  frameRollKnobEl?.addEventListener("pointerdown", (event) => {
+    if (event.button !== 0 || readOnly || editor.mode !== "frame") return;
+    const shot = getActiveCutoutShot();
+    if (!shot) return;
+    const rect = getFrameViewRect(shot);
+    if (!rect) return;
+    const center = { x: rect.x + rect.w * 0.5, y: rect.y + rect.h * 0.5 };
+    const angle = frameRollAngleForEvent(event, center);
+    editor.interaction = {
+      kind: "roll_frame", shot, center, lastAngle: angle, accumulatedRad: 0,
+      start: { roll_deg: Number(shot.roll_deg ?? shot.rot_deg ?? 0) },
+      changed: false, altStarted: false, source: "knob",
+    };
+    frameRollKnobEl.setPointerCapture?.(event.pointerId);
+    event.preventDefault();
+    syncFrameRollKnob();
+    syncFrameRollTooltip(editor.interaction);
+    requestDraw({ localOnly: true });
+  });
+  frameRollKnobEl?.addEventListener("pointermove", (event) => {
+    if (editor.interaction?.kind !== "roll_frame" || editor.interaction.source !== "knob") return;
+    applyRollInteractionAngle(
+      editor.interaction,
+      frameRollAngleForEvent(event, editor.interaction.center),
+      event,
+    );
+  });
+  const finishKnobRoll = () => {
+    const interaction = editor.interaction;
+    if (interaction?.kind !== "roll_frame" || interaction.source !== "knob") return;
+    if (interaction.changed) {
+      pushHistory();
+      commitAndRefreshNode();
+      updateSidePanel();
+    }
+    editor.interaction = null;
+    hideTooltip();
+    syncViewToggleState();
+    syncFrameRollKnob();
+    requestDraw();
+  };
+  frameRollKnobEl?.addEventListener("pointerup", finishKnobRoll);
+  frameRollKnobEl?.addEventListener("pointercancel", () => cancelFrameCameraGesture());
+  frameRollKnobEl?.addEventListener("lostpointercapture", () => {
+    if (editor.interaction?.source === "knob") cancelFrameCameraGesture();
+  });
+  frameRollKnobEl?.addEventListener("dblclick", (event) => {
+    const shot = editor.mode === "frame" && !readOnly ? getActiveCutoutShot() : null;
+    if (!shot || Math.abs(Number(shot.roll_deg ?? shot.rot_deg ?? 0)) <= 1e-9) return;
+    shot.roll_deg = 0;
+    pushHistory();
+    commitAndRefreshNode();
+    updateSidePanel();
+    syncFrameRollKnob();
+    requestDraw();
+    event.preventDefault();
+  });
+
   canvas.onpointerdown = (e) => {
     const p = screenPos(e);
     setPointerPos(p, true);
@@ -9319,7 +9948,18 @@ async function showEditor(node, type, options = {}) {
     if (e.button === 1) {
       e.preventDefault();
       if (editor.mode === "frame") {
-        editor.interaction = { kind: "pan_frame", last: p };
+        const shot = getActiveCutoutShot();
+        if (!shot || readOnly) return;
+        editor.interaction = {
+          kind: "pan_frame",
+          shot,
+          last: p,
+          start: {
+            yaw_deg: Number(shot.yaw_deg || 0),
+            pitch_deg: Number(shot.pitch_deg || 0),
+          },
+          changed: false,
+        };
       } else {
         const dragPos = editor.mode === "unwrap" ? p : screenPosCss(e);
         editor.interaction = { kind: "view", last: dragPos, lastTs: performance.now() };
@@ -9330,6 +9970,36 @@ async function showEditor(node, type, options = {}) {
       return;
     }
     if (e.button !== 0) return;
+    if (editor.mode === "frame" && e.altKey && !readOnly) {
+      const shot = getActiveCutoutShot();
+      const rect = getFrameViewRect(shot);
+      if (!shot || !rect) return;
+      const center = { x: rect.x + rect.w * 0.5, y: rect.y + rect.h * 0.5 };
+      const startAngle = Math.atan2(p.y - center.y, p.x - center.x);
+      editor.interaction = {
+        kind: "roll_frame", shot, center, lastAngle: startAngle, accumulatedRad: 0,
+        start: { roll_deg: Number(shot.roll_deg ?? shot.rot_deg ?? 0) },
+        changed: false, altStarted: true,
+      };
+      canvas.setPointerCapture(e.pointerId);
+      e.preventDefault();
+      syncFrameRollKnob();
+      requestDraw({ localOnly: true });
+      return;
+    }
+    if (editor.mode === "frame" && editor.primaryTool === "cursor") {
+      const shot = getActiveCutoutShot();
+      if (!shot || readOnly) return;
+      editor.interaction = {
+        kind: "pan_frame", shot, last: p,
+        start: { yaw_deg: Number(shot.yaw_deg || 0), pitch_deg: Number(shot.pitch_deg || 0) },
+        changed: false,
+      };
+      updateCursor(p);
+      canvas.setPointerCapture(e.pointerId);
+      e.preventDefault();
+      return;
+    }
     if (readOnly) {
       if (editor.mode === "pano") {
         const dragPos = screenPosCss(e);
@@ -9710,10 +10380,46 @@ async function showEditor(node, type, options = {}) {
     }
 
     if (it.kind === "pan_frame") {
-      editor.frameView.panX += p.x - it.last.x;
-      editor.frameView.panY += p.y - it.last.y;
+      const layout = getFrameViewLayout(it.shot);
+      if (!layout || !it.shot) return;
+      const invertX = state.ui_settings?.invert_view_x ? -1 : 1;
+      const invertY = state.ui_settings?.invert_view_y ? -1 : 1;
+      const dx = (p.x - it.last.x) * invertX;
+      const dy = (p.y - it.last.y) * invertY;
+      const focal = Math.max(1, Number(layout.focalPx || 1));
+      // Screen delta -> film-plane tangent delta, then undo roll so the drag is
+      // expressed in the camera's unrolled axes. Without this a rolled shot
+      // rotates along the wrong screen direction.
+      const rollRad = Number(it.shot.roll_deg ?? it.shot.rot_deg ?? 0) * DEG2RAD;
+      const cosRoll = Math.cos(rollRad);
+      const sinRoll = Math.sin(rollRad);
+      const tanX = dx / focal;
+      const tanY = -dy / focal;
+      const unrolledX = tanX * cosRoll - tanY * sinRoll;
+      const unrolledY = tanX * sinRoll + tanY * cosRoll;
+      // Yaw is measured around world up, so a horizontal move covers more yaw
+      // the further the camera is pitched. Floor the divisor to keep the drag
+      // usable near the poles.
+      const pitchRad = Number(it.shot.pitch_deg || 0) * DEG2RAD;
+      const cosPitch = Math.max(0.25, Math.abs(Math.cos(pitchRad)));
+      it.shot.yaw_deg = wrapYaw(
+        Number(it.shot.yaw_deg || 0) - (Math.atan(unrolledX) / cosPitch) * RAD2DEG,
+      );
+      it.shot.pitch_deg = clamp(
+        Number(it.shot.pitch_deg || 0) - Math.atan(unrolledY) * RAD2DEG,
+        -90,
+        90,
+      );
+      it.changed = it.changed || Math.abs(dx) > 0 || Math.abs(dy) > 0;
       it.last = p;
       requestDraw({ localOnly: true });
+      return;
+    }
+
+    if (it.kind === "roll_frame") {
+      if (it.source === "knob") return;
+      const angle = Math.atan2(p.y - it.center.y, p.x - it.center.x);
+      applyRollInteractionAngle(it, angle, e);
       return;
     }
 
@@ -9965,6 +10671,7 @@ async function showEditor(node, type, options = {}) {
 
   canvas.onpointerup = () => {
     const ended = editor.interaction;
+    if (ended?.kind === "roll_frame" && ended.source === "knob") return;
     if (editor.interaction?.kind === "paint_stroke" || editor.interaction?.kind === "paint_lasso_fill") {
       invalidateLivePaintPreviewCaches();
       const didCommit = commitPaintInteraction(editor.interaction);
@@ -10017,7 +10724,13 @@ async function showEditor(node, type, options = {}) {
       updateSidePanel();
       updateSelectionMenu();
       requestDraw();
-    } else if (editor.interaction && editor.interaction.kind !== "view" && editor.interaction.kind !== "pan_frame") {
+    } else if (editor.interaction?.kind === "pan_frame" || editor.interaction?.kind === "roll_frame") {
+      if (editor.interaction.changed) {
+        pushHistory();
+        commitAndRefreshNode();
+        updateSidePanel();
+      }
+    } else if (editor.interaction && editor.interaction.kind !== "view") {
       let compositeChanged = false;
       if (editor.interaction.kind === "move_stroke_group"
         || editor.interaction.kind === "scale_stroke_group"
@@ -10052,6 +10765,7 @@ async function showEditor(node, type, options = {}) {
       requestDraw();
     }
     editor.interaction = null;
+    if (ended?.kind === "roll_frame") hideTooltip();
     invalidateLivePaintPreviewCaches();
     if (ended && ended.kind === "view") {
       viewController.endDrag(performance.now());
@@ -10063,6 +10777,7 @@ async function showEditor(node, type, options = {}) {
   };
 
   canvas.onpointercancel = () => {
+    if (cancelFrameCameraGesture()) return;
     if (editor.interaction?.kind === "view") {
       viewController.endDrag(performance.now());
     }
@@ -10077,6 +10792,9 @@ async function showEditor(node, type, options = {}) {
     updateCursor(editor.pointerPos);
     requestDraw({ localOnly: true });
   };
+  canvas.onlostpointercapture = () => {
+    cancelFrameCameraGesture();
+  };
 
   canvas.onauxclick = (e) => {
     if (e.button === 1) e.preventDefault();
@@ -10084,14 +10802,18 @@ async function showEditor(node, type, options = {}) {
 
   canvas.onmousemove = (e) => {
     const p = screenPos(e);
-    setPointerPos(p, true);
+    const pointerChanged = setPointerPos(p, true);
     if (editor.interaction) return;
     updateCursor(p);
+    if (pointerChanged && editor.mode === "frame" && editor.primaryTool === "cursor") {
+      requestDraw({ localOnly: true });
+    }
   };
 
   canvas.onmouseleave = () => {
     setPointerPos(editor.pointerPos, false);
     updateCursor(editor.pointerPos);
+    if (editor.mode === "frame" && editor.primaryTool === "cursor") requestDraw({ localOnly: true });
   };
 
   canvas.onwheel = (e) => {
@@ -10161,8 +10883,9 @@ async function showEditor(node, type, options = {}) {
     patchUiButton(uiState.toolButtons, "value", "redo", { disabled: !canRedo });
   };
   const applySidePanelParam = (key, rawValue, commit = false) => {
-    const selected = getSelected();
-    const selectedKind = getSelectedKind();
+    const frameInspectorShot = type === "cutout" && editor.mode === "frame" ? getActiveCutoutShot() : null;
+    const selected = frameInspectorShot || getSelected();
+    const selectedKind = frameInspectorShot ? "shot" : getSelectedKind();
     if (!selected || selectedKind === "stroke") return;
     const param = (uiState.sidePanel?.params || []).find((item) => item.key === key);
     if (!param || param.enabled === false) return;
@@ -10321,15 +11044,7 @@ async function showEditor(node, type, options = {}) {
     if (!target) return;
     applySidePanelParam(String(target.getAttribute("data-param-key") || ""), target.value, true);
   });
-  const syncGridToggleButton = () => {
-    const visible = !!editor.showGrid;
-    patchUiButton(uiState.floatingButtons, "action", "toggle-grid", {
-      icon: visible ? ICON.eye : ICON.eye_dashed,
-      pressed: visible ? "true" : "false",
-      label: visible ? "Hide Grid" : "Show Grid",
-      tip: visible ? "Hide grid" : "Show grid",
-    });
-  };
+  const syncGridToggleButton = () => syncFloatingViewButtonState();
   syncGridToggleButton();
   root.addEventListener("click", (ev) => {
     if (ev.target?.matches?.("[data-confirm-overlay]")) {
@@ -10341,9 +11056,10 @@ async function showEditor(node, type, options = {}) {
     const viewTarget = ev.target.closest("[data-view]");
     if (viewTarget) {
       if (viewTarget.disabled) return;
+      const previousMode = editor.mode;
       editor.mode = String(viewTarget.getAttribute("data-view") || "pano");
-      if (type === "cutout" && editor.mode === "frame" && getSelected() && isShotItem(getSelected())) {
-        clearSelection({ preservePanelValues: true });
+      if (type === "cutout" && editor.mode === "frame") {
+        if (previousMode !== "frame") runtime.frameSafeRect = null;
         updateSidePanel();
         updateSelectionMenu();
       }
@@ -10512,6 +11228,34 @@ async function showEditor(node, type, options = {}) {
       return;
     }
     if (!readOnly) {
+      if (action === "frame-aspect") {
+        uiState.frameRail.aspectOpen = !uiState.frameRail.aspectOpen;
+        return;
+      }
+      if (action === "frame-aspect-set") {
+        const shot = editor.mode === "frame" ? getActiveCutoutShot() : null;
+        if (!shot) return;
+        applyCutoutAspect(shot, String(actionTarget.getAttribute("data-aspect") || "1:1"));
+        uiState.frameRail.aspectOpen = false;
+        syncSidePanelControls();
+        pushHistory();
+        commitAndRefreshNode();
+        syncViewToggleState();
+        requestDraw();
+        return;
+      }
+      if (action === "frame-rotate-90") {
+        const shot = editor.mode === "frame" ? getActiveCutoutShot() : null;
+        if (!shot) return;
+        rotateCutoutAspect90(shot);
+        uiState.frameRail.aspectOpen = false;
+        syncSidePanelControls();
+        pushHistory();
+        commitAndRefreshNode();
+        syncViewToggleState();
+        requestDraw();
+        return;
+      }
       if (action === "aspect") {
         editor.cutoutAspectOpen = !editor.cutoutAspectOpen;
         editor.menuSize.measured = false;
@@ -10580,10 +11324,12 @@ async function showEditor(node, type, options = {}) {
       }
     }
     if (action === "reset-view") {
+      if (editor.mode === "frame") return;
       startViewTween(0, 0, 100, 180, 680);
       return;
     }
     if (action === "toggle-grid") {
+      if (editor.mode === "frame") return;
       editor.showGrid = !editor.showGrid;
       setNodeGridVisibility(node?.id, editor.showGrid);
       syncGridToggleButton();
@@ -10747,8 +11493,8 @@ async function showEditor(node, type, options = {}) {
     if (nextTarget === target) return;
     hideTooltip();
   });
-  root.addEventListener("pointerdown", () => {
-    hideTooltip();
+  root.addEventListener("pointerdown", (event) => {
+    if (!event.target.closest("[data-frame-roll-knob]")) hideTooltip();
   });
   const updatePaintColorFromSv = (clientX, clientY) => {
     if (!paintColorSv) return;
@@ -10899,6 +11645,7 @@ async function showEditor(node, type, options = {}) {
     if (closeEditorPromise) return closeEditorPromise;
     closeEditorPromise = (async () => {
       _paintLayerSyncRegistry.delete(String(node.id ?? "0"));
+      flushFrameWheelCommit();
       if (!readOnly) commitState();
       if (document.fullscreenElement === overlay) {
         document.exitFullscreen?.().catch(() => { });
@@ -10923,6 +11670,7 @@ async function showEditor(node, type, options = {}) {
       window.removeEventListener("keydown", onDeleteKey, true);
       window.removeEventListener("keydown", onModifierKeyChange, true);
       window.removeEventListener("keyup", onModifierKeyChange, true);
+      window.removeEventListener("blur", onWindowBlur);
       window.removeEventListener("keydown", onUndoRedoKey, true);
       window.removeEventListener("dragenter", onWindowDragEnter, true);
       window.removeEventListener("dragover", onWindowDragOver, true);
@@ -10947,6 +11695,12 @@ async function showEditor(node, type, options = {}) {
   };
   const onEscClose = (ev) => {
     if (ev.key !== "Escape") return;
+    if (cancelFrameCameraGesture()) {
+      ev.preventDefault();
+      ev.stopPropagation();
+      ev.stopImmediatePropagation?.();
+      return;
+    }
     if (editor.fullscreen && document.fullscreenElement === overlay) {
       ev.preventDefault();
       ev.stopPropagation();
@@ -10984,8 +11738,17 @@ async function showEditor(node, type, options = {}) {
   };
   const onModifierKeyChange = (ev) => {
     const next = !!(ev.ctrlKey || ev.metaKey);
-    if (editor.marqueeModifier === next) return;
+    const nextAlt = !!ev.altKey;
+    if (editor.marqueeModifier === next && editor.altModifier === nextAlt) return;
     editor.marqueeModifier = next;
+    editor.altModifier = nextAlt;
+    syncFrameRollKnob();
+    updateCursor(editor.pointerPos);
+  };
+  const onWindowBlur = () => {
+    editor.marqueeModifier = false;
+    editor.altModifier = false;
+    syncFrameRollKnob();
     updateCursor(editor.pointerPos);
   };
   const onUndoRedoKey = (ev) => {
@@ -11007,6 +11770,7 @@ async function showEditor(node, type, options = {}) {
   window.addEventListener("keydown", onDeleteKey, true);
   window.addEventListener("keydown", onModifierKeyChange, true);
   window.addEventListener("keyup", onModifierKeyChange, true);
+  window.addEventListener("blur", onWindowBlur);
   window.addEventListener("keydown", onUndoRedoKey, true);
   overlay.addEventListener("pointerdown", (ev) => {
     if (ev.target === overlay) void closeEditor();
