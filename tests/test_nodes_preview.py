@@ -1,8 +1,16 @@
+import importlib
+import json
 import sys
 import unittest
 from unittest.mock import MagicMock, patch
 from pathlib import Path
 from types import ModuleType, SimpleNamespace
+
+import torch
+
+
+_MISSING = object()
+
 
 class TestNodesPreview(unittest.TestCase):
     def _web_source_path(self, *parts):
@@ -22,8 +30,10 @@ class TestNodesPreview(unittest.TestCase):
         class _Port:
             def __init__(self, kind, name, optional=False, **kwargs):
                 self.kind = kind
+                self.id = name
                 self.name = name
                 self.optional = optional
+                self.options = kwargs.pop("options", None)
                 self.kwargs = kwargs
 
         class _PortFactory:
@@ -45,36 +55,7 @@ class TestNodesPreview(unittest.TestCase):
                 self.is_output_node = bool(kwargs.get("is_output_node", False))
 
         class _ComfyNode:
-            OUTPUT_NODE = False
-            RETURN_TYPES = ()
-
-            def __init_subclass__(cls, **kwargs):
-                super().__init_subclass__(**kwargs)
-                schema = cls.define_schema() if hasattr(cls, "define_schema") else None
-                cls._schema = schema
-                cls.OUTPUT_NODE = bool(getattr(schema, "is_output_node", False))
-                cls.RETURN_TYPES = tuple(getattr(port, "kind", "") for port in getattr(schema, "outputs", []))
-
-            @classmethod
-            def INPUT_TYPES(cls):
-                schema = getattr(cls, "_schema", None)
-                required = {}
-                optional = {}
-                for port in getattr(schema, "inputs", []):
-                    target = optional if getattr(port, "optional", False) else required
-                    target[port.name] = (port.kind,)
-                out = {}
-                if required:
-                    out["required"] = required
-                if optional:
-                    out["optional"] = optional
-                return out
-
-            def run(self, **kwargs):
-                out = self.execute(**kwargs)
-                if isinstance(out, _NodeOutput):
-                    return {"ui": out.ui, "result": out.result}
-                return {"ui": {}, "result": out if isinstance(out, tuple) else (out,)}
+            pass
 
         io_module = SimpleNamespace(
             ComfyNode=_ComfyNode,
@@ -93,16 +74,6 @@ class TestNodesPreview(unittest.TestCase):
         comfy_api_latest_module = ModuleType("comfy_api.latest")
         comfy_api_latest_module.io = io_module
 
-        # Prepare mocks
-        self.mock_torch = MagicMock()
-        self.mock_torch.from_numpy = MagicMock(return_value=MagicMock())
-        self.mock_torch.zeros = MagicMock(return_value=MagicMock())
-
-        self.mock_numpy = MagicMock()
-        self.mock_pil = MagicMock()
-        self.mock_pil_image = MagicMock()
-        self.mock_cv2 = MagicMock()
-
         self.mock_nodes = MagicMock()
         self.mock_preview_image = MagicMock()
         self.mock_nodes.PreviewImage = MagicMock(return_value=self.mock_preview_image)
@@ -110,15 +81,12 @@ class TestNodesPreview(unittest.TestCase):
             "ui": {"images": [{"filename": "test.png", "type": "temp"}]}
         }
 
+        self.package_module = importlib.import_module("comfyui_pano_suite")
+        self.original_nodes_module = sys.modules.pop("comfyui_pano_suite.nodes", None)
+        self.original_package_nodes = self.package_module.__dict__.pop("nodes", _MISSING)
+
         # Create a dictionary of modules to patch
         self.modules_patch = {
-            "torch": self.mock_torch,
-            "torch.nn": MagicMock(),
-            "torch.nn.functional": MagicMock(),
-            "numpy": self.mock_numpy,
-            "PIL": self.mock_pil,
-            "PIL.Image": self.mock_pil_image,
-            "cv2": self.mock_cv2,
             "nodes": self.mock_nodes,
             "comfy_api": comfy_api_module,
             "comfy_api.latest": comfy_api_latest_module,
@@ -128,66 +96,77 @@ class TestNodesPreview(unittest.TestCase):
         self.patcher = patch.dict("sys.modules", self.modules_patch)
         self.patcher.start()
 
-        # Import the module under test *after* patching sys.modules
-        import comfyui_pano_suite.nodes
-        self.nodes_module = comfyui_pano_suite.nodes
-        # Force reload if it was already imported to ensure it picks up mocks if needed,
-        # though standard `import` caches. Since this is a new process/execution context per test file usually,
-        # but locally here we want to be safe. If we were using `reload`, we'd need `importlib`.
-        # However, since we are patching sys.modules, if the module wasn't imported yet, it will use the mocks.
-        # If it WAS imported (e.g. by another test), it might still hold references to real modules if they existed.
-        # But here we assume we are simulating an environment where these might be missing or we just want control.
+        # Import an isolated module instance *after* patching sys.modules.
+        self.nodes_module = importlib.import_module("comfyui_pano_suite.nodes")
 
     def tearDown(self):
+        sys.modules.pop("comfyui_pano_suite.nodes", None)
+        self.package_module.__dict__.pop("nodes", None)
         self.patcher.stop()
+        if self.original_nodes_module is not None:
+            sys.modules["comfyui_pano_suite.nodes"] = self.original_nodes_module
+        if self.original_package_nodes is not _MISSING:
+            self.package_module.nodes = self.original_package_nodes
+
+    def test_preview_tests_use_an_isolated_nodes_module(self):
+        if self.original_nodes_module is not None:
+            assert self.nodes_module is not self.original_nodes_module
 
     def test_stickers_node_saves_preview(self):
         PanoramaStickersNode = self.nodes_module.PanoramaStickersNode
-        assert PanoramaStickersNode.OUTPUT_NODE is True
-        node = PanoramaStickersNode()
-        # Create dummy input tensor
-        dummy_erp = MagicMock()
+        schema = PanoramaStickersNode.define_schema()
+        assert schema.node_id == "PanoramaStickers"
+        assert schema.is_output_node is True
+        assert [(port.id, port.kind) for port in schema.outputs] == [
+            ("cond_erp", "IMAGE"),
+            ("mask", "MASK"),
+        ]
+        dummy_erp = torch.zeros((1, 4, 8, 3), dtype=torch.float32)
 
-        with patch("comfyui_pano_suite.nodes.compose_stickers_to_erp") as mock_compose:
-            mock_compose.return_value = MagicMock()
+        res = PanoramaStickersNode.execute(
+            output_preset="1024",
+            coverage="360",
+            bg_color="#000000",
+            state_json="",
+            bg_erp=dummy_erp,
+        )
 
-            res = node.run(
-                output_preset="1024 x 512",
-                coverage="360",
-                bg_color="#000000",
-                state_json="",
-                bg_erp=dummy_erp
-            )
-
-            # Check if PreviewImage().save_images was called with dummy_erp
-            self.mock_preview_image.save_images.assert_called_once()
-            args, _ = self.mock_preview_image.save_images.call_args
-            assert args[0] is dummy_erp
-
-            # Check return structure
-            assert isinstance(res, dict)
-            assert "ui" in res
-            assert "result" in res
-            assert "pano_input_images" in res["ui"]
-            assert res["ui"]["pano_input_images"] == [{"filename": "test.png", "type": "temp"}]
+        self.mock_preview_image.save_images.assert_called_once()
+        args, _ = self.mock_preview_image.save_images.call_args
+        assert args[0] is dummy_erp
+        assert tuple(res.result[0].shape) == (1, 512, 1024, 3)
+        assert tuple(res.result[1].shape) == (1, 512, 1024)
+        assert res.ui["pano_input_images"] == [{"filename": "test.png", "type": "temp"}]
 
     def test_stickers_node_no_input(self):
         PanoramaStickersNode = self.nodes_module.PanoramaStickersNode
-        node = PanoramaStickersNode()
-        with patch("comfyui_pano_suite.nodes.compose_stickers_to_erp") as mock_compose:
-            mock_compose.return_value = MagicMock()
+        res = PanoramaStickersNode.execute(
+            output_preset="1024",
+            coverage="360",
+            bg_color="#000000",
+            state_json="",
+            bg_erp=None,
+        )
 
-            res = node.run(
-                output_preset="1024 x 512",
-                coverage="360",
-                bg_color="#000000",
-                state_json="",
-                bg_erp=None
-            )
+        self.mock_preview_image.save_images.assert_not_called()
+        assert res.ui == {}
+        assert tuple(res.result[0].shape) == (1, 512, 1024, 3)
+        assert tuple(res.result[1].shape) == (1, 512, 1024)
 
-            self.mock_preview_image.save_images.assert_not_called()
-            assert isinstance(res, dict)
-            assert res["ui"] == {}
+    def test_stickers_node_reports_the_exact_external_state_hash_to_the_editor(self):
+        PanoramaStickersNode = self.nodes_module.PanoramaStickersNode
+        state_raw = '{"kind":"pano_sticker_state","version":1,"pose":{"yaw_deg":12,"pitch_deg":-3,"roll_deg":4,"hFOV_deg":55},"source_aspect":1.5}'
+
+        res = PanoramaStickersNode.execute(
+            output_preset="1024",
+            coverage="360",
+            bg_color="#000000",
+            state_json="",
+            sticker_image=torch.zeros((1, 2, 3, 3), dtype=torch.float32),
+            sticker_state=state_raw,
+        )
+
+        assert res.ui["pano_sticker_input_state_hash"] == ["575416577"]
 
     def test_stickers_auto_180_keeps_overlay_workspace_2_to_1(self):
         PanoramaStickersNode = self.nodes_module.PanoramaStickersNode
@@ -207,51 +186,83 @@ class TestNodesPreview(unittest.TestCase):
 
     def test_cutout_node_saves_preview(self):
         PanoramaCutoutNode = self.nodes_module.PanoramaCutoutNode
-        assert PanoramaCutoutNode.OUTPUT_NODE is True
-        assert PanoramaCutoutNode.RETURN_TYPES == ("IMAGE", "STRING", "MASK")
-        node = PanoramaCutoutNode()
-        dummy_erp = MagicMock()
-        # Setup detach logic for cutout logic in nodes.py which does:
-        # arr = erp_image.detach().cpu().numpy().astype(np.float32)
-        dummy_erp.detach.return_value.cpu.return_value.numpy.return_value.astype.return_value = MagicMock(ndim=4, shape=(1, 512, 1024, 3))
+        schema = PanoramaCutoutNode.define_schema()
+        assert schema.node_id == "PanoramaCutout"
+        assert schema.is_output_node is True
+        assert [(port.id, port.kind) for port in schema.outputs] == [
+            ("rect_image", "IMAGE"),
+            ("sticker_state_json", "STRING"),
+            ("mask", "MASK"),
+        ]
+        dummy_erp = torch.zeros((1, 4, 8, 3), dtype=torch.float32)
 
-        with patch("comfyui_pano_suite.nodes.cutout_from_erp") as mock_cutout:
-            # Return a valid numpy array mock so it doesn't fail
-            mock_cutout.return_value = MagicMock(ndim=3, shape=(512, 512, 3))
+        res = PanoramaCutoutNode.execute(
+            erp_image=dummy_erp,
+            coverage="360",
+            state_json="",
+        )
 
-            res = node.run(
-                erp_image=dummy_erp,
-                coverage="360",
-                state_json=""
-            )
+        self.mock_preview_image.save_images.assert_called_once()
+        assert tuple(res.result[0].shape) == (1, 4, 8, 3)
+        assert res.result[1] == '{"stickers":[],"version":1}'
+        assert tuple(res.result[2].shape) == (1, 4, 8)
+        assert "pano_input_images" in res.ui
 
-            self.mock_preview_image.save_images.assert_called_once()
-            assert isinstance(res, dict)
-            assert "pano_input_images" in res["ui"]
+    def test_cutout_node_preserves_each_frame_in_a_sampled_batch(self):
+        PanoramaCutoutNode = self.nodes_module.PanoramaCutoutNode
+        dummy_erp = torch.stack([
+            torch.zeros((8, 16, 3), dtype=torch.float32),
+            torch.ones((8, 16, 3), dtype=torch.float32),
+        ])
+        state_json = json.dumps({
+            "shots": [{
+                "yaw_deg": 0.0,
+                "pitch_deg": 0.0,
+                "roll_deg": 0.0,
+                "hFOV_deg": 90.0,
+                "vFOV_deg": 60.0,
+            }],
+        })
+
+        res = PanoramaCutoutNode.execute(
+            erp_image=dummy_erp,
+            coverage="360",
+            state_json=state_json,
+            output_megapixels=0.01,
+        )
+
+        assert res.result[0].shape[0] == 2
+        assert torch.allclose(res.result[0][0], torch.zeros_like(res.result[0][0]))
+        assert torch.allclose(res.result[0][1], torch.ones_like(res.result[0][1]))
 
     def test_preview_node_saves_preview(self):
         PanoramaPreviewNode = self.nodes_module.PanoramaPreviewNode
-        node = PanoramaPreviewNode()
-        dummy_erp = MagicMock()
+        dummy_erp = torch.zeros((1, 4, 8, 3), dtype=torch.float32)
 
-        res = node.run(erp_image=dummy_erp, coverage="360")
+        res = PanoramaPreviewNode.execute(erp_image=dummy_erp, coverage="360")
 
         self.mock_preview_image.save_images.assert_called_once()
-        assert isinstance(res, dict)
-        assert "ui" in res
-        assert "pano_input_images" in res["ui"]
+        assert res.result == ()
+        assert "pano_input_images" in res.ui
         # Should NOT have standard images to prevent double preview
-        assert "images" not in res["ui"]
+        assert "images" not in res.ui
 
     def test_preview_node_contract_stable(self):
         PanoramaPreviewNode = self.nodes_module.PanoramaPreviewNode
-        assert PanoramaPreviewNode.OUTPUT_NODE is True
-        assert PanoramaPreviewNode.RETURN_TYPES == ()
-        input_types = PanoramaPreviewNode.INPUT_TYPES()
-        assert "required" in input_types
-        assert set(input_types["required"].keys()) == {"erp_image", "coverage"}
-        assert input_types["required"]["erp_image"] == ("IMAGE",)
-        assert input_types["required"]["coverage"] == ("COMBO",)
+        schema = PanoramaPreviewNode.define_schema()
+        inputs = {port.id: port for port in schema.inputs}
+
+        assert schema.node_id == "PanoramaPreview"
+        assert schema.is_output_node is True
+        assert schema.outputs == []
+        assert [(port.id, port.kind, port.optional) for port in schema.inputs] == [
+            ("erp_image", "IMAGE", False),
+            ("coverage", "COMBO", False),
+            ("fps", "FLOAT", False),
+            ("audio", "AUDIO", True),
+        ]
+        assert inputs["coverage"].options == ["360", "180"]
+        assert schema.hidden == ["UNIQUE_ID"]
 
     def test_preview_frontend_route_is_isolated(self):
         preview_wire = self._web_source_path("pano_node_preview.js").read_text(encoding="utf-8")
@@ -262,16 +273,20 @@ class TestNodesPreview(unittest.TestCase):
         assert "runtimeAttachPanoramaPreview(target" not in preview_wire
 
     def test_preview_editor_attach_is_node_created_only(self):
-        editor_js = self._web_source_path("pano_editor.js").read_text(encoding="utf-8")
-        install_block = editor_js.split("function installStandalonePreviewNode", 1)[1].split("function installStandalonePreviewInstance", 1)[0]
+        lifecycle_js = self._web_source_path("pano_editor_extension.js").read_text(encoding="utf-8")
+        install_block = lifecycle_js.split("function installStandalonePreviewNode", 1)[1].split("function installStandalonePreviewInstance", 1)[0]
         assert "attachPreviewNode(nodeType" not in install_block
-        assert "attachPreviewNode(node, {" in editor_js
+        instance_block = lifecycle_js.split("function installStandalonePreviewInstance", 1)[1].split("export function createPanoEditorExtension", 1)[0]
+        assert "attachPreview(node, {" in instance_block
 
-    def test_editor_buttons_use_widget_route(self):
+    def test_editor_lifecycle_is_delegated_to_the_extension_boundary(self):
         editor_js = self._web_source_path("pano_editor.js").read_text(encoding="utf-8")
-        assert 'ensureActionButtonWidget(node, buttonText, () => showEditor(node, "stickers"))' in editor_js
-        assert 'ensureActionButtonWidget(node, buttonText, () => showEditor(node, "cutout"))' in editor_js
-        assert 'ensureActionButtonWidget(node, "Open Preview", () => showEditor(node, "stickers", { readOnly: true, hideSidebar: false }))' in editor_js
+        assert 'from "./pano_editor_extension.js";' in editor_js
+        assert "createPanoEditorExtension" in editor_js
+        assert "queuePendingStickerOperation" in editor_js
+        assert "app.registerExtension(createPanoEditorExtension({" in editor_js
+        assert "function installEditorButton" not in editor_js
+        assert "function installStandalonePreviewInstance" not in editor_js
 
     def test_preview_runtime_has_no_embedded_button(self):
         preview_js = self._web_source_path("pano_preview_previewnode.js").read_text(encoding="utf-8")
@@ -321,7 +336,7 @@ class TestNodesPreview(unittest.TestCase):
 
     def test_preview_node_grid_is_fallback_only(self):
         preview_js = self._web_source_path("pano_preview_previewnode.js").read_text(encoding="utf-8")
-        assert "if (!img || !img.complete || !(img.naturalWidth || img.width) || width <= 1 || height <= 1) {" in preview_js
+        assert "if (!isRenderableMediaReady(img) || width <= 1 || height <= 1) {" in preview_js
         assert "if (!drawn) {" in preview_js
         assert preview_js.count("drawGrid(ctx, width, height);") == 2
 
@@ -352,17 +367,28 @@ class TestNodesPreview(unittest.TestCase):
         assert "if (pointInRect(p.x, p.y, btn))" not in legacy_block
 
     def test_stickers_without_preview_do_not_force_large_node_size(self):
-        editor_js = self._web_source_path("pano_editor.js").read_text(encoding="utf-8")
-        assert "Without node preview, let LiteGraph size the node from widgets only." in editor_js
+        lifecycle_js = self._web_source_path("pano_editor_extension.js").read_text(encoding="utf-8")
+        stickers_block = lifecycle_js.split('if (matchType === "PanoramaStickers") {', 1)[1].split(
+            'ensureActionButtonWidget(node, buttonText, () => openEditor(node, "cutout"))',
+            1,
+        )[0]
+        preview_block = stickers_block.split("if (enableStickersPreview) {", 1)[1]
+        assert "attachStickers(node" in preview_block
+        assert "node.size = [360, 260]" in preview_block
 
     def test_external_input_preview_contract_strings(self):
+        from comfyui_pano_suite.node_runtime import NodeRuntime
+
         repo_root = Path(__file__).resolve().parent.parent
         editor_js = self._web_source_path("pano_editor.js").read_text(encoding="utf-8")
         nodes_py = (repo_root / "comfyui_pano_suite" / "nodes.py").read_text(encoding="utf-8")
         assert 'pano_sticker_input_images' in editor_js
         assert 'getLinkedInputImage(node, ["sticker_image"])' not in editor_js
-        assert 'pano_sticker_input_images' in nodes_py
+        assert NodeRuntime().preview_contract("stickers_input")["image"] == "pano_sticker_input_images"
         assert 'pano_sticker_input_pose' in nodes_py
+        assert 'pano_sticker_input_state_hash' in nodes_py
+        assert 'comfyMedia.externalStateHash(node, stateRaw)' in editor_js
+        assert 'hashStringSimple(JSON.stringify(inputPose))' not in editor_js
         assert 'sticker_state_json' in nodes_py
 
     def test_paint_rebuild_ui_scaffold_strings(self):
