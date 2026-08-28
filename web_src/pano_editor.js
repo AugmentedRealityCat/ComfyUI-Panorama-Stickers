@@ -18,6 +18,7 @@ import {
   makePanoEditorHistorySnapshot,
   normalizeCoverageValue,
   parsePanoEditorState,
+  retainActiveCutoutShot,
 } from "./pano_editor_state.js";
 import {
   buildCutoutViewParamsFromShot,
@@ -30,6 +31,7 @@ import { drawCutoutProjectionPreview } from "./pano_cutout_projection.js";
 import { createCutoutCamera } from "./pano_cutout_camera.js";
 import {
   contextHalfExtentsPx,
+  createDefaultCutoutShot,
   deriveCutoutAspectFromFov,
   deriveCutoutAspectLabelFromFov,
   deriveHorizontalFovDeg,
@@ -41,9 +43,17 @@ import {
   getCutoutCameraParams,
   normalizeCutoutShotItem,
   resolveFrameRollDeg,
-  scaleCutoutFovPair,
   shortestAngleDeltaRad,
+  stepCutoutFovPairByWheel,
 } from "./pano_cutout_view_math.js";
+import { readWheelDirection } from "./pano_wheel.js";
+import {
+  beginCutoutRollGesture,
+  panCutoutShotByScreenDelta,
+  parseCutoutAspectPair,
+  updateCutoutRollGesture,
+} from "./pano_cutout_node_surface.js";
+import { installPanoSuiteStylesheet } from "./pano_styles.js";
 import { buildPanoramaCompositeDescriptor } from "./pano_render_descriptors.js";
 import {
   buildEditorSidePanelModel,
@@ -70,14 +80,31 @@ import {
 import { createComfyMediaAdapter } from "./pano_comfy_media.js";
 import {
   createPanoEditorExtension,
+  flushPanoStateProducers,
   queuePendingStickerOperation,
 } from "./pano_editor_extension.js";
+import { reconcileExternalStickerState } from "./pano_stickers_node_surface.js";
+import {
+  drawStickerSelectionBoundary,
+  drawStickerSelectionHandles,
+  hitStickerSelectionAffordance,
+} from "./pano_sticker_affordance.js";
+import {
+  decodeStickerImageFile,
+  dragHasStickerImageFile,
+  isStickerImageFile,
+  uploadStickerAssetFile,
+} from "./pano_sticker_file_import.js";
+import {
+  registerExternalStickerSync,
+  runExternalStickerSync,
+} from "./pano_external_sticker_sync.js";
 
 const STATE_WIDGET = "state_json";
 const EXTERNAL_STICKER_ID = "sticker_image_1";
 const EXTERNAL_STICKER_SOURCE_KIND = "external_image";
 const EXTERNAL_STICKER_PREVIEW_KEY = "pano_sticker_input_images";
-const ENABLE_STICKERS_NODE_PREVIEW = false;
+const ENABLE_STICKERS_NODE_PREVIEW = true;
 const PAINT_COLOR_SWATCHES = [
   { id: "green", label: "Green", color: { r: 0, g: 1, b: 0, a: 1 } },
   { id: "red", label: "Red", color: { r: 1, g: 0, b: 0, a: 1 } },
@@ -339,38 +366,6 @@ function expandTri(d0, d1, d2, px = 1.1) {
     return { x: p.x + (vx / ll) * px, y: p.y + (vy / ll) * px };
   };
   return [grow(d0), grow(d1), grow(d2)];
-}
-
-let panoSuiteCssReadyPromise = null;
-
-function installCss() {
-  if (panoSuiteCssReadyPromise) return panoSuiteCssReadyPromise;
-  panoSuiteCssReadyPromise = new Promise((resolve) => {
-    const existing = document.getElementById("pano-suite-style-link");
-    if (existing) {
-      if (existing.dataset.loaded === "true") {
-        resolve();
-        return;
-      }
-      existing.addEventListener("load", () => {
-        existing.dataset.loaded = "true";
-        resolve();
-      }, { once: true });
-      existing.addEventListener("error", () => resolve(), { once: true });
-      return;
-    }
-    const link = document.createElement("link");
-    link.id = "pano-suite-style-link";
-    link.rel = "stylesheet";
-    link.href = new URL("./pano_editor.css", import.meta.url).toString();
-    link.addEventListener("load", () => {
-      link.dataset.loaded = "true";
-      resolve();
-    }, { once: true });
-    link.addEventListener("error", () => resolve(), { once: true });
-    document.head.appendChild(link);
-  });
-  return panoSuiteCssReadyPromise;
 }
 
 const SHARED_UI_SETTINGS_KEY = "pano_suite.ui_settings.v1";
@@ -954,12 +949,13 @@ function logPaintDebug(phase, payload) {
 }
 
 async function showEditor(node, type, options = {}) {
+  await flushPanoStateProducers(node, { tolerateOperationFailure: true });
   comfyMedia.clearFailedLinkedImages(node);
   const readOnly = options?.readOnly === true;
   const hideSidebar = options?.hideSidebar ?? readOnly;
   const previewMode = readOnly;
   const nodeTitle = getEditorNodeTitle(node, type);
-  await installCss();
+  await installPanoSuiteStylesheet();
   const presetWidget = getWidget(node, "output_preset");
   const coverageWidget = getWidget(node, "coverage");
   const bgWidget = getWidget(node, "bg_color");
@@ -1114,7 +1110,7 @@ async function showEditor(node, type, options = {}) {
   const mountHost = document.createElement("div");
   document.body.appendChild(mountHost);
   const onImageFileSelected = ({ intent, file } = {}) => {
-    if (!isImageFile(file)) return;
+    if (!isStickerImageFile(file)) return;
     if (intent === "add") {
       void addImageStickerFromFile(file);
       return;
@@ -1777,20 +1773,7 @@ async function showEditor(node, type, options = {}) {
   }
 
   function dragHasImageFiles(e) {
-    const dt = e?.dataTransfer;
-    if (!dt) return false;
-    if (dt.items && dt.items.length) {
-      for (const item of dt.items) {
-        if (!item || item.kind !== "file") continue;
-        const t = String(item.type || "").toLowerCase();
-        if (!t || t.startsWith("image/")) return true;
-      }
-      return false;
-    }
-    if (dt.files && dt.files.length) {
-      return Array.from(dt.files).some((f) => isImageFile(f));
-    }
-    return false;
+    return dragHasStickerImageFile(e?.dataTransfer);
   }
 
   function setDropCue(on) {
@@ -2524,6 +2507,7 @@ async function showEditor(node, type, options = {}) {
     pushHistory();
     commitAndRefreshNode();
     updateSelectionMenu();
+    updateSidePanel();
     requestDraw();
   }
   function setSelectedItem(item) {
@@ -3066,66 +3050,27 @@ async function showEditor(node, type, options = {}) {
       : null;
     const linkId = input?.link ?? null;
     const previewImg = getExternalStickerPreviewImage(() => {
-      node.__panoExternalStickerSync?.("image-loaded");
+      runExternalStickerSync(node, "image-loaded");
     });
     const inputPose = normalizeInputPoseValue(getNodeUiValue("pano_sticker_input_pose"), null);
     const stateRaw = getLinkedStringInputValue("sticker_state");
     const stateHash = comfyMedia.externalStateHash(node, stateRaw);
-    const stickers = Array.isArray(state.stickers) ? state.stickers : (state.stickers = []);
-    const existingIndex = stickers.findIndex((item) => String(item?.id || "") === EXTERNAL_STICKER_ID);
-    if (linkId == null) {
-      if (existingIndex >= 0) {
-        stickers.splice(existingIndex, 1);
-        if (editor.selectedId === EXTERNAL_STICKER_ID) {
-          editor.selectedId = null;
-          editor.selectedIds = [];
-          state.active.selected_sticker_id = null;
-        }
-        commitAndRefreshNode();
-        updateSidePanel();
-        updateSelectionMenu();
-        requestDraw();
+    const pose = linkId == null ? null : buildExternalInitialPose(inputPose, stateRaw, previewImg);
+    const result = reconcileExternalStickerState(state, {
+      connected: linkId != null,
+      linkId,
+      stateHash,
+      pose,
+      imageWidth: Number(previewImg?.naturalWidth || previewImg?.width || 0),
+      imageHeight: Number(previewImg?.naturalHeight || previewImg?.height || 0),
+    });
+    if (result.changed) {
+      state.stickers = result.state.stickers;
+      state.active = result.state.active;
+      if (linkId == null && editor.selectedId === EXTERNAL_STICKER_ID) {
+        editor.selectedId = null;
+        editor.selectedIds = [];
       }
-      return;
-    }
-    const maxZ = stickers.reduce((acc, item) => Math.max(acc, Number(item?.z_index || 0)), -1);
-    let target = existingIndex >= 0 ? stickers[existingIndex] : null;
-    const sourceChanged = !target
-      || Number(target.source_link_id ?? -1) !== Number(linkId)
-      || String(target.source_state_hash || "") !== stateHash;
-    if (!target) {
-      target = {
-        id: EXTERNAL_STICKER_ID,
-        source_kind: EXTERNAL_STICKER_SOURCE_KIND,
-      };
-      stickers.push(target);
-    }
-    target.id = EXTERNAL_STICKER_ID;
-    target.source_kind = EXTERNAL_STICKER_SOURCE_KIND;
-    target.source_link_id = Number(linkId);
-    target.source_state_hash = stateHash;
-    target.visible = target.visible !== false;
-    let stateChanged = false;
-    if (sourceChanged) {
-      const pose = buildExternalInitialPose(inputPose, stateRaw, previewImg);
-      Object.assign(target, pose, {
-        initial_pose: { ...pose },
-        visible: true,
-        z_index: maxZ + 1,
-      });
-      stateChanged = true;
-    } else if (previewImg && (previewImg.complete || previewImg.naturalWidth || previewImg.width)) {
-      const nextVFov = computeStickerVFov(
-        Number(target.hFOV_deg || 30),
-        Number(previewImg.naturalWidth || previewImg.width || 1),
-        Number(previewImg.naturalHeight || previewImg.height || 1),
-      );
-      if (Math.abs(Number(target.vFOV_deg || 0) - nextVFov) > 1e-6) {
-        target.vFOV_deg = nextVFov;
-        stateChanged = true;
-      }
-    }
-    if (stateChanged) {
       commitAndRefreshNode();
       updateSidePanel();
       updateSelectionMenu();
@@ -3199,14 +3144,15 @@ async function showEditor(node, type, options = {}) {
     });
     const frameShot = type === "cutout" && editor.mode === "frame" ? getActiveCutoutShot() : null;
     uiState.frameRail.visible = !!frameShot;
-    uiState.frameRail.disabled = readOnly;
-    uiState.frameRollKnob.visible = !!frameShot && !readOnly;
-    uiState.frameRollKnob.disabled = readOnly;
+    uiState.frameRail.disabled = readOnly || frameShot?.locked === true;
+    uiState.frameRollKnob.visible = !!frameShot && !readOnly && frameShot.locked !== true;
+    uiState.frameRollKnob.disabled = readOnly || frameShot?.locked === true;
     uiState.frameRollKnob.rollDeg = Number(frameShot?.roll_deg ?? frameShot?.rot_deg ?? 0);
     uiState.frameRollKnob.displayValue = formatParamValue(uiState.frameRollKnob.rollDeg);
     uiState.frameRollKnob.dragging = editor.interaction?.kind === "roll_frame";
     uiState.frameRollKnob.armed = !!frameShot && editor.altModifier === true;
     uiState.frameRail.rollKnob = uiState.frameRollKnob;
+    uiState.frameRail.aspectLabel = frameShot ? getCutoutAspectLabel(frameShot) : "";
     uiState.frameRail.aspectChoices = ["1:1", "4:3", "3:2", "16:9"].map((value) => ({
       value,
       label: value,
@@ -3303,7 +3249,7 @@ async function showEditor(node, type, options = {}) {
     if (stickerOrAssetId && typeof stickerOrAssetId === "object"
       && (isExternalSticker(stickerOrAssetId) || stickerOrAssetId.external === true)) {
       return getExternalStickerPreviewImage(() => {
-        node.__panoExternalStickerSync?.("image-loaded");
+        runExternalStickerSync(node, "image-loaded");
       });
     }
     const assetId = (stickerOrAssetId && typeof stickerOrAssetId === "object")
@@ -3710,29 +3656,6 @@ async function showEditor(node, type, options = {}) {
     if (!surface) return false;
     ctx.drawImage(surface, rect.x, rect.y, rect.w, rect.h);
     return true;
-  }
-
-  async function uploadStickerAssetFile(file, fallbackName = "sticker.png") {
-    const body = new FormData();
-    body.append("image", file);
-    body.append("type", "input");
-    body.append("subfolder", "panorama_stickers");
-    const resp = await api.fetchApi("/upload/image", { method: "POST", body });
-    if (!resp || resp.status !== 200) {
-      throw new Error(`upload failed (${resp?.status || "no-response"})`);
-    }
-    const data = await resp.json();
-    const filename = String(data?.name || "").trim();
-    if (!filename) {
-      throw new Error("upload response missing filename");
-    }
-    return {
-      type: "comfy_image",
-      filename,
-      subfolder: String(data?.subfolder || "panorama_stickers"),
-      storage: String(data?.type || "input"),
-      name: String(file?.name || fallbackName),
-    };
   }
 
   async function uploadCanvasAsPaintLayer(canvas, filename) {
@@ -4882,22 +4805,7 @@ async function showEditor(node, type, options = {}) {
       sampleStickerEdge(item, 3, steps, refX),
     ];
 
-    ctx.strokeStyle = selected ? "rgba(250, 250, 250, 0.9)" : "#71717a";
-    ctx.lineWidth = selected ? 2 : 1;
-    ctx.beginPath();
-    let started = false;
-    for (const edge of edges) {
-      for (const p of edge) {
-        if (!started) {
-          ctx.moveTo(p.x, p.y);
-          started = true;
-        } else {
-          ctx.lineTo(p.x, p.y);
-        }
-      }
-    }
-    ctx.closePath();
-    ctx.stroke();
+    drawStickerSelectionBoundary(ctx, edges, { selected });
   }
 
   function renderModalStickerBodyFallback() {
@@ -5047,6 +4955,10 @@ async function showEditor(node, type, options = {}) {
   }
 
   function drawSelectedObjectAffordances(item, geom, accent) {
+    if (isStickerItem(item)) {
+      drawStickerSelectionHandles(ctx, geom, { accent });
+      return;
+    }
     ctx.fillStyle = accent;
     geom.corners.forEach((p) => { ctx.beginPath(); ctx.arc(p.x, p.y, 6.5, 0, Math.PI * 2); ctx.fill(); });
     if (isShotItem(item)) {
@@ -6254,7 +6166,7 @@ async function showEditor(node, type, options = {}) {
 
   function syncFrameRollKnob() {
     const shot = editor.mode === "frame" ? getActiveCutoutShot() : null;
-    uiState.frameRollKnob.visible = !!shot && !readOnly;
+    uiState.frameRollKnob.visible = !!shot && !readOnly && shot.locked !== true;
     uiState.frameRollKnob.rollDeg = Number(shot?.roll_deg ?? shot?.rot_deg ?? 0);
     uiState.frameRollKnob.displayValue = formatParamValue(uiState.frameRollKnob.rollDeg);
     uiState.frameRollKnob.dragging = editor.interaction?.kind === "roll_frame";
@@ -6804,7 +6716,7 @@ async function showEditor(node, type, options = {}) {
       : { yaw_deg: 0, pitch_deg: 0, hFOV_deg: 90, vFOV_deg: 60, roll_deg: 0, aspect_id: "1:1" });
     const inspectorSelected = selectedKind === "stroke" ? null : selected;
     const effective = inspectorSelected || fallback;
-    const enabled = !!inspectorSelected;
+    const enabled = !!inspectorSelected && !isItemLocked(inspectorSelected);
     editor.panelWasEnabled = enabled;
     syncLookAtFrameButtonState();
 
@@ -6928,28 +6840,14 @@ async function showEditor(node, type, options = {}) {
     });
   }
 
-  function isImageFile(file) {
-    if (!file) return false;
-    const t = String(file.type || "").toLowerCase();
-    if (t.startsWith("image/")) return true;
-    const n = String(file.name || "").toLowerCase();
-    return n.endsWith(".png") || n.endsWith(".jpg") || n.endsWith(".jpeg") || n.endsWith(".webp") || n.endsWith(".gif") || n.endsWith(".bmp");
-  }
-
   async function addImageStickerFromFile(file) {
     if (readOnly) return;
     if (type !== "stickers" && type !== "cutout") return;
-    if (!isImageFile(file)) return;
+    if (!isStickerImageFile(file)) return;
     const aid = uid("asset");
     const operation = queuePendingStickerOperation(node, `add:${aid}`, async () => {
-      const tempUrl = URL.createObjectURL(file);
       try {
-        const img = await new Promise((resolve, reject) => {
-          const i = new Image();
-          i.onload = () => resolve(i);
-          i.onerror = () => reject(new Error("image load failed"));
-          i.src = tempUrl;
-        });
+        const { image: img } = await decodeStickerImageFile(file);
         imageCache.set(aid, img);
         const id = uid("st");
         state.stickers.push({
@@ -6964,16 +6862,18 @@ async function showEditor(node, type, options = {}) {
         });
         setSelectedItem(state.stickers[state.stickers.length - 1]);
         forceCursorTool();
-        pushHistory();
         updateSidePanel();
         updateSelectionMenu();
         requestDraw();
-        const uploaded = await uploadStickerAssetFile(file, String(file.name || aid));
+        const uploaded = await uploadStickerAssetFile(file, {
+          fetchApi: (path, options) => api.fetchApi(path, options),
+        });
         const liveStickers = Array.isArray(state.stickers) ? state.stickers : [];
         const matching = liveStickers.filter((item) => String(item?.asset_id || "") === aid);
         if (!matching.length) return;
         state.assets[aid] = uploaded;
         pruneUnusedAssets();
+        pushHistory();
         commitAndRefreshNode();
         updateSidePanel();
         updateSelectionMenu();
@@ -6985,7 +6885,7 @@ async function showEditor(node, type, options = {}) {
         const removed = liveStickers.filter((item) => String(item?.asset_id || "") === aid);
         if (removed.length) {
           state.stickers = liveStickers.filter((item) => String(item?.asset_id || "") !== aid);
-          if (removed.some((item) => String(item?.id || "") === String(editor.selection?.id || ""))) {
+          if (removed.some((item) => String(item?.id || "") === String(editor.selectedId || ""))) {
             setSelectedItem(null);
           }
           updateSidePanel();
@@ -6994,8 +6894,6 @@ async function showEditor(node, type, options = {}) {
           commitAndRefreshNode();
         }
         throw error;
-      } finally {
-        URL.revokeObjectURL(tempUrl);
       }
     });
     try {
@@ -7014,7 +6912,7 @@ async function showEditor(node, type, options = {}) {
     if (type !== "stickers" && type !== "cutout") return;
     const selected = getSelected();
     if (!selected || !isStickerItem(selected) || isExternalSticker(selected)) return;
-    if (!isImageFile(file)) return;
+    if (!isStickerImageFile(file)) return;
     const selectedId = String(selected.id || "");
     const nextAssetId = uid("asset");
     const operation = queuePendingStickerOperation(node, `replace:${selectedId}:${nextAssetId}`, async () => {
@@ -7027,14 +6925,8 @@ async function showEditor(node, type, options = {}) {
       const previousCrop = liveSelected.crop && typeof liveSelected.crop === "object"
         ? { ...liveSelected.crop }
         : null;
-      const tempUrl = URL.createObjectURL(file);
       try {
-        const img = await new Promise((resolve, reject) => {
-          const i = new Image();
-          i.onload = () => resolve(i);
-          i.onerror = () => reject(new Error("image load failed"));
-          i.src = tempUrl;
-        });
+        const { image: img } = await decodeStickerImageFile(file);
         imageCache.set(nextAssetId, img);
         liveSelected.asset_id = nextAssetId;
         liveSelected.vFOV_deg = computeStickerVFov(
@@ -7044,16 +6936,18 @@ async function showEditor(node, type, options = {}) {
         );
         liveSelected.crop = { x0: 0, y0: 0, x1: 1, y1: 1 };
         markObjectVisualsDirty();
-        pushHistory();
         updateSidePanel();
         updateSelectionMenu();
         requestDraw();
-        const uploaded = await uploadStickerAssetFile(file, String(file.name || nextAssetId));
+        const uploaded = await uploadStickerAssetFile(file, {
+          fetchApi: (path, options) => api.fetchApi(path, options),
+        });
         const currentSticker = (Array.isArray(state.stickers) ? state.stickers : [])
           .find((item) => String(item?.id || "") === selectedId) || null;
         if (!currentSticker || String(currentSticker.asset_id || "") !== nextAssetId) return;
         state.assets[nextAssetId] = uploaded;
         pruneUnusedAssets();
+        pushHistory();
         commitAndRefreshNode();
         updateSidePanel();
         updateSelectionMenu();
@@ -7075,8 +6969,6 @@ async function showEditor(node, type, options = {}) {
         updateSelectionMenu();
         requestDraw();
         throw error;
-      } finally {
-        URL.revokeObjectURL(tempUrl);
       }
     });
     try {
@@ -7109,7 +7001,9 @@ async function showEditor(node, type, options = {}) {
         const ext = String(blob.type || "image/png").split("/")[1] || "png";
         const name = String(asset?.name || `${assetId}.${ext}`);
         const file = new File([blob], name, { type: blob.type || "image/png" });
-        const uploaded = await uploadStickerAssetFile(file, name);
+        const uploaded = await uploadStickerAssetFile(file, {
+          fetchApi: (path, options) => api.fetchApi(path, options),
+        });
         state.assets[assetId] = {
           ...uploaded,
           w: Number(asset?.w || 0),
@@ -7141,33 +7035,11 @@ async function showEditor(node, type, options = {}) {
       requestDraw({ cause: "cutout_frame" });
       return;
     }
-    const bgImg = getConnectedErpImage();
-    const bgReady = isDecodedImageReady(bgImg);
-    const srcWidth = Math.max(1, Number(
-      (bgReady ? (bgImg?.videoWidth || bgImg?.naturalWidth || bgImg?.width) : 0)
-      || canvas?.width
-      || 1
-    ));
-    const srcHeight = Math.max(1, Number(
-      (bgReady ? (bgImg?.videoHeight || bgImg?.naturalHeight || bgImg?.height) : 0)
-      || canvas?.height
-      || 1
-    ));
-    const aspect = Math.max(0.1, srcWidth / srcHeight);
-    // New frames should appear clearly inside the current panorama view,
-    // not consume the whole visible area on spawn.
-    const baseViewFov = clamp(Number(editor.viewFov || 90), 1, 179);
-    const hFOV = clamp(Math.min(42, baseViewFov * 0.42), 8, 96);
-    const vFOV = clamp(RAD2DEG * (2 * Math.atan(Math.tan(hFOV * DEG2RAD * 0.5) / Math.max(0.1, aspect))), 6, 72);
-    const shot = normalizeCutoutShotItem({
+    const shot = createDefaultCutoutShot({
       id: `frame_${Date.now().toString(36)}`,
-      label: "Frame 1",
-      yaw_deg: wrapYaw(Number(editor.viewYaw || 0)),
-      pitch_deg: clamp(Number(editor.viewPitch || 0), -89.9, 89.9),
-      roll_deg: 0,
-      hFOV_deg: hFOV,
-      vFOV_deg: vFOV,
-      locked: false,
+      yawDeg: wrapYaw(Number(editor.viewYaw || 0)),
+      pitchDeg: Number(editor.viewPitch || 0),
+      viewFovDeg: Number(editor.viewFov || 90),
     });
     state.shots = [shot];
     setSelectedItem(shot);
@@ -7181,8 +7053,7 @@ async function showEditor(node, type, options = {}) {
   }
 
   function clearCutoutFrame() {
-    if (readOnly) return;
-    if (type !== "cutout") return;
+    if (readOnly || type !== "cutout") return;
     state.shots = [];
     editor.selectedId = null;
     editor.selectedIds = [];
@@ -7192,6 +7063,7 @@ async function showEditor(node, type, options = {}) {
     pushHistory();
     commitAndRefreshNode();
     updateSidePanel();
+    updateSelectionMenu();
     requestDraw();
   }
 
@@ -7224,7 +7096,7 @@ async function showEditor(node, type, options = {}) {
       "Clear All Paint Data",
       type === "stickers"
         ? "This will remove all paint, mask, and sticker images in the current node."
-        : "This will remove all paint, mask, cutout frames, and images in the current node.",
+        : "This will remove all paint, mask, and images in the current node. The cutout frame will be preserved.",
       "Clear All",
     );
     if (!ok) return;
@@ -7239,14 +7111,15 @@ async function showEditor(node, type, options = {}) {
       state.active.selected_sticker_id = keptExternalStickers[0]?.id || null;
       pruneUnusedAssets();
     } else {
+      const retained = retainActiveCutoutShot(state.shots, state.active.selected_shot_id);
       state.stickers = keptExternalStickers;
       state.assets = {};
-      state.shots = [];
-      editor.selectedId = null;
-      editor.selectedIds = [];
+      state.shots = retained.shots;
+      editor.selectedId = retained.selectedShotId;
+      editor.selectedIds = editor.selectedId ? [editor.selectedId] : [];
       state.active.selected_sticker_id = null;
-      state.active.selected_shot_id = null;
-      if (editor.mode === "frame") editor.mode = "pano";
+      state.active.selected_shot_id = retained.selectedShotId;
+      if (!retained.selectedShotId && editor.mode === "frame") editor.mode = "pano";
       editor.cutoutAspectOpen = false;
       pruneUnusedAssets();
     }
@@ -7314,6 +7187,7 @@ async function showEditor(node, type, options = {}) {
     const selectedItems = getSelectedItems();
     const selected = getSelected();
     if (!selected && selectedItems.length === 0) return;
+    if (selectedItems.some((item) => isItemLocked(item))) return;
     if (selectedItems.length > 1) {
       const paintStrokeIds = new Set(selectedItems
         .filter((item) => isStrokeGroupItem(item))
@@ -7436,7 +7310,7 @@ async function showEditor(node, type, options = {}) {
   }
 
   function applyCutoutAspect(selected, aspect) {
-    if (!selected) return;
+    if (!selected || selected.locked === true) return;
     const pairs = {
       "1:1": [1, 1],
       "3:2": [3, 2],
@@ -7466,31 +7340,16 @@ async function showEditor(node, type, options = {}) {
   }
 
   function applyCutoutAspectCustom(selected, w, h) {
-    if (!selected) return false;
-    const rw = Math.max(1, Number(w));
-    const rh = Math.max(1, Number(h));
-    if (!Number.isFinite(rw) || !Number.isFinite(rh)) return false;
-    const currentLandscape = (() => {
-      const stored = String(selected.aspect_id || "").trim();
-      if (/^\d+:\d+$/.test(stored)) {
-        const [sw, sh] = stored.split(":").map((value) => Number(value));
-        if (Number.isFinite(sw) && Number.isFinite(sh)) return sw >= sh;
-      }
-      const hf = Number(selected.hFOV_deg || 64);
-      const vf = Number(selected.vFOV_deg || 40);
-      if (Math.abs(hf - vf) > 1e-6) return hf >= vf;
-      return deriveCutoutAspectFromFov(selected) >= 1;
-    })();
-    let aw = rw;
-    let ah = rh;
-    if ((aw >= ah) !== currentLandscape) [aw, ah] = [ah, aw];
-    const ratio = aw / ah;
+    if (!selected || selected.locked === true) return false;
+    const pair = parseCutoutAspectPair(w, h);
+    if (!pair) return false;
+    const ratio = pair.ratio;
     if (!applyGateAspectAtCurrentScale(selected, ratio)) {
       const vf = clamp(Number(selected.vFOV_deg || 40), 1, 179);
       selected.vFOV_deg = vf;
       selected.hFOV_deg = deriveHorizontalFovDeg(vf, ratio);
     }
-    selected.aspect_id = `${Math.round(aw)}:${Math.round(ah)}`;
+    selected.aspect_id = pair.label;
     return true;
   }
 
@@ -7504,7 +7363,7 @@ async function showEditor(node, type, options = {}) {
   // narrow the horizontal one. The gate keeps filling the height, and the ERP
   // behind it does not move.
   function rotateCutoutAspect90(selected) {
-    if (!selected) return;
+    if (!selected || selected.locked === true) return;
     const storedAspect = String(selected.aspect_id || "").trim();
     const camera = getCutoutCameraParams(selected);
     const aspect = camera.tanHalfX / Math.max(1e-12, camera.tanHalfY);
@@ -7536,6 +7395,7 @@ async function showEditor(node, type, options = {}) {
     const selectedItems = getSelectedItems();
     const selected = getSelected();
     if (!selected || selectedItems.length === 0) return;
+    if (selectedItems.some((item) => isItemLocked(item))) return;
     normalizeDisplayZIndices();
     const ordered = getDisplayListObjects();
     const selectedKeys = new Set(selectedItems.map((item) => {
@@ -7573,6 +7433,7 @@ async function showEditor(node, type, options = {}) {
     const selectedItems = getSelectedItems();
     const selected = getSelected();
     if (!selected || selectedItems.length === 0) return;
+    if (selectedItems.some((item) => isItemLocked(item))) return;
     normalizeDisplayZIndices();
     const ordered = getDisplayListObjects();
     const selectedKeys = new Set(selectedItems.map((item) => {
@@ -7829,11 +7690,11 @@ async function showEditor(node, type, options = {}) {
     };
   }
 
-  function zoomFrameViewAt(anchor, factor) {
+  function zoomFrameViewAt(anchor, direction) {
     const shot = getActiveCutoutShot();
-    if (!shot) return false;
-    const zoomingOut = Number(factor || 1) < 1;
-    const next = scaleCutoutFovPair(shot, 1 / Number(factor || 1));
+    if (!shot || shot.locked === true) return false;
+    const zoomingOut = Number(direction) > 0;
+    const next = stepCutoutFovPairByWheel(shot, direction);
     if (!next) return false;
     // The gate keeps its screen size on its own: scaling both tangents by k
     // scales the aspect fit by 1/k, so no presentation compensation is needed.
@@ -8726,8 +8587,9 @@ async function showEditor(node, type, options = {}) {
     return null;
   }
 
-  function handleHit(geom, p) {
+  function handleHit(geom, p, item = null) {
     if (!geom || !geom.visible) return { kind: "none", cursor: editor.mode === "pano" ? "grab" : "default" };
+    if (isStickerItem(item)) return hitStickerSelectionAffordance(geom, p);
     if (geom.kind === "strokeGroup") {
       const cornerIdx = geom.corners.findIndex((c) => dist2(c, p) <= 11 * 11);
       if (cornerIdx >= 0) {
@@ -8843,7 +8705,7 @@ async function showEditor(node, type, options = {}) {
     const selected = getSelected();
     const geom = selected ? objectGeom(selected) : null;
     const selectedLocked = selected ? isItemLocked(selected) : false;
-    const h = selectedLocked ? { kind: "none", cursor: "default" } : handleHit(geom, p);
+    const h = selectedLocked ? { kind: "none", cursor: "default" } : handleHit(geom, p, selected);
     if (!selectedLocked && h.kind !== "none") {
       setCanvasCursor(h.cursor);
       return;
@@ -8878,6 +8740,7 @@ async function showEditor(node, type, options = {}) {
       selectedKind,
       geom: selectedItems.length > 1 ? getMultiSelectionGeom(selectedItems) : objectGeom(selected),
       allLocked: areAllSelectedItemsLocked(selectedItems),
+      anyLocked: selectedItems.some((item) => isItemLocked(item)),
       selectedLocked: isItemLocked(selected),
       activeAspect: getCutoutAspectLabel(selected),
       cutoutAspectOpen: editor.cutoutAspectOpen,
@@ -9042,6 +8905,27 @@ async function showEditor(node, type, options = {}) {
     requestDraw({ localOnly: true });
   }
 
+  function applySharedRollInteractionPoint(interaction, point, event = {}) {
+    if (interaction?.kind !== "roll_frame" || !interaction.shot || !interaction.rollGesture) return;
+    const result = updateCutoutRollGesture(interaction.rollGesture, point, event);
+    if (!result) return;
+    interaction.rollGesture = result.gesture;
+    interaction.center = result.gesture.center;
+    interaction.lastAngle = result.gesture.lastAngle;
+    interaction.accumulatedRad = result.gesture.accumulatedRad;
+    interaction.shot.roll_deg = result.rollDeg;
+    interaction.changed = interaction.changed || Math.abs(result.gesture.accumulatedRad) > 1e-9;
+    const rollParam = (uiState.sidePanel?.params || []).find((param) => param.key === "roll_deg");
+    if (rollParam) {
+      rollParam.value = result.rollDeg;
+      rollParam.displayValue = formatParamValue(result.rollDeg);
+      rollParam.fillPct = ((result.rollDeg + 180) / 360) * 100;
+    }
+    syncFrameRollKnob();
+    syncFrameRollTooltip(interaction);
+    requestDraw({ localOnly: true });
+  }
+
   const frameRollAngleForEvent = (event, center) => {
     const point = screenPos(event);
     return Math.atan2(point.y - center.y, point.x - center.x);
@@ -9068,7 +8952,7 @@ async function showEditor(node, type, options = {}) {
   frameRollKnobEl?.addEventListener("pointerdown", (event) => {
     if (event.button !== 0 || readOnly || editor.mode !== "frame") return;
     const shot = getActiveCutoutShot();
-    if (!shot) return;
+    if (!shot || shot.locked === true) return;
     const rect = getFrameViewRect(shot);
     if (!rect) return;
     const center = { x: rect.x + rect.w * 0.5, y: rect.y + rect.h * 0.5 };
@@ -9113,7 +8997,7 @@ async function showEditor(node, type, options = {}) {
   });
   frameRollKnobEl?.addEventListener("dblclick", (event) => {
     const shot = editor.mode === "frame" && !readOnly ? getActiveCutoutShot() : null;
-    if (!shot || Math.abs(Number(shot.roll_deg ?? shot.rot_deg ?? 0)) <= 1e-9) return;
+    if (!shot || shot.locked === true || Math.abs(Number(shot.roll_deg ?? shot.rot_deg ?? 0)) <= 1e-9) return;
     shot.roll_deg = 0;
     pushHistory();
     commitAndRefreshNode();
@@ -9134,7 +9018,7 @@ async function showEditor(node, type, options = {}) {
       e.preventDefault();
       if (editor.mode === "frame") {
         const shot = getActiveCutoutShot();
-        if (!shot || readOnly) return;
+        if (!shot || readOnly || shot.locked === true) return;
         editor.interaction = {
           kind: "pan_frame",
           shot,
@@ -9155,16 +9039,30 @@ async function showEditor(node, type, options = {}) {
       return;
     }
     if (e.button !== 0) return;
-    if (editor.mode === "frame" && e.altKey && !readOnly) {
+    if (editor.mode === "frame" && (e.altKey || e.shiftKey) && !readOnly) {
       const shot = getActiveCutoutShot();
       const rect = getFrameViewRect(shot);
-      if (!shot || !rect) return;
-      const center = { x: rect.x + rect.w * 0.5, y: rect.y + rect.h * 0.5 };
-      const startAngle = Math.atan2(p.y - center.y, p.x - center.x);
+      if (!shot || shot.locked === true || !rect) return;
+      const rollGesture = beginCutoutRollGesture({
+        frame: rect,
+        point: p,
+        startRollDeg: Number(shot.roll_deg ?? shot.rot_deg ?? 0),
+        shiftKey: e.shiftKey,
+        altKey: e.altKey,
+        allowAlt: true,
+      });
+      if (!rollGesture) return;
       editor.interaction = {
-        kind: "roll_frame", shot, center, lastAngle: startAngle, accumulatedRad: 0,
+        kind: "roll_frame",
+        shot,
+        center: rollGesture.center,
+        lastAngle: rollGesture.lastAngle,
+        accumulatedRad: rollGesture.accumulatedRad,
+        rollGesture,
         start: { roll_deg: Number(shot.roll_deg ?? shot.rot_deg ?? 0) },
-        changed: false, altStarted: true,
+        changed: false,
+        altStarted: rollGesture.source === "alt",
+        source: rollGesture.source,
       };
       canvas.setPointerCapture(e.pointerId);
       e.preventDefault();
@@ -9174,7 +9072,7 @@ async function showEditor(node, type, options = {}) {
     }
     if (editor.mode === "frame" && editor.primaryTool === "cursor") {
       const shot = getActiveCutoutShot();
-      if (!shot || readOnly) return;
+      if (!shot || readOnly || shot.locked === true) return;
       editor.interaction = {
         kind: "pan_frame", shot, last: p,
         start: { yaw_deg: Number(shot.yaw_deg || 0), pitch_deg: Number(shot.pitch_deg || 0) },
@@ -9303,7 +9201,7 @@ async function showEditor(node, type, options = {}) {
         return;
       }
     } else if (selected && selGeom?.visible) {
-      const h = isItemLocked(selected) ? { kind: "none" } : handleHit(selGeom, p);
+      const h = isItemLocked(selected) ? { kind: "none" } : handleHit(selGeom, p, selected);
       if (h.kind === "scale") {
         editor.interaction = isStrokeGroupItem(selected)
           ? {
@@ -9567,34 +9465,17 @@ async function showEditor(node, type, options = {}) {
     if (it.kind === "pan_frame") {
       const layout = getFrameViewLayout(it.shot);
       if (!layout || !it.shot) return;
-      const invertX = state.ui_settings?.invert_view_x ? -1 : 1;
-      const invertY = state.ui_settings?.invert_view_y ? -1 : 1;
-      const dx = (p.x - it.last.x) * invertX;
-      const dy = (p.y - it.last.y) * invertY;
-      const focal = Math.max(1, Number(layout.focalPx || 1));
-      // Screen delta -> film-plane tangent delta, then undo roll so the drag is
-      // expressed in the camera's unrolled axes. Without this a rolled shot
-      // rotates along the wrong screen direction.
-      const rollRad = Number(it.shot.roll_deg ?? it.shot.rot_deg ?? 0) * DEG2RAD;
-      const cosRoll = Math.cos(rollRad);
-      const sinRoll = Math.sin(rollRad);
-      const tanX = dx / focal;
-      const tanY = -dy / focal;
-      const unrolledX = tanX * cosRoll - tanY * sinRoll;
-      const unrolledY = tanX * sinRoll + tanY * cosRoll;
-      // Yaw is measured around world up, so a horizontal move covers more yaw
-      // the further the camera is pitched. Floor the divisor to keep the drag
-      // usable near the poles.
-      const pitchRad = Number(it.shot.pitch_deg || 0) * DEG2RAD;
-      const cosPitch = Math.max(0.25, Math.abs(Math.cos(pitchRad)));
-      it.shot.yaw_deg = wrapYaw(
-        Number(it.shot.yaw_deg || 0) - (Math.atan(unrolledX) / cosPitch) * RAD2DEG,
-      );
-      it.shot.pitch_deg = clamp(
-        Number(it.shot.pitch_deg || 0) - Math.atan(unrolledY) * RAD2DEG,
-        -90,
-        90,
-      );
+      const dx = p.x - it.last.x;
+      const dy = p.y - it.last.y;
+      const nextShot = panCutoutShotByScreenDelta(it.shot, {
+        dx,
+        dy,
+        focalPx: layout.focalPx,
+        invertX: state.ui_settings?.invert_view_x === true,
+        invertY: state.ui_settings?.invert_view_y === true,
+      });
+      it.shot.yaw_deg = nextShot.yaw_deg;
+      it.shot.pitch_deg = nextShot.pitch_deg;
       it.changed = it.changed || Math.abs(dx) > 0 || Math.abs(dy) > 0;
       it.last = p;
       requestDraw({ localOnly: true });
@@ -9603,8 +9484,7 @@ async function showEditor(node, type, options = {}) {
 
     if (it.kind === "roll_frame") {
       if (it.source === "knob") return;
-      const angle = Math.atan2(p.y - it.center.y, p.x - it.center.x);
-      applyRollInteractionAngle(it, angle, e);
+      applySharedRollInteractionPoint(it, p, e);
       return;
     }
 
@@ -10004,8 +9884,8 @@ async function showEditor(node, type, options = {}) {
   canvas.onwheel = (e) => {
     if (editor.mode === "frame") {
       const p = screenPos(e);
-      const factor = e.deltaY < 0 ? 1.1 : (1 / 1.1);
-      if (zoomFrameViewAt(p, factor)) requestDraw({ localOnly: true });
+      const direction = readWheelDirection(e);
+      if (direction && zoomFrameViewAt(p, direction)) requestDraw({ localOnly: true });
       e.preventDefault();
       return;
     }
@@ -10027,7 +9907,7 @@ async function showEditor(node, type, options = {}) {
     dragCue.depth = 0;
     setDropCue(false);
     const files = Array.from(e.dataTransfer?.files || []);
-    const file = files.find((f) => isImageFile(f));
+    const file = files.find((f) => isStickerImageFile(f));
     if (!file) return;
     void addImageStickerFromFile(file);
   };
@@ -10071,7 +9951,7 @@ async function showEditor(node, type, options = {}) {
     const frameInspectorShot = type === "cutout" && editor.mode === "frame" ? getActiveCutoutShot() : null;
     const selected = frameInspectorShot || getSelected();
     const selectedKind = frameInspectorShot ? "shot" : getSelectedKind();
-    if (!selected || selectedKind === "stroke") return;
+    if (!selected || selectedKind === "stroke" || isItemLocked(selected)) return;
     const param = (uiState.sidePanel?.params || []).find((item) => item.key === key);
     if (!param || param.enabled === false) return;
     let out = Number(rawValue);
@@ -10419,8 +10299,21 @@ async function showEditor(node, type, options = {}) {
       }
       if (action === "frame-aspect-set") {
         const shot = editor.mode === "frame" ? getActiveCutoutShot() : null;
-        if (!shot) return;
+        if (!shot || shot.locked === true) return;
         applyCutoutAspect(shot, String(actionTarget.getAttribute("data-aspect") || "1:1"));
+        uiState.frameRail.aspectOpen = false;
+        syncSidePanelControls();
+        pushHistory();
+        commitAndRefreshNode();
+        syncViewToggleState();
+        requestDraw();
+        return;
+      }
+      if (action === "frame-aspect-custom") {
+        const shot = editor.mode === "frame" ? getActiveCutoutShot() : null;
+        const width = actionTarget.getAttribute("data-custom-width");
+        const height = actionTarget.getAttribute("data-custom-height");
+        if (!shot || !applyCutoutAspectCustom(shot, width, height)) return;
         uiState.frameRail.aspectOpen = false;
         syncSidePanelControls();
         pushHistory();
@@ -10431,7 +10324,7 @@ async function showEditor(node, type, options = {}) {
       }
       if (action === "frame-rotate-90") {
         const shot = editor.mode === "frame" ? getActiveCutoutShot() : null;
-        if (!shot) return;
+        if (!shot || shot.locked === true) return;
         rotateCutoutAspect90(shot);
         uiState.frameRail.aspectOpen = false;
         syncSidePanelControls();
@@ -10801,24 +10694,25 @@ async function showEditor(node, type, options = {}) {
   let modalOnExecuted = null;
   let modalOnConnectionsChange = null;
   let modalExternalStickerSync = null;
+  let unregisterModalExternalStickerSync = () => {};
   if (!readOnly && type === "stickers") {
     modalExternalStickerSync = (reason = "sync") => {
       reconcileExternalStickerFromInputs(reason);
     };
-    node.__panoExternalStickerSync = modalExternalStickerSync;
+    unregisterModalExternalStickerSync = registerExternalStickerSync(node, modalExternalStickerSync);
     modalOnExecuted = function onPanoEditorExecuted(...args) {
       if (typeof modalPrevOnExecuted === "function") {
         modalPrevOnExecuted.apply(this, args);
       }
       invalidateMediaUiImage(imageCache, EXTERNAL_STICKER_PREVIEW_KEY);
-      this.__panoExternalStickerSync?.("executed");
+      runExternalStickerSync(this, "executed");
     };
     node.onExecuted = modalOnExecuted;
     modalOnConnectionsChange = function onPanoEditorConnectionsChange(...args) {
       if (typeof modalPrevOnConnectionsChange === "function") {
         modalPrevOnConnectionsChange.apply(this, args);
       }
-      this.__panoExternalStickerSync?.("connections");
+      runExternalStickerSync(this, "connections");
     };
     node.onConnectionsChange = modalOnConnectionsChange;
   }
@@ -10868,7 +10762,7 @@ async function showEditor(node, type, options = {}) {
       if (!readOnly && type === "stickers") {
         if (node.onExecuted === modalOnExecuted) node.onExecuted = modalPrevOnExecuted;
         if (node.onConnectionsChange === modalOnConnectionsChange) node.onConnectionsChange = modalPrevOnConnectionsChange;
-        if (node.__panoExternalStickerSync === modalExternalStickerSync) node.__panoExternalStickerSync = null;
+        unregisterModalExternalStickerSync();
       }
       vueApp.unmount();
       mountHost.remove();

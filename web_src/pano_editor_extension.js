@@ -1,10 +1,27 @@
-import { normalizeCoverageValue } from "./pano_editor_state.js";
+import { normalizeCoverageValue, parsePanoEditorState } from "./pano_editor_state.js";
+import { applyCutoutNodeSurfaceAction } from "./pano_cutout_node_surface.js";
 import { isPanoramaPreviewNodeName } from "./pano_preview_identity.js";
 
 const STATE_WIDGET = "state_json";
 
 function getWidget(node, name) {
   return node?.widgets?.find((widget) => widget?.name === name) || null;
+}
+
+function initializeNewCutoutFrame(node) {
+  const stateWidget = getWidget(node, STATE_WIDGET);
+  if (!stateWidget) return false;
+  const raw = String(stateWidget.value ?? "").trim();
+  if (raw && raw !== "{}") return false;
+  const state = parsePanoEditorState(raw, {
+    coverage: getWidget(node, "coverage")?.value,
+  });
+  const result = applyCutoutNodeSurfaceAction(state, { type: "add-frame" });
+  if (!result.changed) return false;
+  const text = JSON.stringify(result.state);
+  stateWidget.value = text;
+  stateWidget.callback?.(text);
+  return true;
 }
 
 function syncCoverageWidgetRedraw(node, app) {
@@ -82,6 +99,7 @@ function hideWidget(node, widgetName) {
     if (!(name === widgetName || name.trim() === widgetName || name.toLowerCase().includes(String(widgetName).toLowerCase()))) return;
     if (widget.__panoHidden) return;
     widget.__panoHidden = true;
+    widget.__panoComputeSizeBeforeHide = widget.computeSize;
     widget.computeSize = () => [0, 0];
     widget.type = "hidden";
     widget.hidden = true;
@@ -100,9 +118,17 @@ function ensureActionButtonWidget(node, buttonText, callback) {
     widget.hidden = false;
     widget.__panoHidden = false;
     widget.type = "button";
+    widget.options = { ...(widget.options || {}), hidden: false };
+    if (typeof widget.__panoComputeSizeBeforeHide === "function") {
+      widget.computeSize = widget.__panoComputeSizeBeforeHide;
+    }
+    delete widget.__panoComputeSizeBeforeHide;
     if (widget.element?.style) widget.element.style.display = "";
     if (widget.parentEl?.style) widget.parentEl.style.display = "";
-    if (typeof widget.computeSize !== "function" || widget.computeSize() == null || widget.hidden) {
+    const computedSize = typeof widget.computeSize === "function" ? widget.computeSize() : null;
+    if (!Array.isArray(computedSize)
+      || Number(computedSize[0] || 0) <= 0
+      || Number(computedSize[1] || 0) <= 0) {
       widget.computeSize = () => [Math.max(120, Number(node?.size?.[0] || 0) - 20), 30];
     }
     return widget;
@@ -112,12 +138,16 @@ function ensureActionButtonWidget(node, buttonText, callback) {
   return widget;
 }
 
-async function waitForPendingStickerUploads(node) {
+async function waitForPendingStickerUploads(node, { tolerateOperationFailure = false } = {}) {
   const pending = node?.__panoPendingStickerUploads;
   if (!(pending instanceof Map)) return;
   while (pending.size > 0) {
     const entries = Array.from(pending.entries());
-    await Promise.all(entries.map(([, promise]) => promise));
+    if (tolerateOperationFailure) {
+      await Promise.allSettled(entries.map(([, promise]) => promise));
+    } else {
+      await Promise.all(entries.map(([, promise]) => promise));
+    }
     entries.forEach(([assetId, promise]) => {
       if (pending.get(assetId) === promise) pending.delete(assetId);
     });
@@ -151,6 +181,15 @@ export function queuePendingStickerOperation(node, operationId, operation) {
   return pending;
 }
 
+export async function flushPanoStateProducers(node, options = {}) {
+  await waitForPendingStickerUploads(node, options);
+  const flushers = node?.__panoStateFlushers instanceof Set
+    ? Array.from(node.__panoStateFlushers)
+    : [];
+  for (const flush of flushers) await flush();
+  await node?.__panoFlushStateBeforeQueue?.();
+}
+
 function installStateQueueBarrier(node, stateWidget) {
   if (!stateWidget || stateWidget.__panoQueueBarrierInstalled) return;
   stateWidget.__panoQueueBarrierInstalled = true;
@@ -158,8 +197,7 @@ function installStateQueueBarrier(node, stateWidget) {
     ? stateWidget.serializeValue
     : null;
   stateWidget.serializeValue = async function (...args) {
-    await waitForPendingStickerUploads(node);
-    await node.__panoFlushStateBeforeQueue?.();
+    await flushPanoStateProducers(node);
     return previousSerializeValue
       ? previousSerializeValue.apply(this, args)
       : this.value;
@@ -219,6 +257,7 @@ function installEditorButton(nodeType, {
           buttonText,
           onOpen: () => openEditor(node, "stickers"),
         });
+        if (node.__panoStickersNodeSurface) hideWidget(node, buttonText);
         if (!Array.isArray(node.size) || node.size[0] < 10 || node.size[1] < 10) node.size = [360, 260];
       }
       node.__panoPreviewAttached = true;
@@ -231,6 +270,7 @@ function installEditorButton(nodeType, {
       buttonText,
       onOpen: () => openEditor(node, "cutout"),
     });
+    if (node.__panoCutoutNodeSurface) hideWidget(node, buttonText);
     if (!Array.isArray(node.size) || node.size[0] < 10 || node.size[1] < 10) node.size = [360, 260];
     node.__panoPreviewAttached = true;
     node.__panoPreviewMountKey = mountKey;
@@ -240,6 +280,9 @@ function installEditorButton(nodeType, {
     const previous = nodeType.prototype[hook];
     nodeType.prototype[hook] = function () {
       const result = previous ? previous.apply(this, arguments) : undefined;
+      if (hook === "onNodeCreated" && matchType === "PanoramaCutout") {
+        initializeNewCutoutFrame(this);
+      }
       if (hook === "onConfigure" && matchType === "PanoramaStickers" && this.widgets) {
         migratePanoramaStickersWidgetOrder(this);
       }
@@ -284,6 +327,7 @@ function installStandalonePreviewInstance(node, {
       imageInputName: "erp_image",
       onOpen: openPreview,
     });
+    if (node.__panoPreviewNodeSurface) hideWidget(node, "Open Preview");
     node.__panoStandaloneInstallDone = true;
     node.__panoStandaloneInstallProbeActive = false;
   };

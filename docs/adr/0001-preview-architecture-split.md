@@ -88,3 +88,51 @@ The stable implementation that finally held was stricter than the original fallb
 
 The original “single public node + internal fallback” direction was correct at the public API level, but too loose operationally.
 What actually stabilized the feature was not more fallback; it was stricter separation of responsibilities.
+
+## 2026-08-27 Amendment
+
+`PanoramaCutout` には、widget-only のeditor導線ルールに対する例外を1つ設ける。
+
+1. Cutoutはshared runtimeと既存のDOM preview mountを維持する。
+2. Vue node surfaceは、そのpreview上にframe shape controlと`Full Editor` actionを配置してよい。
+   これは第二のeditorではない。詳細なcamera編集は引き続き既存modalが担当する。
+3. 標準LiteGraph editor buttonはmount失敗時のfallbackとして残す。Vue surfaceのmount成功後に
+   限って非表示にし、editorへの導線を失わないようにする。
+4. `PanoramaStickers`と`PanoramaPreview`はwidget-onlyを維持する。このamendmentは、それらの
+   preview surfaceへのeditor action埋め込みを許可しない。
+
+interactionとstateの契約は
+[`docs/cutout-node-frame-surface-spec.md`](../cutout-node-frame-surface-spec.md)に記録する。
+
+## 2026-08-28 Amendment
+
+`PanoramaPreview` のdedicated runtimeを維持したまま、Node2 DOM pathへ最小のVue surfaceを許可する。
+
+1. PreviewをCutout shared runtimeへ統合しない。image / video、interaction、lifecycle、Legacy fallbackは
+   `web_src/pano_preview_previewnode.js` が引き続き所有する。
+2. Vue surfaceはfullscreen toggle 1つだけを持つ。editor、FOV、playback、camera parameterなどの
+   actionはnode surfaceへ追加しない。
+3. fullscreen actionはDOM preview rootを直接fullscreen表示する。read-only modalを第二のnode surfaceとして
+   埋め込まない。
+4. 標準 `Open Preview` buttonはLegacyとVue mount失敗時のfallbackとして維持し、mount成功後だけ非表示にする。
+5. node id、port semantics、cameraの非永続契約を変更しない。
+
+詳細は [`docs/panorama-preview-node-surface-spec.md`](../panorama-preview-node-surface-spec.md) に記録する。
+
+## 2026-08-29 Amendment
+
+`PanoramaStickers` の未使用preview実装を互換対象から外し、Cutout / Previewと同じDOM surface構成へ置き換える。
+
+1. Node 2.0とLegacy node rendererの両方で、同じDOM widget、canvas、Vue overlayを使う。
+   renderer別に編集UIを二重実装しない。
+2. 旧Stickers previewの自動backend切替、probe、Legacy canvas描画は廃止する。
+   DOM surfaceをmountできない場合は標準 `Open Stickers Editor` widgetだけをfallbackとして残す。
+3. node surfaceは既存modalを置き換えない。画像file picker / dropによる追加と、単一stickerの選択・基本変形を担当する。
+   画像追加はmodalと同じ共有upload seamを使う。replace、paint、multi-selectionなどの高度な操作はmodalへ残す。
+4. surface内の `Full Editor` actionは、Vue mount成功後に標準buttonを隠す場合に限って許可する。
+   mount失敗時は標準buttonを表示したままにする。
+5. shared render core、camera interaction、state queue barrierを再利用する。node id、port semantics、
+   `state_json` format、backend出力を変更しない。
+6. stickerの選択affordanceとcursor判定はmodalとnode surfaceで共有し、renderer別の見た目・操作差を作らない。
+
+詳細は [`docs/panorama-stickers-node-surface-spec.md`](../panorama-stickers-node-surface-spec.md) に記録する。

@@ -4,6 +4,7 @@ import test from "node:test";
 import {
   clampFovPairToGate,
   contextHalfExtentsPx,
+  createDefaultCutoutShot,
   cutoutFilmPointToWorldDir,
   deriveHorizontalFovDeg,
   deriveCutoutAspectFromFov,
@@ -20,6 +21,7 @@ import {
   getCutoutOverscanScale,
   canvasToFilmTangent,
   scaleCutoutFovPair,
+  stepCutoutFovPairByWheel,
   shortestAngleDeltaRad,
   resolveFrameRollDeg,
   normalizeCutoutShotItem,
@@ -101,6 +103,20 @@ test("cutout shot normalization derives the canonical aspect and removes legacy 
   assert.equal(getCutoutAspectLabel({ ...normalized, aspect_id: "16:9" }), "16:9");
 });
 
+test("a newly added cutout frame starts square instead of inheriting the ERP aspect", () => {
+  const shot = createDefaultCutoutShot({
+    id: "frame_1",
+    yawDeg: 18,
+    pitchDeg: -7,
+    viewFovDeg: 100,
+  });
+
+  assert.equal(shot.id, "frame_1");
+  assert.equal(shot.aspect_id, "1:1");
+  assert.equal(shot.hFOV_deg, shot.vFOV_deg);
+  assert.equal(deriveCutoutAspectFromFov(shot), 1);
+});
+
 test("wheel scaling preserves tangent aspect and rejects an out-of-range pair atomically", () => {
   const shot = { hFOV_deg: 100, vFOV_deg: 55 };
   const before = getCutoutCameraParams(shot).aspect;
@@ -108,6 +124,21 @@ test("wheel scaling preserves tangent aspect and rejects an out-of-range pair at
   assert.ok(next);
   close(getCutoutCameraParams(next).aspect, before, 1e-12);
   assert.equal(scaleCutoutFovPair({ hFOV_deg: 179, vFOV_deg: 60 }, 2), null);
+});
+
+test("Cutout wheel step matches the shared three-degree horizontal FOV step", () => {
+  const shot = { hFOV_deg: 100, vFOV_deg: 55 };
+  const beforeAspect = getCutoutCameraParams(shot).aspect;
+  const wider = stepCutoutFovPairByWheel(shot, 1);
+  assert.ok(wider);
+  close(wider.hFOV_deg, 103);
+  close(getCutoutCameraParams(wider).aspect, beforeAspect, 1e-12);
+
+  const restored = stepCutoutFovPairByWheel(wider, -1);
+  assert.ok(restored);
+  close(restored.hFOV_deg, 100);
+  close(restored.vFOV_deg, 55, 1e-9);
+  assert.equal(stepCutoutFovPairByWheel(shot, 0), null);
 });
 
 test("wheel changes the gate while the focal scalar stays fixed", () => {
@@ -274,7 +305,7 @@ test("frame roll accumulation stays continuous across the atan2 seam", () => {
 
 test("frame roll snapping and normalization follow the interaction contract", () => {
   close(resolveFrameRollDeg(0, 14.1 * Math.PI / 180, { shiftKey: true }), 15);
-  close(resolveFrameRollDeg(0, 0.8 * Math.PI / 180), 0);
+  close(resolveFrameRollDeg(0, 0.8 * Math.PI / 180), 0.8);
   close(resolveFrameRollDeg(0, 0.8 * Math.PI / 180, { altKey: true }), 0.8);
   assert.equal(wrapRollDeg(-180), 180);
   assert.equal(wrapRollDeg(541), -179);

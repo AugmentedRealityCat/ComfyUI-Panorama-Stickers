@@ -8,6 +8,7 @@ import {
   mul,
   norm,
 } from "./pano_camera_math.js";
+import { PANO_FOV_WHEEL_STEP_DEG } from "./pano_wheel.js";
 
 export const CUTOUT_FOV_MIN_DEG = 1;
 export const CUTOUT_FOV_MAX_DEG = 179;
@@ -26,10 +27,9 @@ export function shortestAngleDeltaRad(current, previous) {
   return delta;
 }
 
-export function resolveFrameRollDeg(startRollDeg, accumulatedRad, { shiftKey = false, altKey = false } = {}) {
+export function resolveFrameRollDeg(startRollDeg, accumulatedRad, { shiftKey = false } = {}) {
   let roll = finiteOr(startRollDeg, 0) + finiteOr(accumulatedRad, 0) * RAD2DEG;
   if (shiftKey) roll = Math.round(roll / 15) * 15;
-  else if (!altKey && Math.abs(wrapRollDeg(roll)) <= 1) roll = 0;
   return wrapRollDeg(roll);
 }
 
@@ -242,6 +242,32 @@ export function normalizeCutoutShotItem(raw) {
   return next;
 }
 
+export function createDefaultCutoutShot({
+  id = "",
+  yawDeg = 0,
+  pitchDeg = 0,
+  rollDeg = 0,
+  viewFovDeg = 100,
+  frameFovDeg = null,
+} = {}) {
+  const explicitFrameFov = frameFovDeg == null || String(frameFovDeg).trim() === ""
+    ? NaN
+    : Number(frameFovDeg);
+  const fov = Number.isFinite(explicitFrameFov)
+    ? clamp(explicitFrameFov, CUTOUT_FOV_MIN_DEG, CUTOUT_FOV_MAX_DEG)
+    : clamp(Math.min(42, finiteOr(viewFovDeg, 100) * 0.42), 8, 96);
+  return normalizeCutoutShotItem({
+    id: String(id),
+    label: "Frame 1",
+    yaw_deg: finiteOr(yawDeg, 0),
+    pitch_deg: clamp(finiteOr(pitchDeg, 0), -89.9, 89.9),
+    roll_deg: wrapRollDeg(rollDeg),
+    hFOV_deg: fov,
+    vFOV_deg: fov,
+    locked: false,
+  });
+}
+
 export function getCutoutAspectLabel(item) {
   if (!item || typeof item !== "object") return "1:1";
   const stored = String(item.aspect_id || "").trim();
@@ -258,6 +284,21 @@ export function scaleCutoutFovPair(shot, scale) {
   if (nextH < CUTOUT_FOV_MIN_DEG || nextH > CUTOUT_FOV_MAX_DEG
     || nextV < CUTOUT_FOV_MIN_DEG || nextV > CUTOUT_FOV_MAX_DEG) return null;
   return { hFOV_deg: nextH, vFOV_deg: nextV };
+}
+
+export function stepCutoutFovPairByWheel(
+  shot,
+  direction,
+  stepDeg = PANO_FOV_WHEEL_STEP_DEG,
+) {
+  const sign = Math.sign(finiteOr(direction, 0));
+  const step = Math.abs(finiteOr(stepDeg, PANO_FOV_WHEEL_STEP_DEG));
+  if (!sign || !(step > 0)) return null;
+  const camera = getCutoutCameraParams(shot);
+  const nextHorizontal = camera.hFovDeg + sign * step;
+  if (nextHorizontal < CUTOUT_FOV_MIN_DEG || nextHorizontal > CUTOUT_FOV_MAX_DEG) return null;
+  const nextTanHalfX = Math.tan(nextHorizontal * DEG2RAD * 0.5);
+  return scaleCutoutFovPair(shot, nextTanHalfX / camera.tanHalfX);
 }
 
 export function cutoutFilmPointToWorldDir(shot, filmPoint) {
